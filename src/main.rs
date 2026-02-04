@@ -8,15 +8,23 @@ use calloop_wayland_source::WaylandSource;
 use wayland_client::{
     Connection, Dispatch, QueueHandle, WEnum,
     globals::{GlobalListContents, registry_queue_init},
-    protocol::{wl_keyboard, wl_registry},
+    protocol::{
+        wl_buffer, wl_compositor, wl_keyboard, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    },
 };
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2, zwp_input_method_manager_v2, zwp_input_method_v2,
 };
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use xkbcommon::xkb;
 
+mod candidate_window;
 mod neovim;
+mod text_render;
+
+use candidate_window::CandidateWindow;
 use neovim::{FromNeovim, NeovimHandle};
+use text_render::TextRenderer;
 
 fn main() -> anyhow::Result<()> {
     // Connect to Wayland display
@@ -37,6 +45,22 @@ fn main() -> anyhow::Result<()> {
     let seat: wayland_client::protocol::wl_seat::WlSeat =
         globals.bind(&qh, 1..=9, ()).expect("wl_seat not available");
 
+    // Bind compositor and shm for candidate window
+    let compositor: wl_compositor::WlCompositor = globals
+        .bind(&qh, 4..=6, ())
+        .expect("wl_compositor not available");
+
+    let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("wl_shm not available");
+
+    // Try to bind layer-shell (optional - not all compositors support it)
+    let layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1> =
+        globals.bind(&qh, 1..=4, ()).ok();
+    if layer_shell.is_some() {
+        eprintln!("Bound zwlr_layer_shell_v1");
+    } else {
+        eprintln!("Warning: zwlr_layer_shell_v1 not available, candidate window disabled");
+    }
+
     // Create xkb context
     let xkb_context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
 
@@ -56,9 +80,32 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Try to create text renderer for candidate window
+    let text_renderer = TextRenderer::new(16.0);
+    if text_renderer.is_none() {
+        eprintln!("Warning: Font not available, candidate window disabled");
+    }
+
+    // Create candidate window if all requirements are met
+    let candidate_window = if let (Some(ls), Some(renderer)) = (&layer_shell, text_renderer) {
+        match CandidateWindow::new(&compositor, ls, &shm, &qh, renderer) {
+            Some(win) => {
+                eprintln!("Candidate window created");
+                Some(win)
+            }
+            None => {
+                eprintln!("Failed to create candidate window");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Create application state
     let mut state = State {
         loop_signal: None,
+        qh: qh.clone(),
         input_method,
         keyboard_grab: None,
         xkb_context,
@@ -69,6 +116,9 @@ fn main() -> anyhow::Result<()> {
         pending_exit: false,
         preedit: String::new(),
         nvim,
+        candidate_window,
+        candidates: Vec::new(),
+        selected_candidate: 0,
     };
 
     // Set up calloop event loop
@@ -108,7 +158,9 @@ fn main() -> anyhow::Result<()> {
             state.handle_nvim_message(msg);
         }
 
-        if state.pending_exit && let Some(ref signal) = state.loop_signal {
+        if state.pending_exit
+            && let Some(ref signal) = state.loop_signal
+        {
             signal.stop();
         }
     })?;
@@ -120,6 +172,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(ref nvim) = state.nvim {
         nvim.shutdown();
     }
+    if let Some(window) = state.candidate_window.take() {
+        window.destroy();
+    }
 
     eprintln!("Goodbye!");
 
@@ -127,8 +182,9 @@ fn main() -> anyhow::Result<()> {
     std::process::exit(0);
 }
 
-struct State {
+pub struct State {
     loop_signal: Option<LoopSignal>,
+    qh: QueueHandle<State>,
     input_method: zwp_input_method_v2::ZwpInputMethodV2,
     keyboard_grab: Option<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2>,
     xkb_context: xkb::Context,
@@ -141,6 +197,10 @@ struct State {
     preedit: String,
     // Neovim backend
     nvim: Option<NeovimHandle>,
+    // Candidate window
+    candidate_window: Option<CandidateWindow>,
+    candidates: Vec<String>,
+    selected_candidate: usize,
 }
 
 impl State {
@@ -182,6 +242,39 @@ impl State {
             return;
         }
 
+        // Handle candidate selection if candidates are visible
+        if !self.candidates.is_empty() {
+            // Number keys 1-9 for direct selection
+            if keysym.raw() >= Keysym::_1.raw() && keysym.raw() <= Keysym::_9.raw() {
+                let idx = (keysym.raw() - Keysym::_1.raw()) as usize;
+                if idx < self.candidates.len() {
+                    self.select_candidate(idx);
+                    return;
+                }
+            }
+
+            // Arrow keys for navigation
+            match keysym {
+                Keysym::Up => {
+                    self.move_selection(-1);
+                    return;
+                }
+                Keysym::Down => {
+                    self.move_selection(1);
+                    return;
+                }
+                Keysym::Return | Keysym::KP_Enter => {
+                    self.select_candidate(self.selected_candidate);
+                    return;
+                }
+                Keysym::Escape => {
+                    self.hide_candidates();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Convert key to Vim notation and send to Neovim
         let vim_key = self.keysym_to_vim(keysym, &utf8);
         eprintln!("[KEY] vim_key={:?}", vim_key);
@@ -202,6 +295,49 @@ impl State {
         }
     }
 
+    fn select_candidate(&mut self, idx: usize) {
+        if idx < self.candidates.len() {
+            let selected = self.candidates[idx].clone();
+            eprintln!("[CANDIDATE] Selected: {:?}", selected);
+
+            // Commit the selected candidate
+            self.preedit.clear();
+            self.input_method.commit_string(selected);
+            self.input_method.set_preedit_string(String::new(), 0, 0);
+            self.serial += 1;
+            self.input_method.commit(self.serial);
+
+            // Hide candidates
+            self.hide_candidates();
+        }
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        if self.candidates.is_empty() {
+            return;
+        }
+
+        let new_idx = (self.selected_candidate as i32 + delta)
+            .rem_euclid(self.candidates.len() as i32) as usize;
+        self.selected_candidate = new_idx;
+        self.show_candidates();
+    }
+
+    fn show_candidates(&mut self) {
+        if let Some(ref mut window) = self.candidate_window {
+            let qh = self.qh.clone();
+            window.show(&self.candidates, self.selected_candidate, &qh);
+        }
+    }
+
+    fn hide_candidates(&mut self) {
+        self.candidates.clear();
+        self.selected_candidate = 0;
+        if let Some(ref mut window) = self.candidate_window {
+            window.hide();
+        }
+    }
+
     fn update_preedit(&mut self) {
         let cursor_pos = self.preedit.len() as i32;
         self.input_method
@@ -209,18 +345,6 @@ impl State {
         self.serial += 1;
         self.input_method.commit(self.serial);
         eprintln!("[PREEDIT] updated: {:?}", self.preedit);
-    }
-
-    fn commit_preedit(&mut self) {
-        if !self.preedit.is_empty() {
-            eprintln!("[COMMIT] preedit={:?}", self.preedit);
-            self.input_method.commit_string(self.preedit.clone());
-            self.preedit.clear();
-            // Clear preedit display
-            self.input_method.set_preedit_string(String::new(), 0, 0);
-            self.serial += 1;
-            self.input_method.commit(self.serial);
-        }
     }
 
     fn handle_nvim_message(&mut self, msg: FromNeovim) {
@@ -240,19 +364,27 @@ impl State {
                 self.input_method.set_preedit_string(String::new(), 0, 0);
                 self.serial += 1;
                 self.input_method.commit(self.serial);
+                // Hide candidates on commit
+                self.hide_candidates();
             }
             FromNeovim::DeleteSurrounding(before, after) => {
-                eprintln!("[NVIM] DeleteSurrounding: before={}, after={}", before, after);
+                eprintln!(
+                    "[NVIM] DeleteSurrounding: before={}, after={}",
+                    before, after
+                );
                 self.input_method.delete_surrounding_text(before, after);
                 self.serial += 1;
                 self.input_method.commit(self.serial);
             }
             FromNeovim::Candidates(candidates) => {
                 eprintln!("[NVIM] Candidates: {:?}", candidates);
-                // TODO: Display candidate window (Phase 6)
-            }
-            FromNeovim::Error(e) => {
-                eprintln!("[NVIM] Error: {}", e);
+                if candidates.is_empty() {
+                    self.hide_candidates();
+                } else {
+                    self.candidates = candidates;
+                    self.selected_candidate = 0;
+                    self.show_candidates();
+                }
             }
         }
     }
@@ -261,20 +393,6 @@ impl State {
         if let Some(ref nvim) = self.nvim {
             nvim.send_key(key);
         }
-    }
-
-    fn process_nvim_messages(&mut self) -> bool {
-        let messages: Vec<_> = self
-            .nvim
-            .as_ref()
-            .map(|nvim| std::iter::from_fn(|| nvim.try_recv()).collect())
-            .unwrap_or_default();
-
-        let has_messages = !messages.is_empty();
-        for msg in messages {
-            self.handle_nvim_message(msg);
-        }
-        has_messages
     }
 
     fn wait_for_nvim_response(&mut self) {
@@ -348,6 +466,10 @@ impl State {
     }
 }
 
+// ============================================================================
+// Dispatch implementations for Wayland protocols
+// ============================================================================
+
 // Dispatch for registry (required by registry_queue_init)
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     fn event(
@@ -373,6 +495,134 @@ impl Dispatch<wayland_client::protocol::wl_seat::WlSeat, ()> for State {
         _qh: &QueueHandle<Self>,
     ) {
         // Seat events (capabilities, name) - we don't need to handle these
+    }
+}
+
+// Dispatch for compositor
+impl Dispatch<wl_compositor::WlCompositor, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _compositor: &wl_compositor::WlCompositor,
+        _event: wl_compositor::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // Compositor has no events
+    }
+}
+
+// Dispatch for shm
+impl Dispatch<wl_shm::WlShm, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _shm: &wl_shm::WlShm,
+        event: wl_shm::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_shm::Event::Format { format } = event {
+            eprintln!("[SHM] Format available: {:?}", format);
+        }
+    }
+}
+
+// Dispatch for shm pool
+impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _pool: &wl_shm_pool::WlShmPool,
+        _event: wl_shm_pool::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // Pool has no events
+    }
+}
+
+// Dispatch for surface
+impl Dispatch<wl_surface::WlSurface, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _surface: &wl_surface::WlSurface,
+        event: wl_surface::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_surface::Event::Enter { .. } => {
+                eprintln!("[SURFACE] Entered output");
+            }
+            wl_surface::Event::Leave { .. } => {
+                eprintln!("[SURFACE] Left output");
+            }
+            _ => {}
+        }
+    }
+}
+
+// Dispatch for buffer (with buffer index as user data)
+impl Dispatch<wl_buffer::WlBuffer, usize> for State {
+    fn event(
+        state: &mut Self,
+        _buffer: &wl_buffer::WlBuffer,
+        event: wl_buffer::Event,
+        data: &usize,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            eprintln!("[BUFFER] Released: {}", data);
+            if let Some(ref mut window) = state.candidate_window {
+                window.buffer_released(*data);
+            }
+        }
+    }
+}
+
+// Dispatch for layer shell
+impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _layer_shell: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
+        _event: zwlr_layer_shell_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // Layer shell has no events
+    }
+}
+
+// Dispatch for layer surface
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                eprintln!("[LAYER] Configure: serial={}, {}x{}", serial, width, height);
+                if let Some(ref mut window) = state.candidate_window {
+                    window.configure(serial, width, height, qh);
+                }
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                eprintln!("[LAYER] Closed");
+            }
+            _ => {}
+        }
     }
 }
 
@@ -415,8 +665,8 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
             zwp_input_method_v2::Event::Deactivate => {
                 eprintln!("IME deactivated");
                 state.active = false;
-                // Don't release keyboard grab here - causes issues when switching windows
-                // Grab will be released on exit
+                // Hide candidates when deactivated
+                state.hide_candidates();
             }
             zwp_input_method_v2::Event::SurroundingText { .. } => {
                 // Noisy, don't print

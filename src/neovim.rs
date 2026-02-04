@@ -2,7 +2,7 @@
 //!
 //! Runs Neovim in embedded mode with vim-skkeleton for Japanese input.
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::thread;
 use std::time::Duration;
 
@@ -33,8 +33,6 @@ pub enum FromNeovim {
     Candidates(Vec<String>),
     /// Neovim is ready
     Ready,
-    /// Error occurred
-    Error(String),
 }
 
 /// Handle to communicate with Neovim backend
@@ -140,7 +138,10 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
 
     // Check if user config was loaded
     let rtp = nvim.command_output("echo &runtimepath").await?;
-    eprintln!("[NVIM] runtimepath: {}", rtp.trim().chars().take(100).collect::<String>());
+    eprintln!(
+        "[NVIM] runtimepath: {}",
+        rtp.trim().chars().take(100).collect::<String>()
+    );
 
     // Check if skkeleton is available
     let result = nvim
@@ -154,8 +155,48 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     eprintln!("[NVIM] Loaded scripts: {} files", script_count);
 
     // Verify <Plug>(skkeleton-toggle) mapping exists
-    let mapping = nvim.command_output("imap <Plug>(skkeleton-toggle)").await.unwrap_or_default();
-    eprintln!("[NVIM] skkeleton-toggle mapping: {}", mapping.trim().chars().take(60).collect::<String>());
+    let mapping = nvim
+        .command_output("imap <Plug>(skkeleton-toggle)")
+        .await
+        .unwrap_or_default();
+    eprintln!(
+        "[NVIM] skkeleton-toggle mapping: {}",
+        mapping.trim().chars().take(60).collect::<String>()
+    );
+
+    // List skkeleton functions to find candidate API
+    let funcs = nvim
+        .command_output("filter /skkeleton/ function")
+        .await
+        .unwrap_or_default();
+    eprintln!(
+        "[NVIM] skkeleton functions: {}",
+        funcs.lines().take(10).collect::<Vec<_>>().join(", ")
+    );
+
+    // Set up autocmd to trigger nvim-cmp completion when skkeleton enters henkan mode
+    nvim.command(
+        r#"
+        augroup IMESkkeletonCandidates
+            autocmd!
+            autocmd User skkeleton-handled lua << EOF
+                vim.defer_fn(function()
+                    local status = vim.fn['skkeleton#vim_status']()
+                    vim.g.ime_skk_status = status
+                    if status == 'henkan' then
+                        -- Trigger nvim-cmp completion
+                        local ok, cmp = pcall(require, 'cmp')
+                        if ok and cmp then
+                            cmp.complete()
+                        end
+                    end
+                end, 5)
+EOF
+        augroup END
+    "#,
+    )
+    .await
+    .ok();
 
     eprintln!("[NVIM] Initialization complete");
     Ok(())
@@ -168,7 +209,6 @@ async fn handle_key(
 ) -> anyhow::Result<()> {
     // Ensure we're in insert mode
     nvim.command("startinsert").await?;
-
 
     // Handle Enter key specially - commit the current line
     if key == "<CR>" {
@@ -209,7 +249,8 @@ async fn handle_key(
         // Clear any existing text using Ctrl+U (works in insert mode)
         nvim.command("call feedkeys(\"\\<C-u>\", 'n')").await?;
         // Use 'm' flag to allow remapping (needed for <Plug> to work)
-        nvim.command("call feedkeys(\"\\<Plug>(skkeleton-toggle)\", 'm')").await?;
+        nvim.command("call feedkeys(\"\\<Plug>(skkeleton-toggle)\", 'm')")
+            .await?;
         // Small delay to let skkeleton process
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let result = nvim.command_output("echo skkeleton#is_enabled()").await?;
@@ -239,16 +280,124 @@ async fn handle_key(
     let line = line.trim().to_string();
 
     eprintln!("[NVIM] preedit: {:?}", line);
-    let _ = tx.send(FromNeovim::Preedit(line));
+    let _ = tx.send(FromNeovim::Preedit(line.clone()));
+
+    // Check for SKKeleton candidates first, then fall back to nvim-cmp
+    if let Ok(candidates) = get_skkeleton_candidates(nvim, &line).await
+        && !candidates.is_empty()
+    {
+        let _ = tx.send(FromNeovim::Candidates(candidates));
+        return Ok(());
+    }
 
     // Check for completion candidates (nvim-cmp)
-    if let Ok(candidates) = get_completion_candidates(nvim).await {
-        if !candidates.is_empty() {
-            let _ = tx.send(FromNeovim::Candidates(candidates));
-        }
+    if let Ok(candidates) = get_completion_candidates(nvim).await
+        && !candidates.is_empty()
+    {
+        let _ = tx.send(FromNeovim::Candidates(candidates));
+    } else {
+        // Clear candidates if none available
+        let _ = tx.send(FromNeovim::Candidates(vec![]));
     }
 
     Ok(())
+}
+
+/// Query nvim-cmp for completion candidates using its Lua API
+async fn get_skkeleton_candidates(
+    nvim: &Neovim<NvimWriter>,
+    _preedit: &str,
+) -> anyhow::Result<Vec<String>> {
+    // Use nvim-cmp's Lua API directly - it has its own window system
+    let result = nvim
+        .command_output(
+            r#"lua << EOF
+            local ok, cmp = pcall(require, 'cmp')
+            if not ok then
+                print('[]')
+                return
+            end
+
+            -- Check if cmp is visible
+            local visible = cmp.visible()
+            if not visible then
+                print('[]')
+                return
+            end
+
+            -- Get entries from cmp
+            local entries = cmp.get_entries()
+            if not entries or #entries == 0 then
+                print('[]')
+                return
+            end
+
+            -- Extract words
+            local words = {}
+            for i, entry in ipairs(entries) do
+                if i > 9 then break end
+                local word = entry:get_word()
+                if word and word ~= '' then
+                    table.insert(words, word)
+                end
+            end
+
+            print(vim.json.encode(words))
+EOF"#,
+        )
+        .await
+        .unwrap_or_default();
+
+    let result = result.trim();
+
+    if result.starts_with('[') && result != "[]" {
+        let candidates = parse_json_string_array(result);
+        if !candidates.is_empty() {
+            return Ok(candidates);
+        }
+    }
+
+    Ok(vec![])
+}
+
+/// Parse a simple JSON string array like ["a", "b", "c"]
+fn parse_json_string_array(json: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let json = json.trim();
+
+    if !json.starts_with('[') {
+        return items;
+    }
+
+    let mut in_string = false;
+    let mut escape = false;
+    let mut current = String::new();
+
+    for c in json.chars() {
+        if escape {
+            current.push(c);
+            escape = false;
+            continue;
+        }
+
+        match c {
+            '\\' => escape = true,
+            '"' => {
+                if in_string {
+                    if !current.is_empty() {
+                        items.push(current.clone());
+                    }
+                    current.clear();
+                }
+                in_string = !in_string;
+            }
+            _ if in_string => current.push(c),
+            _ => {}
+        }
+    }
+
+    items.truncate(9);
+    items
 }
 
 /// Query nvim-cmp for completion candidates
