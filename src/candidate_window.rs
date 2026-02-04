@@ -1,10 +1,15 @@
-//! Candidate window using Wayland layer-shell protocol
+//! Candidate window using Wayland input-method popup surface protocol
+//!
+//! Uses zwp_input_popup_surface_v2 which is automatically positioned near
+//! the text cursor by the compositor.
 
 use memmap2::MmapMut;
 use std::os::fd::AsFd;
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{wl_buffer, wl_shm, wl_shm_pool, wl_surface};
-use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
+use wayland_protocols_misc::zwp_input_method_v2::client::{
+    zwp_input_method_v2, zwp_input_popup_surface_v2,
+};
 
 use crate::State;
 use crate::text_render::{self, TextRenderer};
@@ -21,7 +26,7 @@ const MAX_VISIBLE_CANDIDATES: usize = 9;
 /// Candidate selection window
 pub struct CandidateWindow {
     surface: wl_surface::WlSurface,
-    layer_surface: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+    popup_surface: zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
     pool: wl_shm_pool::WlShmPool,
     pool_data: MmapMut,
     pool_size: usize,
@@ -29,20 +34,20 @@ pub struct CandidateWindow {
     current_buffer: usize,
     width: u32,
     height: u32,
-    configured: bool,
     pub visible: bool,
     renderer: TextRenderer,
-    // Pending render request (candidates, selected) - used when show() called before configure
-    pending_render: Option<(Vec<String>, usize)>,
     // Scroll offset (index of first visible candidate)
     scroll_offset: usize,
 }
 
 impl CandidateWindow {
-    /// Create a new candidate window
+    /// Create a new candidate window using input method popup surface
+    ///
+    /// The popup surface is automatically positioned near the text cursor
+    /// by the compositor.
     pub fn new(
         compositor: &wayland_client::protocol::wl_compositor::WlCompositor,
-        layer_shell: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
+        input_method: &zwp_input_method_v2::ZwpInputMethodV2,
         shm: &wl_shm::WlShm,
         qh: &QueueHandle<State>,
         renderer: TextRenderer,
@@ -50,27 +55,8 @@ impl CandidateWindow {
         // Create surface
         let surface = compositor.create_surface(qh, ());
 
-        // Create layer surface (overlay layer, anchored bottom-left)
-        let layer_surface = layer_shell.get_layer_surface(
-            &surface,
-            None, // Output (None = compositor choice)
-            zwlr_layer_shell_v1::Layer::Overlay,
-            "ime-candidates".to_string(),
-            qh,
-            (),
-        );
-
-        // Configure layer surface
-        layer_surface.set_size(200, 100); // Initial size, will be reconfigured
-        layer_surface.set_anchor(
-            zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left,
-        );
-        layer_surface.set_margin(20, 0, 0, 20); // top, right, bottom, left
-        layer_surface
-            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
-
-        // Commit to get configure event
-        surface.commit();
+        // Create input popup surface - compositor positions this near cursor
+        let popup_surface = input_method.get_input_popup_surface(&surface, qh, ());
 
         // Create shm pool for buffers
         // Allocate enough for two 400x400 ARGB buffers (double buffering)
@@ -79,7 +65,7 @@ impl CandidateWindow {
 
         Some(Self {
             surface,
-            layer_surface,
+            popup_surface,
             pool,
             pool_data,
             pool_size,
@@ -87,35 +73,16 @@ impl CandidateWindow {
             current_buffer: 0,
             width: 200,
             height: 100,
-            configured: false,
             visible: false,
             renderer,
-            pending_render: None,
             scroll_offset: 0,
         })
     }
 
-    /// Handle layer surface configure event
-    pub fn configure(&mut self, serial: u32, width: u32, height: u32, qh: &QueueHandle<State>) {
-        self.layer_surface.ack_configure(serial);
-
-        // Use suggested size or keep our requested size
-        if width > 0 {
-            self.width = width;
-        }
-        if height > 0 {
-            self.height = height;
-        }
-
-        self.configured = true;
-
-        // Process any pending render request
-        if let Some((candidates, selected)) = self.pending_render.take() {
-            self.show(&candidates, selected, qh);
-        }
-    }
-
     /// Show the candidate window with given candidates
+    ///
+    /// The popup surface is automatically shown by the compositor when
+    /// the input method is active, so we just need to render the content.
     pub fn show(&mut self, candidates: &[String], selected: usize, qh: &QueueHandle<State>) {
         if candidates.is_empty() {
             self.hide();
@@ -141,20 +108,10 @@ impl CandidateWindow {
         let (new_width, new_height) =
             text_render::calculate_window_size(&mut self.renderer, &visible_candidates, has_scrollbar);
 
-        // If size changed or not configured, we need to wait for a new configure
-        let size_changed = new_width != self.width || new_height != self.height;
+        self.width = new_width;
+        self.height = new_height;
 
-        if size_changed || !self.configured {
-            self.width = new_width;
-            self.height = new_height;
-            self.layer_surface.set_size(new_width, new_height);
-            self.surface.commit();
-            self.configured = false;
-            self.pending_render = Some((candidates.to_vec(), selected));
-            return;
-        }
-
-        // Render candidates (size unchanged, already configured)
+        // Render candidates
         self.render(candidates, selected, qh);
         self.visible = true;
     }
@@ -166,8 +123,6 @@ impl CandidateWindow {
             self.surface.attach(None, 0, 0);
             self.surface.commit();
             self.visible = false;
-            // After hiding, we need a new configure before showing again
-            self.configured = false;
             // Reset scroll position
             self.scroll_offset = 0;
         }
@@ -175,9 +130,6 @@ impl CandidateWindow {
 
     /// Render candidates to buffer and attach to surface
     fn render(&mut self, candidates: &[String], selected: usize, qh: &QueueHandle<State>) {
-        if !self.configured {
-            return;
-        }
 
         // Ensure pool is large enough
         let buffer_size = (self.width * self.height * 4) as usize;
@@ -288,7 +240,7 @@ impl CandidateWindow {
         for slot in self.buffers.into_iter().flatten() {
             slot.buffer.destroy();
         }
-        self.layer_surface.destroy();
+        self.popup_surface.destroy();
         self.surface.destroy();
         self.pool.destroy();
     }

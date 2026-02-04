@@ -27,9 +27,6 @@ libc = "0.2"
 nvim-rs = { version = "0.9", features = ["use_tokio"] }
 tokio = { version = "1", features = ["rt", "process", "io-util", "sync", "time"] }
 
-# Layer-shell protocol for candidate window
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-
 # Rendering
 tiny-skia = "0.11"
 fontdue = "0.9"

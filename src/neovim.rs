@@ -382,15 +382,13 @@ EOF"#,
 
     let result = result.trim();
 
-    if result.starts_with('{') {
-        // Parse JSON object with words and selected
-        if let Some((candidates, selected)) = parse_candidates_json(result) {
-            if !candidates.is_empty() {
-                // Clamp selection to valid range
-                let selected = selected.min(candidates.len().saturating_sub(1));
-                return Ok((candidates, selected));
-            }
-        }
+    if result.starts_with('{')
+        && let Some((candidates, selected)) = parse_candidates_json(result)
+        && !candidates.is_empty()
+    {
+        // Clamp selection to valid range
+        let selected = selected.min(candidates.len().saturating_sub(1));
+        return Ok((candidates, selected));
     }
 
     Ok((vec![], 0))

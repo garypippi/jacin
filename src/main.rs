@@ -14,8 +14,8 @@ use wayland_client::{
 };
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2, zwp_input_method_manager_v2, zwp_input_method_v2,
+    zwp_input_popup_surface_v2,
 };
-use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use xkbcommon::xkb;
 
 mod candidate_window;
@@ -52,15 +52,6 @@ fn main() -> anyhow::Result<()> {
 
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("wl_shm not available");
 
-    // Try to bind layer-shell (optional - not all compositors support it)
-    let layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1> =
-        globals.bind(&qh, 1..=4, ()).ok();
-    if layer_shell.is_some() {
-        eprintln!("Bound zwlr_layer_shell_v1");
-    } else {
-        eprintln!("Warning: zwlr_layer_shell_v1 not available, candidate window disabled");
-    }
-
     // Create xkb context
     let xkb_context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
 
@@ -86,11 +77,12 @@ fn main() -> anyhow::Result<()> {
         eprintln!("Warning: Font not available, candidate window disabled");
     }
 
-    // Create candidate window if all requirements are met
-    let candidate_window = if let (Some(ls), Some(renderer)) = (&layer_shell, text_renderer) {
-        match CandidateWindow::new(&compositor, ls, &shm, &qh, renderer) {
+    // Create candidate window using input method popup surface
+    // The popup surface is automatically positioned near the cursor by the compositor
+    let candidate_window = if let Some(renderer) = text_renderer {
+        match CandidateWindow::new(&compositor, &input_method, &shm, &qh, renderer) {
             Some(win) => {
-                eprintln!("Candidate window created");
+                eprintln!("Candidate window created (using input popup surface)");
                 Some(win)
             }
             None => {
@@ -522,45 +514,29 @@ impl Dispatch<wl_buffer::WlBuffer, usize> for State {
     }
 }
 
-// Dispatch for layer shell
-impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for State {
+// Dispatch for input popup surface (candidate window)
+impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for State {
     fn event(
         _state: &mut Self,
-        _layer_shell: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
-        _event: zwlr_layer_shell_v1::Event,
+        _popup_surface: &zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
+        event: zwp_input_popup_surface_v2::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        // Layer shell has no events
-    }
-}
-
-// Dispatch for layer surface
-impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        _layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
-        event: zwlr_layer_surface_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        match event {
-            zwlr_layer_surface_v1::Event::Configure {
-                serial,
-                width,
-                height,
-            } => {
-                eprintln!("[LAYER] Configure: serial={}, {}x{}", serial, width, height);
-                if let Some(ref mut window) = state.candidate_window {
-                    window.configure(serial, width, height, qh);
-                }
-            }
-            zwlr_layer_surface_v1::Event::Closed => {
-                eprintln!("[LAYER] Closed");
-            }
-            _ => {}
+        if let zwp_input_popup_surface_v2::Event::TextInputRectangle {
+            x,
+            y,
+            width,
+            height,
+        } = event
+        {
+            // The compositor tells us where the text cursor is
+            // This is informational - positioning is handled by the compositor
+            eprintln!(
+                "[POPUP] Text input rectangle: x={}, y={}, {}x{}",
+                x, y, width, height
+            );
         }
     }
 }
