@@ -63,12 +63,20 @@ Applications (via zwp_text_input_v3)
 - Preedit lifecycle
 - Candidate window UI
 
-### IME Backend (Optional / Separate)
+### IME Backend: Neovim + vim-skkeleton
 
-- Neovim (headless)
-- Conversion logic
-- Dictionary / state
-- IPC via msgpack-rpc / socket
+- **Neovim** (headless, `--embed` mode)
+- **vim-skkeleton** plugin for SKK (Simple Kana to Kanji) conversion
+- IPC via msgpack-rpc (nvim-rs crate)
+
+```
+Key events → Neovim (skkeleton) → preedit/commit responses
+```
+
+SKK is a Japanese input method where:
+- Lowercase = hiragana
+- Uppercase = start kanji conversion
+- Simple, modal, programmer-friendly
 
 ---
 

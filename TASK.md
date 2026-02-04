@@ -47,11 +47,12 @@
 
 ## Phase 4: Preedit (Composition)
 
-- [ ] Implement `set_preedit_string()` for composition display
-- [ ] Track preedit buffer internally (`String`)
-- [ ] Set preedit cursor position (`cursor_begin`, `cursor_end`)
-- [ ] Clear preedit on commit (`set_preedit_string("")`)
-- [ ] Handle preedit styling (underline via `set_preedit_style`)
+- [x] Implement `set_preedit_string()` for composition display
+- [x] Track preedit buffer internally (`String`)
+- [x] Set preedit cursor position (`cursor_begin`, `cursor_end`)
+- [x] Clear preedit on commit (`set_preedit_string("")`)
+- [x] Escape to cancel preedit
+- [ ] Handle preedit styling (underline via `set_preedit_style`) - optional
 - [ ] Test: type "abc" shows preedit, Enter commits
 
 ## Phase 5: Neovim Backend Integration

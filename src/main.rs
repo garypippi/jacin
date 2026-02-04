@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
         serial: 0,
         ctrl_pressed: false,
         pending_exit: false,
+        preedit: String::new(),
     };
 
     // Set up calloop event loop
@@ -105,6 +106,8 @@ struct State {
     serial: u32,
     ctrl_pressed: bool,
     pending_exit: bool,
+    // Preedit state
+    preedit: String,
 }
 
 impl State {
@@ -150,27 +153,48 @@ impl State {
 
         match keysym {
             Keysym::BackSpace => {
-                // Delete one character before cursor
-                self.input_method.delete_surrounding_text(1, 0);
-                self.serial += 1;
-                self.input_method.commit(self.serial);
+                if self.preedit.is_empty() {
+                    // No preedit, delete from committed text
+                    self.input_method.delete_surrounding_text(1, 0);
+                    self.serial += 1;
+                    self.input_method.commit(self.serial);
+                } else {
+                    // Remove last character from preedit
+                    self.preedit.pop();
+                    self.update_preedit();
+                }
                 return;
             }
             Keysym::Return | Keysym::KP_Enter => {
-                self.input_method.commit_string("\n".to_string());
-                self.serial += 1;
-                self.input_method.commit(self.serial);
+                if self.preedit.is_empty() {
+                    // No preedit, commit newline directly
+                    self.input_method.commit_string("\n".to_string());
+                    self.serial += 1;
+                    self.input_method.commit(self.serial);
+                } else {
+                    // Commit preedit content
+                    self.commit_preedit();
+                }
                 return;
             }
             Keysym::Tab => {
-                self.input_method.commit_string("\t".to_string());
-                self.serial += 1;
-                self.input_method.commit(self.serial);
+                if self.preedit.is_empty() {
+                    self.input_method.commit_string("\t".to_string());
+                    self.serial += 1;
+                    self.input_method.commit(self.serial);
+                } else {
+                    // Could be used for candidate selection later
+                    self.commit_preedit();
+                }
                 return;
             }
             Keysym::Escape => {
-                // Escape - typically used to cancel, ignore for now
-                eprintln!("Escape pressed (ignored)");
+                if !self.preedit.is_empty() {
+                    // Clear preedit without committing
+                    eprintln!("[PREEDIT] cancelled");
+                    self.preedit.clear();
+                    self.update_preedit();
+                }
                 return;
             }
             // Arrow keys, Home, End, etc. - these need virtual keyboard to forward
@@ -190,14 +214,34 @@ impl State {
             _ => {}
         }
 
-        // If we have a printable character, commit it
+        // If we have a printable character, add to preedit
         if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
-            eprintln!("[COMMIT] string={:?}", utf8);
-            self.input_method.commit_string(utf8);
-            self.serial += 1;
-            self.input_method.commit(self.serial);
+            self.preedit.push_str(&utf8);
+            eprintln!("[PREEDIT] buffer={:?}", self.preedit);
+            self.update_preedit();
         } else {
             eprintln!("[SKIP] no printable char, ctrl={}", self.ctrl_pressed);
+        }
+    }
+
+    fn update_preedit(&mut self) {
+        let cursor_pos = self.preedit.len() as i32;
+        self.input_method
+            .set_preedit_string(self.preedit.clone(), cursor_pos, cursor_pos);
+        self.serial += 1;
+        self.input_method.commit(self.serial);
+        eprintln!("[PREEDIT] updated: {:?}", self.preedit);
+    }
+
+    fn commit_preedit(&mut self) {
+        if !self.preedit.is_empty() {
+            eprintln!("[COMMIT] preedit={:?}", self.preedit);
+            self.input_method.commit_string(self.preedit.clone());
+            self.preedit.clear();
+            // Clear preedit display
+            self.input_method.set_preedit_string(String::new(), 0, 0);
+            self.serial += 1;
+            self.input_method.commit(self.serial);
         }
     }
 
