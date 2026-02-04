@@ -1,0 +1,229 @@
+//! Neovim backend for IME
+//!
+//! Runs Neovim in embedded mode with vim-skkeleton for Japanese input.
+
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use std::thread;
+use std::time::Duration;
+
+use nvim_rs::create::tokio::new_child_cmd;
+use nvim_rs::{Handler, Neovim};
+use tokio::process::Command;
+use tokio::runtime::Runtime;
+
+/// Messages sent from IME to Neovim
+#[derive(Debug)]
+pub enum ToNeovim {
+    /// Send a key to Neovim (raw key string like "a", "A", "<BS>", "<CR>")
+    Key(String),
+    /// Shutdown Neovim
+    Shutdown,
+}
+
+/// Messages sent from Neovim to IME
+#[derive(Debug, Clone)]
+pub enum FromNeovim {
+    /// Preedit text changed
+    Preedit(String),
+    /// Text should be committed
+    Commit(String),
+    /// Neovim is ready
+    Ready,
+    /// Error occurred
+    Error(String),
+}
+
+/// Handle to communicate with Neovim backend
+pub struct NeovimHandle {
+    pub sender: Sender<ToNeovim>,
+    pub receiver: Receiver<FromNeovim>,
+}
+
+impl NeovimHandle {
+    /// Send a key to Neovim
+    pub fn send_key(&self, key: &str) {
+        let _ = self.sender.send(ToNeovim::Key(key.to_string()));
+    }
+
+    /// Try to receive a message from Neovim (non-blocking)
+    pub fn try_recv(&self) -> Option<FromNeovim> {
+        self.receiver.try_recv().ok()
+    }
+
+    /// Receive with timeout
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<FromNeovim> {
+        self.receiver.recv_timeout(timeout).ok()
+    }
+
+    /// Shutdown Neovim
+    pub fn shutdown(&self) {
+        let _ = self.sender.send(ToNeovim::Shutdown);
+    }
+}
+
+/// Empty handler - we don't need to handle notifications for now
+#[derive(Clone)]
+struct NvimHandler;
+
+impl Handler for NvimHandler {
+    type Writer = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
+}
+
+/// Spawn Neovim backend in a separate thread
+pub fn spawn_neovim() -> anyhow::Result<NeovimHandle> {
+    let (to_nvim_tx, to_nvim_rx) = unbounded::<ToNeovim>();
+    let (from_nvim_tx, from_nvim_rx) = unbounded::<FromNeovim>();
+
+    thread::spawn(move || {
+        let rt = Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(async move {
+            if let Err(e) = run_neovim(to_nvim_rx, from_nvim_tx).await {
+                eprintln!("[NVIM] Error: {}", e);
+            }
+        });
+    });
+
+    Ok(NeovimHandle {
+        sender: to_nvim_tx,
+        receiver: from_nvim_rx,
+    })
+}
+
+type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
+
+async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>) -> anyhow::Result<()> {
+    eprintln!("[NVIM] Starting Neovim...");
+
+    // Start Neovim in embedded mode
+    let mut cmd = Command::new("nvim");
+    cmd.args(["--embed", "--headless"]);
+
+    let handler = NvimHandler;
+    let (nvim, _io_handler, _child) = new_child_cmd(&mut cmd, handler).await?;
+
+    eprintln!("[NVIM] Connected to Neovim");
+
+    // Initialize
+    init_neovim(&nvim).await?;
+
+    let _ = tx.send(FromNeovim::Ready);
+
+    // Main loop - process messages from IME
+    loop {
+        match rx.recv() {
+            Ok(ToNeovim::Key(key)) => {
+                eprintln!("[NVIM] Received key: {:?}", key);
+                if let Err(e) = handle_key(&nvim, &key, &tx).await {
+                    eprintln!("[NVIM] Key handling error: {}", e);
+                }
+            }
+            Ok(ToNeovim::Shutdown) | Err(_) => {
+                eprintln!("[NVIM] Shutting down...");
+                let _ = nvim.command("qa!").await;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
+    eprintln!("[NVIM] Initializing...");
+
+    nvim.command("set nocompatible").await?;
+    nvim.command("set encoding=utf-8").await?;
+
+    // Check if user config was loaded
+    let rtp = nvim.command_output("echo &runtimepath").await?;
+    eprintln!("[NVIM] runtimepath: {}", rtp.trim().chars().take(100).collect::<String>());
+
+    // Check if skkeleton is available
+    let result = nvim
+        .command_output("echo exists('*skkeleton#is_enabled')")
+        .await?;
+    eprintln!("[NVIM] skkeleton#is_enabled exists: {}", result.trim());
+
+    // List loaded scripts to see what's loaded
+    let scripts = nvim.command_output("scriptnames").await?;
+    let script_count = scripts.lines().count();
+    eprintln!("[NVIM] Loaded scripts: {} files", script_count);
+
+    // Verify <Plug>(skkeleton-toggle) mapping exists
+    let mapping = nvim.command_output("imap <Plug>(skkeleton-toggle)").await.unwrap_or_default();
+    eprintln!("[NVIM] skkeleton-toggle mapping: {}", mapping.trim().chars().take(60).collect::<String>());
+
+    eprintln!("[NVIM] Initialization complete");
+    Ok(())
+}
+
+async fn handle_key(
+    nvim: &Neovim<NvimWriter>,
+    key: &str,
+    tx: &Sender<FromNeovim>,
+) -> anyhow::Result<()> {
+    // Ensure we're in insert mode
+    nvim.command("startinsert").await?;
+
+
+    // Handle Enter key specially - commit the current line
+    if key == "<CR>" {
+        let line = nvim.command_output("echo getline('.')").await?;
+        let line = line.trim().to_string();
+
+        if !line.is_empty() {
+            let _ = tx.send(FromNeovim::Commit(line));
+            // Clear the line for next input
+            nvim.command("normal! 0D").await?;
+        }
+        return Ok(());
+    }
+
+    // Handle Escape - clear preedit
+    if key == "<Esc>" {
+        nvim.command("normal! 0D").await?;
+        let _ = tx.send(FromNeovim::Preedit(String::new()));
+        return Ok(());
+    }
+
+    // Send key to Neovim using feedkeys
+    // Handle Ctrl+J specially - trigger the <Plug>(skkeleton-toggle) mapping
+    if key == "<C-j>" {
+        eprintln!("[NVIM] Toggling skkeleton via <Plug> mapping...");
+        // Clear any existing text using Ctrl+U (works in insert mode)
+        nvim.command("call feedkeys(\"\\<C-u>\", 'n')").await?;
+        // Use 'm' flag to allow remapping (needed for <Plug> to work)
+        nvim.command("call feedkeys(\"\\<Plug>(skkeleton-toggle)\", 'm')").await?;
+        // Small delay to let skkeleton process
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let result = nvim.command_output("echo skkeleton#is_enabled()").await?;
+        eprintln!("[NVIM] skkeleton enabled: {}", result.trim());
+        // Clear preedit display
+        let _ = tx.send(FromNeovim::Preedit(String::new()));
+        return Ok(());
+    }
+
+    // For special keys like <CR>, etc., we need to use \<...> notation in Vimscript
+    let vim_key = if key.starts_with('<') && key.ends_with('>') {
+        // Convert <CR> to \<CR> for Vimscript interpretation
+        format!("\\{}", key)
+    } else {
+        // Regular characters - escape special chars
+        key.replace('\\', "\\\\").replace('"', "\\\"")
+    };
+    // Use 'm' flag to allow remapping (skkeleton intercepts via mappings)
+    let cmd = format!("call feedkeys(\"{}\", 'm')", vim_key);
+    nvim.command(&cmd).await?;
+
+    // Small delay to let skkeleton process
+    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+
+    // Get the current line content as "preedit"
+    let line = nvim.command_output("echo getline('.')").await?;
+    let line = line.trim().to_string();
+
+    eprintln!("[NVIM] preedit: {:?}", line);
+    let _ = tx.send(FromNeovim::Preedit(line));
+
+    Ok(())
+}

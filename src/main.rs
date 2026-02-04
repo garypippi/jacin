@@ -15,6 +15,9 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 };
 use xkbcommon::xkb;
 
+mod neovim;
+use neovim::{FromNeovim, NeovimHandle};
+
 fn main() -> anyhow::Result<()> {
     // Connect to Wayland display
     let conn = Connection::connect_to_env()?;
@@ -41,6 +44,18 @@ fn main() -> anyhow::Result<()> {
     let input_method = input_method_manager.get_input_method(&seat, &qh, ());
     eprintln!("Created zwp_input_method_v2");
 
+    // Spawn Neovim backend
+    let nvim = match neovim::spawn_neovim() {
+        Ok(handle) => {
+            eprintln!("Neovim backend spawned");
+            Some(handle)
+        }
+        Err(e) => {
+            eprintln!("Failed to spawn Neovim: {} (continuing without backend)", e);
+            None
+        }
+    };
+
     // Create application state
     let mut state = State {
         loop_signal: None,
@@ -53,6 +68,7 @@ fn main() -> anyhow::Result<()> {
         ctrl_pressed: false,
         pending_exit: false,
         preedit: String::new(),
+        nvim,
     };
 
     // Set up calloop event loop
@@ -80,14 +96,29 @@ fn main() -> anyhow::Result<()> {
 
     // Run the event loop
     event_loop.run(None, &mut state, |state| {
+        // Check for messages from Neovim
+        // Collect messages first to avoid borrow conflict
+        let messages: Vec<_> = state
+            .nvim
+            .as_ref()
+            .map(|nvim| std::iter::from_fn(|| nvim.try_recv()).collect())
+            .unwrap_or_default();
+
+        for msg in messages {
+            state.handle_nvim_message(msg);
+        }
+
         if state.pending_exit && let Some(ref signal) = state.loop_signal {
             signal.stop();
         }
     })?;
 
-    // Cleanup already done in signal handlers, but ensure it's done
+    // Cleanup
     if let Some(grab) = state.keyboard_grab.take() {
         grab.release();
+    }
+    if let Some(ref nvim) = state.nvim {
+        nvim.shutdown();
     }
 
     eprintln!("Goodbye!");
@@ -108,6 +139,8 @@ struct State {
     pending_exit: bool,
     // Preedit state
     preedit: String,
+    // Neovim backend
+    nvim: Option<NeovimHandle>,
 }
 
 impl State {
@@ -142,83 +175,28 @@ impl State {
         use xkbcommon::xkb::Keysym;
         if self.ctrl_pressed && keysym == Keysym::c {
             eprintln!("\nCtrl+C pressed, releasing keyboard and exiting...");
-            // Release keyboard grab first to restore normal keyboard state
             if let Some(grab) = self.keyboard_grab.take() {
                 grab.release();
             }
-            // Mark for exit - will happen on next event loop iteration after flush
             self.pending_exit = true;
             return;
         }
 
-        match keysym {
-            Keysym::BackSpace => {
-                if self.preedit.is_empty() {
-                    // No preedit, delete from committed text
-                    self.input_method.delete_surrounding_text(1, 0);
-                    self.serial += 1;
-                    self.input_method.commit(self.serial);
-                } else {
-                    // Remove last character from preedit
-                    self.preedit.pop();
-                    self.update_preedit();
-                }
-                return;
-            }
-            Keysym::Return | Keysym::KP_Enter => {
-                if self.preedit.is_empty() {
-                    // No preedit, commit newline directly
-                    self.input_method.commit_string("\n".to_string());
-                    self.serial += 1;
-                    self.input_method.commit(self.serial);
-                } else {
-                    // Commit preedit content
-                    self.commit_preedit();
-                }
-                return;
-            }
-            Keysym::Tab => {
-                if self.preedit.is_empty() {
-                    self.input_method.commit_string("\t".to_string());
-                    self.serial += 1;
-                    self.input_method.commit(self.serial);
-                } else {
-                    // Could be used for candidate selection later
-                    self.commit_preedit();
-                }
-                return;
-            }
-            Keysym::Escape => {
-                if !self.preedit.is_empty() {
-                    // Clear preedit without committing
-                    eprintln!("[PREEDIT] cancelled");
-                    self.preedit.clear();
-                    self.update_preedit();
-                }
-                return;
-            }
-            // Arrow keys, Home, End, etc. - these need virtual keyboard to forward
-            // For now, just ignore them (they won't work in text fields)
-            Keysym::Left
-            | Keysym::Right
-            | Keysym::Up
-            | Keysym::Down
-            | Keysym::Home
-            | Keysym::End
-            | Keysym::Page_Up
-            | Keysym::Page_Down
-            | Keysym::Delete => {
-                eprintln!("Navigation key {:?} (not yet supported)", keysym);
-                return;
-            }
-            _ => {}
-        }
+        // Convert key to Vim notation and send to Neovim
+        let vim_key = self.keysym_to_vim(keysym, &utf8);
+        eprintln!("[KEY] vim_key={:?}", vim_key);
 
-        // If we have a printable character, add to preedit
-        if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
-            self.preedit.push_str(&utf8);
-            eprintln!("[PREEDIT] buffer={:?}", self.preedit);
-            self.update_preedit();
+        if let Some(ref vim_key) = vim_key {
+            self.send_to_nvim(vim_key);
+            // Wait for Neovim response with timeout
+            self.wait_for_nvim_response();
+        } else if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
+            // Fallback: if no Neovim or no vim key, use local preedit
+            if self.nvim.is_none() {
+                self.preedit.push_str(&utf8);
+                eprintln!("[PREEDIT] buffer={:?}", self.preedit);
+                self.update_preedit();
+            }
         } else {
             eprintln!("[SKIP] no printable char, ctrl={}", self.ctrl_pressed);
         }
@@ -242,6 +220,99 @@ impl State {
             self.input_method.set_preedit_string(String::new(), 0, 0);
             self.serial += 1;
             self.input_method.commit(self.serial);
+        }
+    }
+
+    fn handle_nvim_message(&mut self, msg: FromNeovim) {
+        match msg {
+            FromNeovim::Ready => {
+                eprintln!("[NVIM] Backend ready!");
+            }
+            FromNeovim::Preedit(text) => {
+                eprintln!("[NVIM] Preedit: {:?}", text);
+                self.preedit = text;
+                self.update_preedit();
+            }
+            FromNeovim::Commit(text) => {
+                eprintln!("[NVIM] Commit: {:?}", text);
+                self.preedit.clear();
+                self.input_method.commit_string(text);
+                self.input_method.set_preedit_string(String::new(), 0, 0);
+                self.serial += 1;
+                self.input_method.commit(self.serial);
+            }
+            FromNeovim::Error(e) => {
+                eprintln!("[NVIM] Error: {}", e);
+            }
+        }
+    }
+
+    fn send_to_nvim(&self, key: &str) {
+        if let Some(ref nvim) = self.nvim {
+            nvim.send_key(key);
+        }
+    }
+
+    fn process_nvim_messages(&mut self) -> bool {
+        let messages: Vec<_> = self
+            .nvim
+            .as_ref()
+            .map(|nvim| std::iter::from_fn(|| nvim.try_recv()).collect())
+            .unwrap_or_default();
+
+        let has_messages = !messages.is_empty();
+        for msg in messages {
+            self.handle_nvim_message(msg);
+        }
+        has_messages
+    }
+
+    fn wait_for_nvim_response(&mut self) {
+        if let Some(ref nvim) = self.nvim {
+            // Block waiting for response with 200ms timeout
+            if let Some(msg) = nvim.recv_timeout(std::time::Duration::from_millis(200)) {
+                self.handle_nvim_message(msg);
+            }
+        }
+    }
+
+    fn keysym_to_vim(&self, keysym: xkb::Keysym, utf8: &str) -> Option<String> {
+        use xkbcommon::xkb::Keysym;
+
+        // Handle Ctrl combinations
+        if self.ctrl_pressed {
+            // Extract the base character for Ctrl+letter
+            let base_char = if keysym.raw() >= Keysym::a.raw() && keysym.raw() <= Keysym::z.raw() {
+                Some((keysym.raw() - Keysym::a.raw() + b'a' as u32) as u8 as char)
+            } else {
+                None
+            };
+
+            if let Some(c) = base_char {
+                return Some(format!("<C-{}>", c));
+            }
+            return None;
+        }
+
+        // Handle special keys
+        match keysym {
+            Keysym::Return | Keysym::KP_Enter => Some("<CR>".to_string()),
+            Keysym::BackSpace => Some("<BS>".to_string()),
+            Keysym::Tab => Some("<Tab>".to_string()),
+            Keysym::Escape => Some("<Esc>".to_string()),
+            Keysym::space => Some("<Space>".to_string()),
+            Keysym::Left => Some("<Left>".to_string()),
+            Keysym::Right => Some("<Right>".to_string()),
+            Keysym::Up => Some("<Up>".to_string()),
+            Keysym::Down => Some("<Down>".to_string()),
+            _ => {
+                // Printable characters
+                if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
+                    Some(utf8.to_string())
+                } else {
+                    None
+                }
+            }
         }
     }
 

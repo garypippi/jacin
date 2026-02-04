@@ -16,6 +16,13 @@ calloop-wayland-source = "0.4"
 # Error handling
 anyhow = "1"
 
+# Channels with timeout
+crossbeam-channel = "0.5"
+
 # Keyboard handling
 xkbcommon = "0.8"
 libc = "0.2"
+
+# Neovim backend
+nvim-rs = { version = "0.9", features = ["use_tokio"] }
+tokio = { version = "1", features = ["rt", "process", "io-util", "sync", "time"] }
