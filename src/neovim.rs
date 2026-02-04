@@ -210,17 +210,26 @@ async fn handle_key(
     // Ensure we're in insert mode
     nvim.command("startinsert").await?;
 
-    // Handle Enter key specially - commit the current line
+    // Handle Enter key - check if skkeleton is in conversion mode first
     if key == "<CR>" {
         let line = nvim.command_output("echo getline('.')").await?;
         let line = line.trim().to_string();
 
-        if !line.is_empty() {
-            let _ = tx.send(FromNeovim::Commit(line));
-            // Clear the line for next input
-            nvim.command("normal! 0D").await?;
+        // Check for skkeleton markers:
+        // ▽ = input mode (typing kana)
+        // ▼ = henkan mode (conversion/candidate selection)
+        if line.starts_with('▼') || line.starts_with('▽') {
+            // In skkeleton mode - pass Enter to skkeleton to confirm conversion
+            // Fall through to normal key handling
+        } else {
+            // Not in skkeleton mode - commit the current line
+            if !line.is_empty() {
+                let _ = tx.send(FromNeovim::Commit(line));
+                // Clear the line for next input
+                nvim.command("normal! 0D").await?;
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     // Handle Escape - clear preedit
@@ -241,6 +250,38 @@ async fn handle_key(
             return Ok(());
         }
         // Otherwise, let Neovim handle the backspace normally (fall through)
+    }
+
+    // Handle Ctrl+K specially - call cmp.confirm() directly to avoid Vim's digraph mode
+    if key == "<C-k>" {
+        let result = nvim
+            .command_output(
+                r#"lua << EOF
+                local ok, cmp = pcall(require, 'cmp')
+                if ok and cmp.visible() then
+                    cmp.confirm({ select = true })
+                    print('confirmed')
+                else
+                    print('no_cmp')
+                end
+EOF"#,
+            )
+            .await
+            .unwrap_or_default();
+
+        if result.trim() == "confirmed" {
+            // Give skkeleton time to process the confirmation
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+            // Get updated preedit
+            let line = nvim.command_output("echo getline('.')").await?;
+            let line = line.trim().to_string();
+
+            let _ = tx.send(FromNeovim::Preedit(line));
+            let _ = tx.send(FromNeovim::Candidates(vec![], 0));
+        }
+        // If no cmp visible, just ignore the key
+        return Ok(());
     }
 
     // Handle Ctrl+J specially - trigger the <Plug>(skkeleton-toggle) mapping
@@ -270,6 +311,7 @@ async fn handle_key(
     };
     // Use 'm' flag to allow remapping (skkeleton intercepts via mappings)
     let cmd = format!("call feedkeys(\"{}\", 'm')", vim_key);
+
     nvim.command(&cmd).await?;
 
     // Small delay to let skkeleton process
@@ -308,7 +350,7 @@ async fn get_skkeleton_candidates(
     nvim: &Neovim<NvimWriter>,
     _preedit: &str,
 ) -> anyhow::Result<(Vec<String>, usize)> {
-    // Use nvim-cmp's Lua API directly - it has its own window system
+    // Use nvim-cmp's Lua API directly
     let result = nvim
         .command_output(
             r#"lua << EOF
@@ -319,48 +361,25 @@ async fn get_skkeleton_candidates(
             end
 
             -- Check if cmp is visible
-            local visible = cmp.visible()
-            if not visible then
+            if not cmp.visible() then
                 print('{"words":[],"selected":-1,"total":0}')
                 return
             end
 
-            -- Access internal context to get all entries (not just visible)
-            local context = cmp.core.context
-            local sources = cmp.core.sources or {}
-            local all_entries = {}
-
-            -- Try to get entries from the view first (what's actually displayed)
-            local view_entries = cmp.get_entries()
-            if view_entries and #view_entries > 0 then
-                all_entries = view_entries
-            end
-
+            local all_entries = cmp.get_entries() or {}
             if #all_entries == 0 then
                 print('{"words":[],"selected":-1,"total":0}')
                 return
             end
 
-            -- Get selected index directly from cmp's internal state
+            -- Get selected index
             local selected_idx = -1
             local selected_entry = cmp.get_active_entry()
-
             if selected_entry then
                 for i, entry in ipairs(all_entries) do
                     if entry == selected_entry then
-                        selected_idx = i - 1  -- Convert to 0-based
+                        selected_idx = i - 1
                         break
-                    end
-                end
-            end
-
-            -- If selection not found in entries, try to get index from view state
-            if selected_idx == -1 and cmp.core.view then
-                local custom_entries = cmp.core.view.custom_entries_view
-                if custom_entries and custom_entries.get_selected_index then
-                    local idx = custom_entries:get_selected_index()
-                    if idx and idx > 0 then
-                        selected_idx = idx - 1
                     end
                 end
             end
@@ -461,7 +480,7 @@ fn parse_json_string_array(json: &str) -> Vec<String> {
     items
 }
 
-/// Query nvim-cmp for completion candidates
+/// Query nvim-cmp for completion candidates (fallback using pumvisible)
 async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<(Vec<String>, usize)> {
     // Check if completion menu is visible
     let pum_visible = nvim.command_output("echo pumvisible()").await?;
@@ -470,7 +489,6 @@ async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<
     }
 
     // Get completion info using complete_info()
-    // This returns info about the popup menu including selected index
     let info = nvim
         .command_output("echo json_encode(complete_info(['items', 'selected']))")
         .await?;
