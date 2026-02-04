@@ -1,0 +1,21 @@
+[package]
+name = "custom-ime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Wayland core
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+
+# Event loop
+calloop = { version = "0.14", features = ["signals"] }
+calloop-wayland-source = "0.4"
+
+# Error handling
+anyhow = "1"
+
+# Keyboard handling
+xkbcommon = "0.8"
+libc = "0.2"

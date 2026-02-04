@@ -6,39 +6,44 @@
 
 ## Phase 1: Project Setup & Protocol Binding
 
-- [ ] Initialize Cargo project (`cargo init`)
-- [ ] Add dependencies:
+- [x] Initialize Cargo project (`cargo init`)
+- [x] Add dependencies:
   - `wayland-client` - Wayland protocol bindings
   - `wayland-protocols` - Standard protocol definitions
   - `wayland-protocols-misc` - For `zwp_input_method_v2`
-  - `smithay-client-toolkit` - High-level client helpers
-- [ ] Generate/import `zwp_input_method_v2` protocol bindings
-- [ ] Connect to Wayland display (`Connection::connect_to_env`)
-- [ ] Bind `zwp_input_method_manager_v2` global from registry
-- [ ] Create `zwp_input_method_v2` object
-- [ ] Implement `Dispatch` for `activate` / `deactivate` events
-- [ ] Set up event loop (`calloop` or `wayland-client` built-in)
+  - ~~`smithay-client-toolkit`~~ - Not needed for basic IME
+- [x] Generate/import `zwp_input_method_v2` protocol bindings
+- [x] Connect to Wayland display (`Connection::connect_to_env`)
+- [x] Bind `zwp_input_method_manager_v2` global from registry
+- [x] Create `zwp_input_method_v2` object
+- [x] Implement `Dispatch` for `activate` / `deactivate` events
+- [x] Set up event loop (`calloop` + `calloop-wayland-source`)
 
 ## Phase 2: Keyboard Grab
 
-- [ ] Request `zwp_input_method_keyboard_grab_v2` on activate
-- [ ] Implement `Dispatch` for keyboard grab events:
+- [x] Request `zwp_input_method_keyboard_grab_v2` on activate
+- [x] Implement `Dispatch` for keyboard grab events:
   - `keymap` - Parse xkb keymap
   - `key` - Handle key press/release
   - `modifiers` - Track modifier state
   - `repeat_info` - Key repeat settings
-- [ ] Add `xkbcommon` crate for keymap handling
-- [ ] Release grab properly on deactivate
-- [ ] Track grab state to avoid double-grab
+- [x] Add `xkbcommon` crate for keymap handling
+- [x] ~~Release grab properly on deactivate~~ (causes issues, keep grab until exit)
+- [x] Track grab state to avoid double-grab
 
 ## Phase 3: Simple Passthrough
 
-- [ ] Convert keysym to UTF-8 string (`xkbcommon`)
-- [ ] Call `commit_string()` for printable characters
-- [ ] Call `commit()` after each string commit
-- [ ] Forward non-printable keys (backspace, enter, etc.)
-- [ ] Test with `foot` terminal or GTK entry widget
-- [ ] Verify characters appear correctly
+- [x] Convert keysym to UTF-8 string (`xkbcommon`)
+- [x] Call `commit_string()` for printable characters
+- [x] Call `commit()` after each string commit
+- [x] Handle backspace (`delete_surrounding_text`), enter, tab
+- [x] Test with terminal and Firefox
+- [x] Verify characters appear correctly
+
+**Known limitations (Phase 3):**
+- Arrow keys, Home, End, etc. not forwarded (needs `zwp_virtual_keyboard_v1`)
+- Ctrl+shortcuts not forwarded (same reason)
+- Ctrl+C exits IME (development convenience)
 
 ## Phase 4: Preedit (Composition)
 
@@ -79,6 +84,7 @@
 
 ## Phase 7: Polish & Edge Cases
 
+- [ ] Implement `zwp_virtual_keyboard_v1` for forwarding shortcuts/navigation
 - [ ] Handle `surrounding_text` event (if provided by application)
 - [ ] Proper serial number tracking for all requests
 - [ ] Handle rapid activate/deactivate cycles gracefully
@@ -92,41 +98,38 @@
 
 ---
 
-## Crate Summary
+## Crate Summary (Current)
 
 ```toml
 [dependencies]
 wayland-client = "0.31"
-wayland-protocols = { version = "0.31", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
-smithay-client-toolkit = "0.18"
-xkbcommon = "0.7"
-calloop = "0.12"
-calloop-wayland-source = "0.2"
-
-# Phase 5+
-tokio = { version = "1", features = ["rt", "process", "io-util"] }
-nvim-rs = { version = "0.6", features = ["use_tokio"] }
-
-# Phase 6+
-wayland-protocols-wlr = { version = "0.2", features = ["client"] }
-tiny-skia = "0.11"
-softbuffer = "0.4"
-cosmic-text = "0.11"
+calloop = { version = "0.14", features = ["signals"] }
+calloop-wayland-source = "0.4"
+anyhow = "1"
+xkbcommon = "0.8"
+libc = "0.2"
 ```
 
 ---
 
 ## Notes
 
+### Lessons Learned
+
+- Releasing keyboard grab on deactivate causes key replay issues (Ctrl+T loop in Firefox)
+- Solution: Keep grab until IME exits, don't release on window switch
+- Use `eprintln!` (stderr) instead of `println!` (stdout) to avoid terminal feedback loops
+- Add startup delay (500ms) to let pending key events clear after `cargo run`
+
 ### Pitfalls to Watch
 
 - Must call `commit()` after `set_preedit_string()` / `commit_string()` batch
 - Serial number synchronization is required
-- Keyboard grab must be released on deactivate
-- `surrounding_text` may be empty or unavailable
 - Only one IME can bind `zwp_input_method_v2` at a time
 - `wayland-rs` uses `Dispatch` trait pattern - different from C callbacks
+- Borrowed fd from keymap event - don't take ownership
 
 ### Useful References
 
