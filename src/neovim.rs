@@ -29,8 +29,8 @@ pub enum FromNeovim {
     Commit(String),
     /// Delete surrounding text (before_length, after_length)
     DeleteSurrounding(u32, u32),
-    /// Completion candidates from nvim-cmp
-    Candidates(Vec<String>),
+    /// Completion candidates from nvim-cmp (candidates, selected_index)
+    Candidates(Vec<String>, usize),
     /// Neovim is ready
     Ready,
 }
@@ -283,66 +283,98 @@ async fn handle_key(
     let _ = tx.send(FromNeovim::Preedit(line.clone()));
 
     // Check for SKKeleton candidates first, then fall back to nvim-cmp
-    if let Ok(candidates) = get_skkeleton_candidates(nvim, &line).await
+    if let Ok((candidates, selected)) = get_skkeleton_candidates(nvim, &line).await
         && !candidates.is_empty()
     {
-        let _ = tx.send(FromNeovim::Candidates(candidates));
+        let _ = tx.send(FromNeovim::Candidates(candidates, selected));
         return Ok(());
     }
 
     // Check for completion candidates (nvim-cmp)
-    if let Ok(candidates) = get_completion_candidates(nvim).await
+    if let Ok((candidates, selected)) = get_completion_candidates(nvim).await
         && !candidates.is_empty()
     {
-        let _ = tx.send(FromNeovim::Candidates(candidates));
+        let _ = tx.send(FromNeovim::Candidates(candidates, selected));
     } else {
         // Clear candidates if none available
-        let _ = tx.send(FromNeovim::Candidates(vec![]));
+        let _ = tx.send(FromNeovim::Candidates(vec![], 0));
     }
 
     Ok(())
 }
 
-/// Query nvim-cmp for completion candidates using its Lua API
+/// Query nvim-cmp for completion candidates and selection index using its Lua API
 async fn get_skkeleton_candidates(
     nvim: &Neovim<NvimWriter>,
     _preedit: &str,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<(Vec<String>, usize)> {
     // Use nvim-cmp's Lua API directly - it has its own window system
     let result = nvim
         .command_output(
             r#"lua << EOF
             local ok, cmp = pcall(require, 'cmp')
             if not ok then
-                print('[]')
+                print('{"words":[],"selected":-1,"total":0}')
                 return
             end
 
             -- Check if cmp is visible
             local visible = cmp.visible()
             if not visible then
-                print('[]')
+                print('{"words":[],"selected":-1,"total":0}')
                 return
             end
 
-            -- Get entries from cmp
-            local entries = cmp.get_entries()
-            if not entries or #entries == 0 then
-                print('[]')
+            -- Access internal context to get all entries (not just visible)
+            local context = cmp.core.context
+            local sources = cmp.core.sources or {}
+            local all_entries = {}
+
+            -- Try to get entries from the view first (what's actually displayed)
+            local view_entries = cmp.get_entries()
+            if view_entries and #view_entries > 0 then
+                all_entries = view_entries
+            end
+
+            if #all_entries == 0 then
+                print('{"words":[],"selected":-1,"total":0}')
                 return
+            end
+
+            -- Get selected index directly from cmp's internal state
+            local selected_idx = -1
+            local selected_entry = cmp.get_active_entry()
+
+            if selected_entry then
+                for i, entry in ipairs(all_entries) do
+                    if entry == selected_entry then
+                        selected_idx = i - 1  -- Convert to 0-based
+                        break
+                    end
+                end
+            end
+
+            -- If selection not found in entries, try to get index from view state
+            if selected_idx == -1 and cmp.core.view then
+                local custom_entries = cmp.core.view.custom_entries_view
+                if custom_entries and custom_entries.get_selected_index then
+                    local idx = custom_entries:get_selected_index()
+                    if idx and idx > 0 then
+                        selected_idx = idx - 1
+                    end
+                end
             end
 
             -- Extract words
             local words = {}
-            for i, entry in ipairs(entries) do
-                if i > 9 then break end
+            for _, entry in ipairs(all_entries) do
                 local word = entry:get_word()
                 if word and word ~= '' then
                     table.insert(words, word)
                 end
             end
 
-            print(vim.json.encode(words))
+            print(vim.json.encode({words = words, selected = selected_idx, total = #all_entries}))
 EOF"#,
         )
         .await
@@ -350,14 +382,46 @@ EOF"#,
 
     let result = result.trim();
 
-    if result.starts_with('[') && result != "[]" {
-        let candidates = parse_json_string_array(result);
-        if !candidates.is_empty() {
-            return Ok(candidates);
+    if result.starts_with('{') {
+        // Parse JSON object with words and selected
+        if let Some((candidates, selected)) = parse_candidates_json(result) {
+            if !candidates.is_empty() {
+                // Clamp selection to valid range
+                let selected = selected.min(candidates.len().saturating_sub(1));
+                return Ok((candidates, selected));
+            }
         }
     }
 
-    Ok(vec![])
+    Ok((vec![], 0))
+}
+
+/// Parse candidates JSON: {"words":["a","b"],"selected":0}
+fn parse_candidates_json(json: &str) -> Option<(Vec<String>, usize)> {
+    // Find words array
+    let words_start = json.find("\"words\":")?;
+    let array_start = json[words_start..].find('[')?;
+    let array_end = json[words_start + array_start..].find(']')?;
+    let array_str = &json[words_start + array_start..words_start + array_start + array_end + 1];
+    let words = parse_json_string_array(array_str);
+
+    // Find selected index
+    let selected = if let Some(sel_start) = json.find("\"selected\":") {
+        let num_start = sel_start + 11;
+        let num_end = json[num_start..]
+            .find(|c: char| !c.is_ascii_digit() && c != '-')
+            .unwrap_or(json.len() - num_start);
+        json[num_start..num_start + num_end]
+            .parse::<i32>()
+            .unwrap_or(-1)
+    } else {
+        -1
+    };
+
+    // Convert -1 (no selection) to 0
+    let selected = if selected >= 0 { selected as usize } else { 0 };
+
+    Some((words, selected))
 }
 
 /// Parse a simple JSON string array like ["a", "b", "c"]
@@ -396,35 +460,34 @@ fn parse_json_string_array(json: &str) -> Vec<String> {
         }
     }
 
-    items.truncate(9);
     items
 }
 
 /// Query nvim-cmp for completion candidates
-async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<Vec<String>> {
+async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<(Vec<String>, usize)> {
     // Check if completion menu is visible
     let pum_visible = nvim.command_output("echo pumvisible()").await?;
     if pum_visible.trim() != "1" {
-        return Ok(vec![]);
+        return Ok((vec![], 0));
     }
 
     // Get completion info using complete_info()
-    // This returns info about the popup menu
+    // This returns info about the popup menu including selected index
     let info = nvim
-        .command_output("echo json_encode(complete_info(['items']))")
+        .command_output("echo json_encode(complete_info(['items', 'selected']))")
         .await?;
 
-    // Parse JSON to extract candidate words
-    let candidates = parse_completion_items(&info);
-    eprintln!("[NVIM] Found {} candidates", candidates.len());
+    // Parse JSON to extract candidate words and selection
+    let (candidates, selected) = parse_completion_items(&info);
+    eprintln!("[NVIM] Found {} candidates, selected={}", candidates.len(), selected);
 
-    Ok(candidates)
+    Ok((candidates, selected))
 }
 
 /// Parse completion items from complete_info() JSON output
-fn parse_completion_items(json_str: &str) -> Vec<String> {
+fn parse_completion_items(json_str: &str) -> (Vec<String>, usize) {
     // Simple JSON parsing - extract "word" fields from items array
-    // Format: {"items":[{"word":"candidate1",...},{"word":"candidate2",...}]}
+    // Format: {"items":[{"word":"candidate1",...},{"word":"candidate2",...}],"selected":0}
     let mut candidates = Vec::new();
 
     // Find items array
@@ -446,5 +509,21 @@ fn parse_completion_items(json_str: &str) -> Vec<String> {
         }
     }
 
-    candidates
+    // Find selected index
+    let selected = if let Some(sel_start) = json_str.find("\"selected\":") {
+        let num_start = sel_start + 11;
+        let num_end = json_str[num_start..]
+            .find(|c: char| !c.is_ascii_digit() && c != '-')
+            .unwrap_or(json_str.len() - num_start);
+        json_str[num_start..num_start + num_end]
+            .parse::<i32>()
+            .unwrap_or(-1)
+    } else {
+        -1
+    };
+
+    // Convert -1 (no selection) to 0
+    let selected = if selected >= 0 { selected as usize } else { 0 };
+
+    (candidates, selected)
 }

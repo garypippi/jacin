@@ -128,6 +128,8 @@ pub fn render_candidates(
     renderer: &mut TextRenderer,
     candidates: &[String],
     selected: usize,
+    scroll_offset: usize,
+    max_visible: usize,
     width: u32,
     height: u32,
 ) -> Pixmap {
@@ -141,26 +143,44 @@ pub fn render_candidates(
     let text_color = Color::from_rgba8(220, 223, 228, 255);
     let selected_bg = Color::from_rgba8(61, 89, 161, 255);
     let number_color = Color::from_rgba8(152, 195, 121, 255);
+    let scrollbar_bg = Color::from_rgba8(60, 64, 72, 255);
+    let scrollbar_thumb = Color::from_rgba8(100, 104, 112, 255);
 
     let line_height = renderer.line_height();
     let padding = 8.0;
     let number_width = 24.0;
 
-    for (i, candidate) in candidates.iter().enumerate() {
-        let y_base = padding + (i as f32 * line_height);
+    let total_count = candidates.len();
+    let visible_count = max_visible.min(total_count);
+    let has_scrollbar = total_count > max_visible;
+
+    // Render visible candidates
+    for (visible_idx, candidate) in candidates
+        .iter()
+        .skip(scroll_offset)
+        .take(visible_count)
+        .enumerate()
+    {
+        let actual_idx = scroll_offset + visible_idx;
+        let y_base = padding + (visible_idx as f32 * line_height);
         let y_text = y_base + line_height * 0.75; // Baseline position
 
         // Draw selection highlight
-        if i == selected
-            && let Some(rect) = Rect::from_xywh(0.0, y_base, width as f32, line_height)
-        {
-            let mut paint = Paint::default();
-            paint.set_color(selected_bg);
-            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        if actual_idx == selected {
+            let highlight_width = if has_scrollbar {
+                width as f32 - SCROLLBAR_WIDTH - 4.0
+            } else {
+                width as f32
+            };
+            if let Some(rect) = Rect::from_xywh(0.0, y_base, highlight_width, line_height) {
+                let mut paint = Paint::default();
+                paint.set_color(selected_bg);
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            }
         }
 
-        // Draw number (1-9)
-        let number = format!("{}.", i + 1);
+        // Draw number (use actual index + 1)
+        let number = format!("{}.", actual_idx + 1);
         renderer.draw_text(&mut pixmap, &number, padding, y_text, number_color);
 
         // Draw candidate text
@@ -173,20 +193,53 @@ pub fn render_candidates(
         );
     }
 
+    // Draw scrollbar if needed
+    if has_scrollbar {
+        let scrollbar_x = width as f32 - SCROLLBAR_WIDTH - 2.0;
+        let scrollbar_height = height as f32 - padding * 2.0;
+
+        // Scrollbar track
+        if let Some(rect) = Rect::from_xywh(scrollbar_x, padding, SCROLLBAR_WIDTH, scrollbar_height) {
+            let mut paint = Paint::default();
+            paint.set_color(scrollbar_bg);
+            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        }
+
+        // Scrollbar thumb
+        let thumb_height = (visible_count as f32 / total_count as f32) * scrollbar_height;
+        let thumb_height = thumb_height.max(20.0); // Minimum thumb size
+        let scroll_range = total_count - visible_count;
+        let thumb_y = if scroll_range > 0 {
+            padding + (scroll_offset as f32 / scroll_range as f32) * (scrollbar_height - thumb_height)
+        } else {
+            padding
+        };
+
+        if let Some(rect) = Rect::from_xywh(scrollbar_x, thumb_y, SCROLLBAR_WIDTH, thumb_height) {
+            let mut paint = Paint::default();
+            paint.set_color(scrollbar_thumb);
+            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        }
+    }
+
     pixmap
 }
 
+/// Scrollbar width in pixels
+const SCROLLBAR_WIDTH: f32 = 8.0;
+
 /// Calculate required window size for candidates
-pub fn calculate_window_size(renderer: &mut TextRenderer, candidates: &[String]) -> (u32, u32) {
+pub fn calculate_window_size(renderer: &mut TextRenderer, candidates: &[String], has_scrollbar: bool) -> (u32, u32) {
     let line_height = renderer.line_height();
     let padding = 8.0;
     let number_width = 24.0;
+    let scrollbar_space = if has_scrollbar { SCROLLBAR_WIDTH + 4.0 } else { 0.0 };
 
     // Calculate max width needed
     let mut max_width = 200.0f32; // Minimum width
     for candidate in candidates {
         let text_width = renderer.measure_text(candidate);
-        max_width = max_width.max(text_width + number_width + padding * 2.0);
+        max_width = max_width.max(text_width + number_width + padding * 2.0 + scrollbar_space);
     }
 
     let height = (candidates.len() as f32 * line_height + padding * 2.0) as u32;

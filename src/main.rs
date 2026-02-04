@@ -242,39 +242,6 @@ impl State {
             return;
         }
 
-        // Handle candidate selection if candidates are visible
-        if !self.candidates.is_empty() {
-            // Number keys 1-9 for direct selection
-            if keysym.raw() >= Keysym::_1.raw() && keysym.raw() <= Keysym::_9.raw() {
-                let idx = (keysym.raw() - Keysym::_1.raw()) as usize;
-                if idx < self.candidates.len() {
-                    self.select_candidate(idx);
-                    return;
-                }
-            }
-
-            // Arrow keys for navigation
-            match keysym {
-                Keysym::Up => {
-                    self.move_selection(-1);
-                    return;
-                }
-                Keysym::Down => {
-                    self.move_selection(1);
-                    return;
-                }
-                Keysym::Return | Keysym::KP_Enter => {
-                    self.select_candidate(self.selected_candidate);
-                    return;
-                }
-                Keysym::Escape => {
-                    self.hide_candidates();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
         // Convert key to Vim notation and send to Neovim
         let vim_key = self.keysym_to_vim(keysym, &utf8);
         eprintln!("[KEY] vim_key={:?}", vim_key);
@@ -293,34 +260,6 @@ impl State {
         } else {
             eprintln!("[SKIP] no printable char, ctrl={}", self.ctrl_pressed);
         }
-    }
-
-    fn select_candidate(&mut self, idx: usize) {
-        if idx < self.candidates.len() {
-            let selected = self.candidates[idx].clone();
-            eprintln!("[CANDIDATE] Selected: {:?}", selected);
-
-            // Commit the selected candidate
-            self.preedit.clear();
-            self.input_method.commit_string(selected);
-            self.input_method.set_preedit_string(String::new(), 0, 0);
-            self.serial += 1;
-            self.input_method.commit(self.serial);
-
-            // Hide candidates
-            self.hide_candidates();
-        }
-    }
-
-    fn move_selection(&mut self, delta: i32) {
-        if self.candidates.is_empty() {
-            return;
-        }
-
-        let new_idx = (self.selected_candidate as i32 + delta)
-            .rem_euclid(self.candidates.len() as i32) as usize;
-        self.selected_candidate = new_idx;
-        self.show_candidates();
     }
 
     fn show_candidates(&mut self) {
@@ -376,13 +315,13 @@ impl State {
                 self.serial += 1;
                 self.input_method.commit(self.serial);
             }
-            FromNeovim::Candidates(candidates) => {
-                eprintln!("[NVIM] Candidates: {:?}", candidates);
+            FromNeovim::Candidates(candidates, selected) => {
+                eprintln!("[NVIM] Candidates: {:?}, selected={}", candidates, selected);
                 if candidates.is_empty() {
                     self.hide_candidates();
                 } else {
                     self.candidates = candidates;
-                    self.selected_candidate = 0;
+                    self.selected_candidate = selected;
                     self.show_candidates();
                 }
             }

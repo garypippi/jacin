@@ -15,6 +15,9 @@ struct Buffer {
     in_use: bool,
 }
 
+/// Maximum number of visible candidates (scrollable)
+const MAX_VISIBLE_CANDIDATES: usize = 9;
+
 /// Candidate selection window
 pub struct CandidateWindow {
     surface: wl_surface::WlSurface,
@@ -31,6 +34,8 @@ pub struct CandidateWindow {
     renderer: TextRenderer,
     // Pending render request (candidates, selected) - used when show() called before configure
     pending_render: Option<(Vec<String>, usize)>,
+    // Scroll offset (index of first visible candidate)
+    scroll_offset: usize,
 }
 
 impl CandidateWindow {
@@ -86,6 +91,7 @@ impl CandidateWindow {
             visible: false,
             renderer,
             pending_render: None,
+            scroll_offset: 0,
         })
     }
 
@@ -116,9 +122,24 @@ impl CandidateWindow {
             return;
         }
 
-        // Calculate required size
+        // Adjust scroll offset to keep selection visible
+        let visible_count = MAX_VISIBLE_CANDIDATES.min(candidates.len());
+        if selected < self.scroll_offset {
+            self.scroll_offset = selected;
+        } else if selected >= self.scroll_offset + visible_count {
+            self.scroll_offset = selected - visible_count + 1;
+        }
+
+        // Calculate required size (based on visible candidates, not all)
+        let visible_candidates: Vec<_> = candidates
+            .iter()
+            .skip(self.scroll_offset)
+            .take(visible_count)
+            .cloned()
+            .collect();
+        let has_scrollbar = candidates.len() > MAX_VISIBLE_CANDIDATES;
         let (new_width, new_height) =
-            text_render::calculate_window_size(&mut self.renderer, candidates);
+            text_render::calculate_window_size(&mut self.renderer, &visible_candidates, has_scrollbar);
 
         // If size changed or not configured, we need to wait for a new configure
         let size_changed = new_width != self.width || new_height != self.height;
@@ -147,6 +168,8 @@ impl CandidateWindow {
             self.visible = false;
             // After hiding, we need a new configure before showing again
             self.configured = false;
+            // Reset scroll position
+            self.scroll_offset = 0;
         }
     }
 
@@ -170,11 +193,13 @@ impl CandidateWindow {
         let buffer_idx = self.find_available_buffer();
         let offset = buffer_idx * buffer_size;
 
-        // Render to pixmap
+        // Render to pixmap with scroll info
         let pixmap = text_render::render_candidates(
             &mut self.renderer,
             candidates,
             selected,
+            self.scroll_offset,
+            MAX_VISIBLE_CANDIDATES,
             self.width,
             self.height,
         );
