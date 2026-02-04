@@ -241,6 +241,16 @@ impl State {
                 self.serial += 1;
                 self.input_method.commit(self.serial);
             }
+            FromNeovim::DeleteSurrounding(before, after) => {
+                eprintln!("[NVIM] DeleteSurrounding: before={}, after={}", before, after);
+                self.input_method.delete_surrounding_text(before, after);
+                self.serial += 1;
+                self.input_method.commit(self.serial);
+            }
+            FromNeovim::Candidates(candidates) => {
+                eprintln!("[NVIM] Candidates: {:?}", candidates);
+                // TODO: Display candidate window (Phase 6)
+            }
             FromNeovim::Error(e) => {
                 eprintln!("[NVIM] Error: {}", e);
             }

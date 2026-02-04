@@ -27,6 +27,10 @@ pub enum FromNeovim {
     Preedit(String),
     /// Text should be committed
     Commit(String),
+    /// Delete surrounding text (before_length, after_length)
+    DeleteSurrounding(u32, u32),
+    /// Completion candidates from nvim-cmp
+    Candidates(Vec<String>),
     /// Neovim is ready
     Ready,
     /// Error occurred
@@ -186,7 +190,19 @@ async fn handle_key(
         return Ok(());
     }
 
-    // Send key to Neovim using feedkeys
+    // Handle Backspace specially - if line is empty, delete from committed text
+    if key == "<BS>" {
+        let line = nvim.command_output("echo getline('.')").await?;
+        let line = line.trim();
+
+        if line.is_empty() {
+            // Nothing in preedit, delete from committed text
+            let _ = tx.send(FromNeovim::DeleteSurrounding(1, 0));
+            return Ok(());
+        }
+        // Otherwise, let Neovim handle the backspace normally (fall through)
+    }
+
     // Handle Ctrl+J specially - trigger the <Plug>(skkeleton-toggle) mapping
     if key == "<C-j>" {
         eprintln!("[NVIM] Toggling skkeleton via <Plug> mapping...");
@@ -225,5 +241,61 @@ async fn handle_key(
     eprintln!("[NVIM] preedit: {:?}", line);
     let _ = tx.send(FromNeovim::Preedit(line));
 
+    // Check for completion candidates (nvim-cmp)
+    if let Ok(candidates) = get_completion_candidates(nvim).await {
+        if !candidates.is_empty() {
+            let _ = tx.send(FromNeovim::Candidates(candidates));
+        }
+    }
+
     Ok(())
+}
+
+/// Query nvim-cmp for completion candidates
+async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<Vec<String>> {
+    // Check if completion menu is visible
+    let pum_visible = nvim.command_output("echo pumvisible()").await?;
+    if pum_visible.trim() != "1" {
+        return Ok(vec![]);
+    }
+
+    // Get completion info using complete_info()
+    // This returns info about the popup menu
+    let info = nvim
+        .command_output("echo json_encode(complete_info(['items']))")
+        .await?;
+
+    // Parse JSON to extract candidate words
+    let candidates = parse_completion_items(&info);
+    eprintln!("[NVIM] Found {} candidates", candidates.len());
+
+    Ok(candidates)
+}
+
+/// Parse completion items from complete_info() JSON output
+fn parse_completion_items(json_str: &str) -> Vec<String> {
+    // Simple JSON parsing - extract "word" fields from items array
+    // Format: {"items":[{"word":"candidate1",...},{"word":"candidate2",...}]}
+    let mut candidates = Vec::new();
+
+    // Find items array
+    if let Some(items_start) = json_str.find("\"items\":[") {
+        let items_section = &json_str[items_start..];
+        // Extract each word field
+        let mut search_pos = 0;
+        while let Some(word_pos) = items_section[search_pos..].find("\"word\":\"") {
+            let start = search_pos + word_pos + 8; // skip "word":"
+            if let Some(end_pos) = items_section[start..].find('"') {
+                let word = &items_section[start..start + end_pos];
+                // Unescape basic JSON escapes
+                let word = word.replace("\\\"", "\"").replace("\\\\", "\\");
+                candidates.push(word);
+                search_pos = start + end_pos;
+            } else {
+                break;
+            }
+        }
+    }
+
+    candidates
 }
