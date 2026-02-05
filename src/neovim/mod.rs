@@ -16,6 +16,9 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 #[allow(unused_imports)]
 pub use event_source::{NeovimEventSource, NeovimPing};
 
+pub use handler::{
+    is_motion_pending, is_register_pending, pending_motion_state, pending_register_state,
+};
 pub use protocol::{FromNeovim, ToNeovim};
 
 /// Channel capacity for Neovim communication
@@ -79,7 +82,7 @@ impl From<FromNeovim> for OldFromNeovim {
         match msg {
             FromNeovim::Ready => OldFromNeovim::Ready,
             FromNeovim::Preedit(info) => {
-                OldFromNeovim::Preedit(info.text, info.cursor_begin, info.cursor_end)
+                OldFromNeovim::Preedit(info.text, info.cursor_begin, info.cursor_end, info.mode)
             }
             FromNeovim::Commit(text) => OldFromNeovim::Commit(text),
             FromNeovim::DeleteSurrounding { before, after } => {
@@ -95,8 +98,8 @@ impl From<FromNeovim> for OldFromNeovim {
 /// Old message format for backwards compatibility
 #[derive(Debug, Clone)]
 pub enum OldFromNeovim {
-    /// Preedit text changed (text, cursor_begin, cursor_end)
-    Preedit(String, usize, usize),
+    /// Preedit text changed (text, cursor_begin, cursor_end, mode)
+    Preedit(String, usize, usize, String),
     /// Text should be committed
     Commit(String),
     /// Delete surrounding text (before_length, after_length)

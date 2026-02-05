@@ -28,6 +28,7 @@ src/
     wayland.rs               # WaylandState (protocol handles, serial)
     keyboard.rs              # KeyboardState (XKB, modifiers, debouncing)
     ime.rs                   # ImeState, ImeMode state machine, VimMode
+    keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
   neovim/
     mod.rs                   # NeovimHandle (public API)
     protocol.rs              # ToNeovim, FromNeovim typed messages (serde)
@@ -36,15 +37,16 @@ src/
   ui/
     mod.rs                   # Re-exports
     candidate_window.rs      # Candidate popup UI (input_popup_surface)
+    keypress_window.rs       # Keypress display popup (shows key sequences)
     text_render.rs           # Font rendering with fontdue
 ```
 
 ## Key Components
 
-- **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `ImeState`
+- **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `ImeState`, `KeypressState`
 - **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
-- **UI module**: Candidate window and text rendering
+- **UI module**: Candidate window, keypress display window, and text rendering
 
 ## Current State
 
@@ -60,6 +62,7 @@ Working:
 - Cursor position display: line cursor in insert mode, block cursor in normal mode
 - Vim text object motions (diw, ciw, daw, etc.)
 - Yank & paste: y$, yw, yiw, <C-r>" (insert mode), "ay$ (named registers)
+- Keypress display window: shows insert mode entry keys (i, a, A, o), register paste sequences (<C-r>a), and completed operator sequences (d$, "ay$) for 1.5s
 
 Known Issues:
 - Ctrl+C exits IME (should clear preedit instead)

@@ -14,6 +14,33 @@ use super::protocol::{
     CandidateInfo, CmpCandidatesJson, CompleteInfoJson, FromNeovim, PreeditInfo, ToNeovim,
 };
 
+/// Track pending states for multi-key sequences
+/// 0 = not pending, 1 = waiting for motion, 2 = waiting for text object char (after i/a)
+static PENDING_MOTION: AtomicU8 = AtomicU8::new(0);
+/// 0 = not pending, 1 = waiting for register name (insert mode <C-r>)
+/// 2 = waiting for register name (normal mode ")
+static PENDING_REGISTER: AtomicU8 = AtomicU8::new(0);
+
+/// Check if waiting for motion (operator pending mode)
+pub fn is_motion_pending() -> bool {
+    PENDING_MOTION.load(Ordering::SeqCst) > 0
+}
+
+/// Check if waiting for register name
+pub fn is_register_pending() -> bool {
+    PENDING_REGISTER.load(Ordering::SeqCst) > 0
+}
+
+/// Get the pending motion state (0 = none, 1 = motion, 2 = text object)
+pub fn pending_motion_state() -> u8 {
+    PENDING_MOTION.load(Ordering::SeqCst)
+}
+
+/// Get the pending register state (0 = none, 1 = insert <C-r>, 2 = normal ")
+pub fn pending_register_state() -> u8 {
+    PENDING_REGISTER.load(Ordering::SeqCst)
+}
+
 /// Empty handler - we don't need to handle notifications for now
 #[derive(Clone)]
 pub struct NvimHandler;
@@ -261,15 +288,13 @@ EOF"#,
         return Ok(());
     }
 
-    // Track pending states for multi-key sequences
-    static PENDING_MOTION: AtomicU8 = AtomicU8::new(0);
-    // 0 = not pending, 1 = waiting for motion, 2 = waiting for text object char (after i/a)
-    static PENDING_REGISTER: AtomicU8 = AtomicU8::new(0);
-    // 0 = not pending, 1 = waiting for register name (insert mode <C-r>)
-    // 2 = waiting for register name (normal mode ")
-
     // Handle Ctrl+R in insert mode - check mode BEFORE sending to avoid hang
-    if key == "<C-r>" && PENDING_MOTION.load(Ordering::SeqCst) == 0 {
+    // IMPORTANT: Also check PENDING_REGISTER - if already waiting for register,
+    // don't query mode (Neovim is blocked waiting for register char and will hang)
+    if key == "<C-r>"
+        && PENDING_MOTION.load(Ordering::SeqCst) == 0
+        && PENDING_REGISTER.load(Ordering::SeqCst) == 0
+    {
         let mode_str = nvim.command_output("echo mode(1)").await?;
         let mode = mode_str.trim();
         if mode == "i" {
@@ -306,14 +331,21 @@ EOF"#,
             register_pending, key
         );
         let _ = nvim.input(key).await;
-        PENDING_REGISTER.store(0, Ordering::SeqCst);
 
         if register_pending == 1 {
-            // Insert mode <C-r> - paste happened, query preedit
+            // Insert mode <C-r> handling
+            if key == "<C-r>" {
+                // <C-r><C-r> means "insert register literally" - still waiting for register name
+                eprintln!("[NVIM] Literal register insert mode, still waiting for register name");
+                return Ok(());
+            }
+            // Normal register paste - paste happened, query preedit
+            PENDING_REGISTER.store(0, Ordering::SeqCst);
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             true // Key was sent, continue to query preedit
         } else {
             // Normal mode " - register selected, now waiting for operator
+            PENDING_REGISTER.store(0, Ordering::SeqCst);
             // Return early - preedit unchanged, next key will be operator
             eprintln!("[NVIM] Register '{}' selected, waiting for operator", key);
             return Ok(());
@@ -392,7 +424,10 @@ EOF"#,
 
     // Get line content (only trim trailing newline, preserve spaces)
     let line = nvim.command_output("echo getline('.')").await?;
-    let line = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
+    let line = line
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_string();
 
     // Get cursor column (1-indexed byte position)
     let col_str = nvim.command_output("echo col('.')").await?;

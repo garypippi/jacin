@@ -6,6 +6,7 @@ use calloop::{
     EventLoop, LoopSignal,
     ping::make_ping,
     signals::{Signal, Signals},
+    timer::{TimeoutAction, Timer},
 };
 use calloop_wayland_source::WaylandSource;
 use wayland_client::{
@@ -25,9 +26,12 @@ mod neovim;
 mod state;
 mod ui;
 
-use neovim::{FromNeovim, NeovimHandle, OldFromNeovim};
-use state::{ImeState, KeyboardState, WaylandState};
-use ui::{CandidateWindow, TextRenderer};
+use neovim::{
+    FromNeovim, NeovimHandle, OldFromNeovim, is_motion_pending, is_register_pending,
+    pending_motion_state, pending_register_state,
+};
+use state::{ImeState, KeyboardState, KeypressState, PendingType, WaylandState};
+use ui::{CandidateWindow, KeypressWindow, TextRenderer};
 
 // Helper to convert new FromNeovim to old format during transition
 fn convert_nvim_msg(msg: FromNeovim) -> OldFromNeovim {
@@ -99,16 +103,34 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Create keypress window with a separate renderer instance
+    let keypress_window = if let Some(kp_renderer) = TextRenderer::new(14.0) {
+        match KeypressWindow::new(&compositor, &input_method, &shm, &qh, kp_renderer) {
+            Some(win) => {
+                eprintln!("Keypress window created");
+                Some(win)
+            }
+            None => {
+                eprintln!("Failed to create keypress window");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Create application state
     let mut state = State {
         loop_signal: None,
         wayland: WaylandState::new(qh.clone(), input_method),
         keyboard: KeyboardState::new(),
         ime: ImeState::new(),
+        keypress: KeypressState::new(),
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
         nvim,
         candidate_window,
+        keypress_window,
     };
 
     // Set up calloop event loop
@@ -148,6 +170,20 @@ fn main() -> anyhow::Result<()> {
     event_loop
         .handle()
         .insert_source(ping_source, |_, _, _| {})?;
+
+    // Add timer for keypress display timeout (fires every 100ms to check)
+    let timer = Timer::from_duration(std::time::Duration::from_millis(100));
+    event_loop
+        .handle()
+        .insert_source(timer, |_, _, state| {
+            // Check for keypress display timeout
+            if state.keypress.should_show() && state.keypress.is_timed_out() {
+                state.hide_keypress();
+            }
+            // Re-arm the timer to fire again
+            TimeoutAction::ToDuration(std::time::Duration::from_millis(100))
+        })
+        .expect("Failed to insert timer source");
 
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -189,6 +225,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(window) = state.candidate_window.take() {
         window.destroy();
     }
+    if let Some(window) = state.keypress_window.take() {
+        window.destroy();
+    }
 
     eprintln!("Goodbye!");
 
@@ -202,6 +241,7 @@ pub struct State {
     wayland: WaylandState,
     keyboard: KeyboardState,
     ime: ImeState,
+    keypress: KeypressState,
     // Exit and toggle flags
     pending_exit: bool,
     toggle_flag: Arc<AtomicBool>,
@@ -209,6 +249,8 @@ pub struct State {
     nvim: Option<NeovimHandle>,
     // Candidate window
     candidate_window: Option<CandidateWindow>,
+    // Keypress display window
+    keypress_window: Option<KeypressWindow>,
 }
 
 impl State {
@@ -232,9 +274,10 @@ impl State {
             if let Some(ref nvim) = self.nvim {
                 nvim.send_key("<A-`>");
             }
-            // Clear preedit
+            // Clear preedit and keypress display
             self.ime.clear_preedit();
             self.wayland.clear_preedit();
+            self.hide_keypress();
             self.ime.disable();
         }
     }
@@ -283,9 +326,48 @@ impl State {
         eprintln!("[KEY] vim_key={:?}", vim_key);
 
         if let Some(ref vim_key) = vim_key {
+            // Track state before sending to Neovim
+            let was_normal = self.keypress.is_normal_mode();
+            let was_motion_pending = is_motion_pending();
+            let was_register_pending = is_register_pending();
+            let was_insert_register_pending =
+                was_register_pending && pending_register_state() == 1;
+
             self.send_to_nvim(vim_key);
             // Wait for Neovim response with timeout
             self.wait_for_nvim_response();
+
+            // Check state after Neovim response
+            let now_pending = is_motion_pending() || is_register_pending();
+            let is_normal = self.keypress.is_normal_mode();
+            let is_insert = self.keypress.vim_mode == "i";
+
+            if now_pending {
+                // In pending state (operator or register) - accumulate key and show
+                self.keypress.push_key(vim_key);
+                self.update_keypress_from_pending();
+                self.show_keypress();
+            } else if was_insert_register_pending && is_insert {
+                // Just completed <C-r> + register in insert mode - show full sequence
+                self.keypress.push_key(vim_key);
+                self.show_keypress();
+            } else if was_normal && is_insert {
+                // Just entered insert mode from normal - show the entry key (i, a, A, o, etc.)
+                self.keypress.clear();
+                self.keypress.push_key(vim_key);
+                self.show_keypress();
+            } else if is_normal {
+                // In normal mode - show completed sequences
+                if was_motion_pending || was_register_pending {
+                    // Sequence completed (e.g., "d$", "\"ay$") - add final key
+                    self.keypress.push_key(vim_key);
+                    self.show_keypress();
+                }
+                // Don't show standalone normal mode keys (h, j, k, l, etc.)
+            } else {
+                // In insert mode typing - hide keypress display
+                self.hide_keypress();
+            }
         } else if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
             // Fallback: if no Neovim or no vim key, use local preedit
             if self.nvim.is_none() {
@@ -302,6 +384,8 @@ impl State {
     }
 
     fn show_candidates(&mut self) {
+        // Hide keypress window when showing candidates
+        self.hide_keypress();
         if let Some(ref mut window) = self.candidate_window {
             let qh = self.wayland.qh.clone();
             window.show(&self.ime.candidates, self.ime.selected_candidate, &qh);
@@ -312,6 +396,53 @@ impl State {
         self.ime.clear_candidates();
         if let Some(ref mut window) = self.candidate_window {
             window.hide();
+        }
+        // Re-show keypress if still pending
+        if self.keypress.should_show() {
+            self.show_keypress();
+        }
+    }
+
+    fn show_keypress(&mut self) {
+        // Don't show if candidate window is visible
+        if let Some(ref window) = self.candidate_window
+            && window.visible
+        {
+            return;
+        }
+        if let Some(ref mut window) = self.keypress_window {
+            let qh = self.wayland.qh.clone();
+            window.show(&self.keypress.accumulated, &qh);
+        }
+    }
+
+    fn hide_keypress(&mut self) {
+        self.keypress.clear();
+        if let Some(ref mut window) = self.keypress_window {
+            window.hide();
+        }
+    }
+
+    fn update_keypress_from_pending(&mut self) {
+        // Sync keypress state with neovim pending state
+        let motion_state = pending_motion_state();
+        let register_state = pending_register_state();
+
+        if motion_state > 0 {
+            self.keypress.set_pending(match motion_state {
+                1 => PendingType::Motion,
+                2 => PendingType::TextObject,
+                _ => PendingType::None,
+            });
+        } else if register_state > 0 {
+            self.keypress.set_pending(match register_state {
+                1 => PendingType::InsertRegister,
+                2 => PendingType::NormalRegister,
+                _ => PendingType::None,
+            });
+        } else {
+            // No pending state - hide keypress display
+            self.hide_keypress();
         }
     }
 
@@ -331,12 +462,13 @@ impl State {
             OldFromNeovim::Ready => {
                 eprintln!("[NVIM] Backend ready!");
             }
-            OldFromNeovim::Preedit(text, cursor_begin, cursor_end) => {
+            OldFromNeovim::Preedit(text, cursor_begin, cursor_end, mode) => {
                 eprintln!(
-                    "[NVIM] Preedit: {:?}, cursor: {}..{}",
-                    text, cursor_begin, cursor_end
+                    "[NVIM] Preedit: {:?}, cursor: {}..{}, mode: {}",
+                    text, cursor_begin, cursor_end, mode
                 );
                 self.ime.set_preedit(text, cursor_begin, cursor_end);
+                self.keypress.set_vim_mode(&mode);
                 self.update_preedit();
             }
             OldFromNeovim::Commit(text) => {
@@ -569,6 +701,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
 }
 
 // Dispatch for buffer (with buffer index as user data)
+// Candidate window uses indices 0 and 1, keypress window uses index 2
 impl Dispatch<wl_buffer::WlBuffer, usize> for State {
     fn event(
         state: &mut Self,
@@ -580,7 +713,11 @@ impl Dispatch<wl_buffer::WlBuffer, usize> for State {
     ) {
         if let wl_buffer::Event::Release = event {
             eprintln!("[BUFFER] Released: {}", data);
-            if let Some(ref mut window) = state.candidate_window {
+            // Only route to candidate window for its buffer indices (0 and 1)
+            // Index 2 is used by keypress window which doesn't track buffer state
+            if *data < 2
+                && let Some(ref mut window) = state.candidate_window
+            {
                 window.buffer_released(*data);
             }
         }
@@ -654,11 +791,12 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
             zwp_input_method_v2::Event::Deactivate => {
                 eprintln!("IME deactivated");
                 state.wayland.active = false;
-                // Clear preedit and hide candidates when deactivated
+                // Clear preedit and hide windows when deactivated
                 // This prevents stale preedit from being committed when switching windows
                 state.ime.clear_preedit();
                 state.wayland.clear_preedit();
                 state.hide_candidates();
+                state.hide_keypress();
                 // Also clear Neovim buffer to reset state
                 if let Some(ref nvim) = state.nvim {
                     nvim.send_key("<Esc>ggdG");
