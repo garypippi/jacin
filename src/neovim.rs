@@ -234,6 +234,20 @@ async fn handle_key(
         return Ok(());
     }
 
+    // Handle Enter - only pass to neovim if in SKK conversion mode
+    if key == "<CR>" {
+        let line = nvim.command_output("echo getline('.')").await?;
+        let line = line.trim();
+
+        // Only pass Enter to neovim if in conversion mode (has markers)
+        if line.contains('▼') || line.contains('▽') {
+            // Fall through to normal key handling
+        } else {
+            // No markers - ignore Enter (don't create newlines)
+            return Ok(());
+        }
+    }
+
     // Escape passes through to Neovim (switches to normal mode)
     // No special handling - falls through to normal key handling
 
@@ -282,8 +296,8 @@ EOF"#,
         return Ok(());
     }
 
-    // Handle Ctrl+J specially - trigger the <Plug>(skkeleton-toggle) mapping
-    if key == "<C-j>" {
+    // Handle Alt+` - trigger the <Plug>(skkeleton-toggle) mapping
+    if key == "<A-`>" {
         eprintln!("[NVIM] Toggling skkeleton via <Plug> mapping...");
         // Clear any existing text using Ctrl+U (works in insert mode)
         nvim.command("call feedkeys(\"\\<C-u>\", 'n')").await?;

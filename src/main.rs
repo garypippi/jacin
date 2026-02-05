@@ -1,7 +1,11 @@
 use std::os::fd::{AsFd, AsRawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 use calloop::{
     EventLoop, LoopSignal,
+    ping::make_ping,
     signals::{Signal, Signals},
 };
 use calloop_wayland_source::WaylandSource;
@@ -105,7 +109,14 @@ fn main() -> anyhow::Result<()> {
         active: false,
         serial: 0,
         ctrl_pressed: false,
+        alt_pressed: false,
         pending_exit: false,
+        toggle_flag: Arc::new(AtomicBool::new(false)),
+        skkeleton_enabled: false,
+        grab_pending_keymap: false,
+        pending_skkeleton_enable: false,
+        ready_time: None,
+        ignored_keys: std::collections::HashSet::new(),
         preedit: String::new(),
         nvim,
         candidate_window,
@@ -122,13 +133,32 @@ fn main() -> anyhow::Result<()> {
 
     // Set up signal handling for clean exit
     let loop_signal = state.loop_signal.clone();
-    let signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])?;
-    event_loop.handle().insert_source(signals, move |_, _, _| {
-        eprintln!("\nReceived signal, exiting...");
-        if let Some(ref signal) = loop_signal {
-            signal.stop();
-        }
-    })?;
+    let exit_signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])?;
+    event_loop
+        .handle()
+        .insert_source(exit_signals, move |_, _, _| {
+            eprintln!("\nReceived signal, exiting...");
+            if let Some(ref signal) = loop_signal {
+                signal.stop();
+            }
+        })?;
+
+    // Set up SIGUSR1 for IME toggle (triggered by: pkill -SIGUSR1 custom-ime)
+    // Use a ping to wake up the event loop when signal arrives
+    let (ping, ping_source) = make_ping()?;
+    let toggle_flag_clone = state.toggle_flag.clone();
+
+    // Register signal handler that sets flag AND pings the event loop
+    let ping_clone = ping.clone();
+    unsafe {
+        signal_hook::low_level::register(signal_hook::consts::SIGUSR1, move || {
+            toggle_flag_clone.store(true, Ordering::SeqCst);
+            ping_clone.ping();
+        })?;
+    }
+
+    // Add ping source to event loop (just to wake it up, we handle toggle in the callback)
+    event_loop.handle().insert_source(ping_source, |_, _, _| {})?;
 
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -138,6 +168,11 @@ fn main() -> anyhow::Result<()> {
 
     // Run the event loop
     event_loop.run(None, &mut state, |state| {
+        // Check for IME toggle signal (SIGUSR1)
+        if state.toggle_flag.swap(false, Ordering::SeqCst) {
+            state.handle_ime_toggle();
+        }
+
         // Check for messages from Neovim
         // Collect messages first to avoid borrow conflict
         let messages: Vec<_> = state
@@ -184,7 +219,14 @@ pub struct State {
     active: bool,
     serial: u32,
     ctrl_pressed: bool,
+    alt_pressed: bool,
     pending_exit: bool,
+    toggle_flag: Arc<AtomicBool>,
+    skkeleton_enabled: bool,
+    grab_pending_keymap: bool,
+    pending_skkeleton_enable: bool,
+    ready_time: Option<Instant>,
+    ignored_keys: std::collections::HashSet<u32>,
     // Preedit state
     preedit: String,
     // Neovim backend
@@ -196,6 +238,39 @@ pub struct State {
 }
 
 impl State {
+    fn handle_ime_toggle(&mut self) {
+        self.skkeleton_enabled = !self.skkeleton_enabled;
+        eprintln!(
+            "[IME] Toggle: skkeleton_enabled = {}",
+            self.skkeleton_enabled
+        );
+
+        if self.skkeleton_enabled {
+            // Grab keyboard - skkeleton toggle will be sent after keymap loads
+            if self.active && self.keyboard_grab.is_none() {
+                eprintln!("[IME] Grabbing keyboard");
+                let grab = self.input_method.grab_keyboard(&self.qh, ());
+                self.keyboard_grab = Some(grab);
+                self.grab_pending_keymap = true;
+                self.pending_skkeleton_enable = true;
+            }
+        } else {
+            // Release keyboard and disable skkeleton
+            if let Some(grab) = self.keyboard_grab.take() {
+                eprintln!("[IME] Releasing keyboard");
+                grab.release();
+            }
+            // Send toggle to Neovim to disable skkeleton
+            if let Some(ref nvim) = self.nvim {
+                nvim.send_key("<A-`>");
+            }
+            // Clear preedit
+            self.preedit.clear();
+            self.input_method.set_preedit_string(String::new(), -1, -1);
+            self.input_method.commit(self.serial);
+        }
+    }
+
     fn handle_key(&mut self, key: u32, key_state: wl_keyboard::KeyState) {
         let state_str = match key_state {
             wl_keyboard::KeyState::Pressed => "pressed",
@@ -207,9 +282,35 @@ impl State {
             key, state_str, self.ctrl_pressed
         );
 
-        // Only handle key presses, not releases
+        // Handle key releases - remove from ignored_keys if present
         if key_state != wl_keyboard::KeyState::Pressed {
+            if self.ignored_keys.remove(&key) {
+                eprintln!("[KEY] Removed key {} from ignored set", key);
+            }
             return;
+        }
+
+        // Check if this key is still being ignored (was pressed before we were ready)
+        if self.ignored_keys.contains(&key) {
+            eprintln!("[KEY] Ignoring repeat of key {} (pressed before ready)", key);
+            return;
+        }
+
+        // Ignore keys until keymap is received after a grab
+        if self.grab_pending_keymap {
+            eprintln!("[KEY] Ignoring key {} - waiting for keymap", key);
+            self.ignored_keys.insert(key);
+            return;
+        }
+
+        // Ignore keys for 100ms after ready to let stale repeat events clear
+        if let Some(ready_time) = self.ready_time {
+            if ready_time.elapsed().as_millis() < 200 {
+                eprintln!("[KEY] Ignoring key {} - debounce after ready", key);
+                self.ignored_keys.insert(key);
+                return;
+            }
+            self.ready_time = None;
         }
 
         let Some(xkb_state) = &self.xkb_state else {
@@ -357,6 +458,16 @@ impl State {
             _ => None,
         };
 
+        // Handle Alt combinations
+        if self.alt_pressed {
+            // Alt+` (grave) for IME toggle
+            if keysym == Keysym::grave {
+                return Some("<A-`>".to_string());
+            }
+            // Other Alt combinations - pass through for now
+            return None;
+        }
+
         // Handle Ctrl combinations
         if self.ctrl_pressed {
             if let Some(key) = base_key {
@@ -365,7 +476,7 @@ impl State {
             return None;
         }
 
-        // Non-Ctrl: wrap special keys in <>, return letters/printable as-is
+        // No modifier: wrap special keys in <>, return letters/printable as-is
         match keysym {
             Keysym::Return | Keysym::KP_Enter => Some("<CR>".to_string()),
             Keysym::BackSpace => Some("<BS>".to_string()),
@@ -395,12 +506,20 @@ impl State {
         group: u32,
     ) {
         // Ctrl modifier is typically bit 2 (0x4)
+        // Alt modifier is typically bit 3 (0x8)
         const CTRL_MASK: u32 = 0x4;
+        const ALT_MASK: u32 = 0x8;
+
         let old_ctrl = self.ctrl_pressed;
+        let old_alt = self.alt_pressed;
         self.ctrl_pressed = (mods_depressed & CTRL_MASK) != 0;
+        self.alt_pressed = (mods_depressed & ALT_MASK) != 0;
 
         if old_ctrl != self.ctrl_pressed {
             eprintln!("[MOD] ctrl changed: {} -> {}", old_ctrl, self.ctrl_pressed);
+        }
+        if old_alt != self.alt_pressed {
+            eprintln!("[MOD] alt changed: {} -> {}", old_alt, self.alt_pressed);
         }
 
         if let Some(xkb_state) = &mut self.xkb_state {
@@ -582,11 +701,12 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 state.active = true;
                 eprintln!("IME activated!");
 
-                // Grab the keyboard to intercept key events
-                if state.keyboard_grab.is_none() {
+                // Only grab keyboard if skkeleton is enabled (user pressed Alt+`)
+                // This enables passthrough mode by default
+                if state.skkeleton_enabled && state.keyboard_grab.is_none() {
                     let grab = input_method.grab_keyboard(qh, ());
                     state.keyboard_grab = Some(grab);
-                    eprintln!("Keyboard grabbed");
+                    eprintln!("Keyboard grabbed (skkeleton enabled)");
                 }
             }
             zwp_input_method_v2::Event::Deactivate => {
@@ -646,7 +766,19 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             xkb::KEYMAP_COMPILE_NO_FLAGS,
                         ) {
                             state.xkb_state = Some(xkb::State::new(&keymap));
+                            state.grab_pending_keymap = false;
                             eprintln!("Keymap loaded successfully");
+
+                            // Now send the skkeleton toggle if pending
+                            if state.pending_skkeleton_enable {
+                                state.pending_skkeleton_enable = false;
+                                // Set ready_time - ignore keys for 100ms to let repeat events clear
+                                state.ready_time = Some(Instant::now());
+                                if let Some(ref nvim) = state.nvim {
+                                    eprintln!("[IME] Sending skkeleton toggle");
+                                    nvim.send_key("<A-`>");
+                                }
+                            }
                         } else {
                             eprintln!("Failed to parse keymap");
                         }
@@ -657,9 +789,12 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                 serial: _,
                 time: _,
                 key,
-                state: WEnum::Value(ks),
+                state: key_state,
             } => {
-                state.handle_key(key, ks);
+                eprintln!("[GRAB] Key event: key={}, state={:?}", key, key_state);
+                if let WEnum::Value(ks) = key_state {
+                    state.handle_key(key, ks);
+                }
             }
             zwp_input_method_keyboard_grab_v2::Event::Modifiers {
                 serial: _,

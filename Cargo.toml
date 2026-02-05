@@ -34,3 +34,6 @@ fontdb = "0.16"
 
 # Buffer management
 memmap2 = "0.9"
+
+# Signal handling
+signal-hook = "0.3"
