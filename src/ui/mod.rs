@@ -1,11 +1,9 @@
 //! UI components for the IME
 //!
-//! Contains the candidate window, keypress display, and text rendering functionality.
+//! Contains the unified popup window and text rendering functionality.
 
-mod candidate_window;
-mod keypress_window;
 mod text_render;
+mod unified_window;
 
-pub use candidate_window::CandidateWindow;
-pub use keypress_window::KeypressWindow;
 pub use text_render::TextRenderer;
+pub use unified_window::{PopupContent, UnifiedPopup};

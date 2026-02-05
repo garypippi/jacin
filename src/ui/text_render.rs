@@ -2,8 +2,14 @@
 
 use fontdb::{Database, Query};
 use fontdue::{Font, FontSettings};
+use memmap2::MmapMut;
 use std::collections::HashMap;
+use std::os::fd::AsFd;
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
+use wayland_client::QueueHandle;
+use wayland_client::protocol::{wl_shm, wl_shm_pool};
+
+use crate::State;
 
 /// Font renderer with glyph caching
 pub struct TextRenderer {
@@ -123,142 +129,81 @@ fn draw_glyph_bitmap(
     }
 }
 
-/// Render candidate list to a pixmap
-pub fn render_candidates(
-    renderer: &mut TextRenderer,
-    candidates: &[String],
-    selected: usize,
-    scroll_offset: usize,
-    max_visible: usize,
-    width: u32,
-    height: u32,
-) -> Pixmap {
-    let mut pixmap = Pixmap::new(width, height).unwrap();
+/// Create a shared memory pool for Wayland surfaces
+pub fn create_shm_pool(
+    shm: &wl_shm::WlShm,
+    qh: &QueueHandle<State>,
+    size: usize,
+    name: &str,
+) -> Option<(wl_shm_pool::WlShmPool, MmapMut)> {
+    use std::os::fd::FromRawFd;
 
-    // Background color (dark gray)
-    let bg_color = Color::from_rgba8(40, 44, 52, 255);
-    pixmap.fill(bg_color);
-
-    // Colors
-    let text_color = Color::from_rgba8(220, 223, 228, 255);
-    let selected_bg = Color::from_rgba8(61, 89, 161, 255);
-    let number_color = Color::from_rgba8(152, 195, 121, 255);
-    let scrollbar_bg = Color::from_rgba8(60, 64, 72, 255);
-    let scrollbar_thumb = Color::from_rgba8(100, 104, 112, 255);
-
-    let line_height = renderer.line_height();
-    let padding = 8.0;
-    let number_width = 24.0;
-
-    let total_count = candidates.len();
-    let visible_count = max_visible.min(total_count);
-    let has_scrollbar = total_count > max_visible;
-
-    // Render visible candidates
-    for (visible_idx, candidate) in candidates
-        .iter()
-        .skip(scroll_offset)
-        .take(visible_count)
-        .enumerate()
-    {
-        let actual_idx = scroll_offset + visible_idx;
-        let y_base = padding + (visible_idx as f32 * line_height);
-        let y_text = y_base + line_height * 0.75; // Baseline position
-
-        // Draw selection highlight
-        if actual_idx == selected {
-            let highlight_width = if has_scrollbar {
-                width as f32 - SCROLLBAR_WIDTH - 4.0
-            } else {
-                width as f32
-            };
-            if let Some(rect) = Rect::from_xywh(0.0, y_base, highlight_width, line_height) {
-                let mut paint = Paint::default();
-                paint.set_color(selected_bg);
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
-        }
-
-        // Draw number (use actual index + 1)
-        let number = format!("{}.", actual_idx + 1);
-        renderer.draw_text(&mut pixmap, &number, padding, y_text, number_color);
-
-        // Draw candidate text
-        renderer.draw_text(
-            &mut pixmap,
-            candidate,
-            padding + number_width,
-            y_text,
-            text_color,
-        );
-    }
-
-    // Draw scrollbar if needed
-    if has_scrollbar {
-        let scrollbar_x = width as f32 - SCROLLBAR_WIDTH - 2.0;
-        let scrollbar_height = height as f32 - padding * 2.0;
-
-        // Scrollbar track
-        if let Some(rect) = Rect::from_xywh(scrollbar_x, padding, SCROLLBAR_WIDTH, scrollbar_height)
-        {
-            let mut paint = Paint::default();
-            paint.set_color(scrollbar_bg);
-            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-        }
-
-        // Scrollbar thumb
-        let thumb_height = (visible_count as f32 / total_count as f32) * scrollbar_height;
-        let thumb_height = thumb_height.max(20.0); // Minimum thumb size
-        let scroll_range = total_count - visible_count;
-        let thumb_y = if scroll_range > 0 {
-            padding
-                + (scroll_offset as f32 / scroll_range as f32) * (scrollbar_height - thumb_height)
-        } else {
-            padding
-        };
-
-        if let Some(rect) = Rect::from_xywh(scrollbar_x, thumb_y, SCROLLBAR_WIDTH, thumb_height) {
-            let mut paint = Paint::default();
-            paint.set_color(scrollbar_thumb);
-            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-        }
-    }
-
-    pixmap
-}
-
-/// Scrollbar width in pixels
-const SCROLLBAR_WIDTH: f32 = 8.0;
-
-/// Calculate required window size for candidates
-pub fn calculate_window_size(
-    renderer: &mut TextRenderer,
-    candidates: &[String],
-    has_scrollbar: bool,
-) -> (u32, u32) {
-    let line_height = renderer.line_height();
-    let padding = 8.0;
-    let number_width = 24.0;
-    let scrollbar_space = if has_scrollbar {
-        SCROLLBAR_WIDTH + 4.0
-    } else {
-        0.0
+    // Create anonymous file with memfd_create
+    let fd = unsafe {
+        let c_name = std::ffi::CString::new(name).ok()?;
+        libc::memfd_create(c_name.as_ptr(), libc::MFD_CLOEXEC)
     };
 
-    // Calculate max width needed
-    let mut max_width = 200.0f32; // Minimum width
-    for candidate in candidates {
-        let text_width = renderer.measure_text(candidate);
-        max_width = max_width.max(text_width + number_width + padding * 2.0 + scrollbar_space);
+    if fd < 0 {
+        eprintln!("[SHM] Failed to create memfd for {}", name);
+        return None;
     }
 
-    let height = (candidates.len() as f32 * line_height + padding * 2.0) as u32;
-    let width = max_width.ceil() as u32;
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
 
-    // Align to 4 bytes for wl_shm
-    let width = (width + 3) & !3;
+    // Set file size
+    if file.set_len(size as u64).is_err() {
+        eprintln!("[SHM] Failed to set memfd size for {}", name);
+        return None;
+    }
 
-    (width.max(100), height.max(30))
+    // Memory map the file
+    let mmap = unsafe { MmapMut::map_mut(&file) }.ok()?;
+
+    // Create wl_shm_pool
+    let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
+
+    // Keep file alive by leaking it (pool owns the fd now)
+    std::mem::forget(file);
+
+    Some((pool, mmap))
+}
+
+/// Copy pixmap data to SHM buffer, converting RGBA to ARGB (Wayland format)
+pub fn copy_pixmap_to_shm(pixmap: &Pixmap, dest: &mut [u8]) {
+    let src = pixmap.data();
+    for (i, chunk) in src.chunks(4).enumerate() {
+        if i * 4 + 3 < dest.len() {
+            // tiny-skia uses premultiplied RGBA, Wayland wants ARGB
+            dest[i * 4] = chunk[2]; // B
+            dest[i * 4 + 1] = chunk[1]; // G
+            dest[i * 4 + 2] = chunk[0]; // R
+            dest[i * 4 + 3] = chunk[3]; // A
+        }
+    }
+}
+
+/// Draw a 1-pixel border around the pixmap
+pub fn draw_border(pixmap: &mut Pixmap, width: u32, height: u32, color: Color) {
+    let mut paint = Paint::default();
+    paint.set_color(color);
+
+    // Top
+    if let Some(rect) = Rect::from_xywh(0.0, 0.0, width as f32, 1.0) {
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
+    // Bottom
+    if let Some(rect) = Rect::from_xywh(0.0, height as f32 - 1.0, width as f32, 1.0) {
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
+    // Left
+    if let Some(rect) = Rect::from_xywh(0.0, 0.0, 1.0, height as f32) {
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
+    // Right
+    if let Some(rect) = Rect::from_xywh(width as f32 - 1.0, 0.0, 1.0, height as f32) {
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
 }
 
 /// Load a Japanese-capable font from system fonts

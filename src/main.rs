@@ -31,7 +31,7 @@ use neovim::{
     pending_motion_state, pending_register_state,
 };
 use state::{ImeState, KeyboardState, KeypressState, PendingType, WaylandState};
-use ui::{CandidateWindow, KeypressWindow, TextRenderer};
+use ui::{PopupContent, TextRenderer, UnifiedPopup};
 
 // Helper to convert new FromNeovim to old format during transition
 fn convert_nvim_msg(msg: FromNeovim) -> OldFromNeovim {
@@ -80,38 +80,22 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Try to create text renderer for candidate window
+    // Try to create text renderer for unified popup window
     let text_renderer = TextRenderer::new(16.0);
     if text_renderer.is_none() {
-        eprintln!("Warning: Font not available, candidate window disabled");
+        eprintln!("Warning: Font not available, popup window disabled");
     }
 
-    // Create candidate window using input method popup surface
+    // Create unified popup window using input method popup surface
     // The popup surface is automatically positioned near the cursor by the compositor
-    let candidate_window = if let Some(renderer) = text_renderer {
-        match CandidateWindow::new(&compositor, &input_method, &shm, &qh, renderer) {
+    let popup = if let Some(renderer) = text_renderer {
+        match UnifiedPopup::new(&compositor, &input_method, &shm, &qh, renderer) {
             Some(win) => {
-                eprintln!("Candidate window created (using input popup surface)");
+                eprintln!("Unified popup window created (using input popup surface)");
                 Some(win)
             }
             None => {
-                eprintln!("Failed to create candidate window");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Create keypress window with a separate renderer instance
-    let keypress_window = if let Some(kp_renderer) = TextRenderer::new(14.0) {
-        match KeypressWindow::new(&compositor, &input_method, &shm, &qh, kp_renderer) {
-            Some(win) => {
-                eprintln!("Keypress window created");
-                Some(win)
-            }
-            None => {
-                eprintln!("Failed to create keypress window");
+                eprintln!("Failed to create unified popup window");
                 None
             }
         }
@@ -129,8 +113,7 @@ fn main() -> anyhow::Result<()> {
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
         nvim,
-        candidate_window,
-        keypress_window,
+        popup,
     };
 
     // Set up calloop event loop
@@ -222,10 +205,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(ref nvim) = state.nvim {
         nvim.shutdown();
     }
-    if let Some(window) = state.candidate_window.take() {
-        window.destroy();
-    }
-    if let Some(window) = state.keypress_window.take() {
+    if let Some(window) = state.popup.take() {
         window.destroy();
     }
 
@@ -247,10 +227,8 @@ pub struct State {
     toggle_flag: Arc<AtomicBool>,
     // Neovim backend
     nvim: Option<NeovimHandle>,
-    // Candidate window
-    candidate_window: Option<CandidateWindow>,
-    // Keypress display window
-    keypress_window: Option<KeypressWindow>,
+    // Unified popup window (preedit, keypress, candidates)
+    popup: Option<UnifiedPopup>,
 }
 
 impl State {
@@ -277,7 +255,8 @@ impl State {
             // Clear preedit and keypress display
             self.ime.clear_preedit();
             self.wayland.clear_preedit();
-            self.hide_keypress();
+            self.keypress.clear();
+            self.hide_popup();
             self.ime.disable();
         }
     }
@@ -383,44 +362,54 @@ impl State {
         }
     }
 
-    fn show_candidates(&mut self) {
-        // Hide keypress window when showing candidates
-        self.hide_keypress();
-        if let Some(ref mut window) = self.candidate_window {
+    /// Update the unified popup with current state
+    fn update_popup(&mut self) {
+        let content = PopupContent {
+            preedit: self.ime.preedit.clone(),
+            cursor_begin: self.ime.cursor_begin,
+            cursor_end: self.ime.cursor_end,
+            vim_mode: self.keypress.vim_mode.clone(),
+            keypress: if self.keypress.should_show() {
+                self.keypress.accumulated.clone()
+            } else {
+                String::new()
+            },
+            candidates: self.ime.candidates.clone(),
+            selected: self.ime.selected_candidate,
+        };
+        if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();
-            window.show(&self.ime.candidates, self.ime.selected_candidate, &qh);
+            popup.update(&content, &qh);
         }
+    }
+
+    /// Hide the unified popup
+    fn hide_popup(&mut self) {
+        if let Some(ref mut popup) = self.popup {
+            popup.hide();
+        }
+    }
+
+    fn show_candidates(&mut self) {
+        self.update_popup();
     }
 
     fn hide_candidates(&mut self) {
         self.ime.clear_candidates();
-        if let Some(ref mut window) = self.candidate_window {
-            window.hide();
-        }
-        // Re-show keypress if still pending
-        if self.keypress.should_show() {
-            self.show_keypress();
-        }
+        self.update_popup();
     }
 
     fn show_keypress(&mut self) {
-        // Don't show if candidate window is visible
-        if let Some(ref window) = self.candidate_window
-            && window.visible
-        {
-            return;
-        }
-        if let Some(ref mut window) = self.keypress_window {
-            let qh = self.wayland.qh.clone();
-            window.show(&self.keypress.accumulated, &qh);
-        }
+        self.update_popup();
     }
 
     fn hide_keypress(&mut self) {
         self.keypress.clear();
-        if let Some(ref mut window) = self.keypress_window {
-            window.hide();
-        }
+        self.update_popup();
+    }
+
+    fn show_preedit_window(&mut self) {
+        self.update_popup();
     }
 
     fn update_keypress_from_pending(&mut self) {
@@ -455,6 +444,8 @@ impl State {
             "[PREEDIT] updated: {:?}, cursor: {}..{}",
             self.ime.preedit, cursor_begin, cursor_end
         );
+        // Show preedit window with cursor visualization
+        self.show_preedit_window();
     }
 
     fn handle_nvim_message(&mut self, msg: OldFromNeovim) {
@@ -474,9 +465,10 @@ impl State {
             OldFromNeovim::Commit(text) => {
                 eprintln!("[NVIM] Commit: {:?}", text);
                 self.ime.clear_preedit();
+                self.ime.clear_candidates();
                 self.wayland.commit_string(&text);
-                // Hide candidates on commit
-                self.hide_candidates();
+                // Hide popup on commit
+                self.hide_popup();
             }
             OldFromNeovim::DeleteSurrounding(before, after) => {
                 eprintln!(
@@ -701,7 +693,7 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
 }
 
 // Dispatch for buffer (with buffer index as user data)
-// Candidate window uses indices 0 and 1, keypress window uses index 2
+// Unified popup uses indices 0 and 1 for double buffering
 impl Dispatch<wl_buffer::WlBuffer, usize> for State {
     fn event(
         state: &mut Self,
@@ -713,12 +705,10 @@ impl Dispatch<wl_buffer::WlBuffer, usize> for State {
     ) {
         if let wl_buffer::Event::Release = event {
             eprintln!("[BUFFER] Released: {}", data);
-            // Only route to candidate window for its buffer indices (0 and 1)
-            // Index 2 is used by keypress window which doesn't track buffer state
             if *data < 2
-                && let Some(ref mut window) = state.candidate_window
+                && let Some(ref mut popup) = state.popup
             {
-                window.buffer_released(*data);
+                popup.buffer_released(*data);
             }
         }
     }
@@ -791,12 +781,13 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
             zwp_input_method_v2::Event::Deactivate => {
                 eprintln!("IME deactivated");
                 state.wayland.active = false;
-                // Clear preedit and hide windows when deactivated
+                // Clear preedit and hide popup when deactivated
                 // This prevents stale preedit from being committed when switching windows
                 state.ime.clear_preedit();
+                state.ime.clear_candidates();
+                state.keypress.clear();
                 state.wayland.clear_preedit();
-                state.hide_candidates();
-                state.hide_keypress();
+                state.hide_popup();
                 // Also clear Neovim buffer to reset state
                 if let Some(ref nvim) = state.nvim {
                     nvim.send_key("<Esc>ggdG");

@@ -36,9 +36,8 @@ src/
     event_source.rs          # Calloop event source (infrastructure)
   ui/
     mod.rs                   # Re-exports
-    candidate_window.rs      # Candidate popup UI (input_popup_surface)
-    keypress_window.rs       # Keypress display popup (shows key sequences)
-    text_render.rs           # Font rendering with fontdue
+    unified_window.rs        # Unified popup (preedit, keypress, candidates)
+    text_render.rs           # Font rendering with fontdue, SHM utilities
 ```
 
 ## Key Components
@@ -46,7 +45,7 @@ src/
 - **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `ImeState`, `KeypressState`
 - **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
-- **UI module**: Candidate window, keypress display window, and text rendering
+- **UI module**: Unified popup window (preedit with cursor, keypress display, candidates with scrollbar)
 
 ## Current State
 
@@ -62,7 +61,9 @@ Working:
 - Cursor position display: line cursor in insert mode, block cursor in normal mode
 - Vim text object motions (diw, ciw, daw, etc.)
 - Yank & paste: y$, yw, yiw, <C-r>" (insert mode), "ay$ (named registers)
-- Keypress display window: shows insert mode entry keys (i, a, A, o), register paste sequences (<C-r>a), and completed operator sequences (d$, "ay$) for 1.5s
+- Unified popup window: shows preedit with cursor (block/line), keypress sequences, and candidates
+- Preedit has max width with cursor-centered scrolling for long text
+- Keypress display: shows insert mode entry keys (i, a, A, o), register paste sequences (<C-r>a), and completed operator sequences (d$, "ay$) for 1.5s
 
 Known Issues:
 - Ctrl+C exits IME (should clear preedit instead)
