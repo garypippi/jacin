@@ -261,10 +261,62 @@ EOF"#,
         return Ok(());
     }
 
-    // Check if we're in operator-pending mode from previous key
-    // Track motion completion locally to avoid RPC hangs
+    // Track pending states for multi-key sequences
     static PENDING_MOTION: AtomicU8 = AtomicU8::new(0);
     // 0 = not pending, 1 = waiting for motion, 2 = waiting for text object char (after i/a)
+    static PENDING_REGISTER: AtomicU8 = AtomicU8::new(0);
+    // 0 = not pending, 1 = waiting for register name (insert mode <C-r>)
+    // 2 = waiting for register name (normal mode ")
+
+    // Handle Ctrl+R in insert mode - check mode BEFORE sending to avoid hang
+    if key == "<C-r>" && PENDING_MOTION.load(Ordering::SeqCst) == 0 {
+        let mode_str = nvim.command_output("echo mode(1)").await?;
+        let mode = mode_str.trim();
+        if mode == "i" {
+            // Send <C-r> and set pending register state
+            let _ = nvim.input(key).await;
+            PENDING_REGISTER.store(1, Ordering::SeqCst);
+            eprintln!("[NVIM] Sent <C-r>, waiting for register name (insert mode)");
+            return Ok(());
+        }
+    }
+
+    // Handle " in normal mode - register prefix for operators like "ay$
+    if key == "\"" && PENDING_MOTION.load(Ordering::SeqCst) == 0 {
+        let mode_str = nvim.command_output("echo mode(1)").await?;
+        let mode = mode_str.trim();
+        if mode == "n" {
+            // Send " and set pending register state for normal mode
+            let _ = nvim.input(key).await;
+            PENDING_REGISTER.store(2, Ordering::SeqCst);
+            eprintln!("[NVIM] Sent \", waiting for register name (normal mode)");
+            return Ok(());
+        }
+    }
+
+    // Handle register-pending state
+    let register_pending = PENDING_REGISTER.load(Ordering::SeqCst);
+    let key_already_sent = if register_pending > 0 {
+        eprintln!(
+            "[NVIM] In register-pending mode (state={}), sending register: {}",
+            register_pending, key
+        );
+        let _ = nvim.input(key).await;
+        PENDING_REGISTER.store(0, Ordering::SeqCst);
+
+        if register_pending == 1 {
+            // Insert mode <C-r> - paste happened, query preedit
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            true // Key was sent, continue to query preedit
+        } else {
+            // Normal mode " - register selected, now waiting for operator
+            // Return early - preedit unchanged, next key will be operator
+            eprintln!("[NVIM] Register '{}' selected, waiting for operator", key);
+            return Ok(());
+        }
+    } else {
+        false
+    };
 
     let pending_state = PENDING_MOTION.load(Ordering::SeqCst);
 
@@ -289,6 +341,8 @@ EOF"#,
                     // Single char motions that complete operator
                     "w" | "e" | "b" | "h" | "j" | "k" | "l" | "$" | "0" | "^" | "G" | "{" | "}"
                     | "(" | ")" | "%" => true,
+                    // Doubled operators (yy, dd, cc) - operator char repeats to operate on line
+                    "y" | "d" | "c" => true,
                     // Escape cancels
                     "<Esc>" => true,
                     _ => false,
@@ -311,8 +365,8 @@ EOF"#,
         } else {
             return Ok(());
         }
-    } else {
-        // Normal path - send key
+    } else if !key_already_sent {
+        // Normal path - send key (unless already sent for register paste)
         let _ = nvim.input(key).await;
     }
 

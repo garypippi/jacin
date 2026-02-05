@@ -9,6 +9,6 @@ mod ime;
 mod keyboard;
 mod wayland;
 
-pub use ime::{ImeMode, ImeState, MotionAwaiting, VimMode};
+pub use ime::ImeState;
 pub use keyboard::KeyboardState;
 pub use wayland::WaylandState;

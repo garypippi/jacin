@@ -59,9 +59,11 @@ Working:
 - Escape switches to normal mode in neovim
 - Cursor position display: line cursor in insert mode, block cursor in normal mode
 - Vim text object motions (diw, ciw, daw, etc.)
+- Yank & paste: y$, yw, yiw, <C-r>" (insert mode), "ay$ (named registers)
 
 Known Issues:
 - Ctrl+C exits IME (should clear preedit instead)
+- Multiline operations (yy, dd, cc, p, P) not yet supported (single-line preedit only)
 
 ## Architecture
 

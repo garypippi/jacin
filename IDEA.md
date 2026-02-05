@@ -175,6 +175,19 @@ Text object motions like `diw`, `ciw`, `daw` now work:
 - Detects motion completion (simple motions, text object prefixes)
 - Resumes normal queries after operation completes
 
+### Yank & Paste ✓
+
+Single-line yank and paste operations work:
+- `y$`, `yw`, `yiw`, `yaw` - yank with motions
+- `<C-r>"` - paste from default register in insert mode
+- `<C-r>a` - paste from named register in insert mode
+- `"ay$` - yank to named register `a`
+
+Register-pending state tracking:
+- `<C-r>` in insert mode sets PENDING_REGISTER=1
+- `"` in normal mode sets PENDING_REGISTER=2
+- Next key (register name) is handled appropriately
+
 ---
 
 ## Known Issues / TODO
@@ -185,6 +198,62 @@ Currently Ctrl+C exits the IME. Should instead:
 - Clear preedit text
 - Return to insert mode
 - Stay active
+
+### Multiline Preedit Support
+
+Currently the IME only supports single-line preedit. Operations that involve multiple lines don't work:
+
+**Affected Commands:**
+- `yy` - yank line (includes newline, pastes as new line)
+- `dd` - delete line
+- `cc` - change line
+- `p` / `P` - paste in normal mode (linewise paste behavior)
+- `o` / `O` - open line below/above
+
+**Considerations for Implementation:**
+
+1. **Preedit protocol limitation**: `zwp_input_method_v2` preedit is typically single-line
+   - Could we use multiple lines? Need to test compositor behavior
+   - Alternative: Display multiline in candidate window, commit as single string
+
+2. **Newline handling options:**
+   - Option A: Replace `\n` with space or special character in preedit display
+   - Option B: Show only current line in preedit, track full buffer in Neovim
+   - Option C: Use candidate window for multiline preview
+
+3. **Linewise vs characterwise registers:**
+   - Neovim tracks register type (linewise vs characterwise)
+   - `yy` creates linewise register, `y$` creates characterwise
+   - Paste behavior differs: linewise `p` pastes below current line
+   - Need to decide how to handle linewise paste in single-line preedit
+
+4. **Cursor position with multiple lines:**
+   - Current cursor tracking assumes single line (byte offset)
+   - Multiline would need (line, column) tracking
+   - Or flatten to single-line representation
+
+5. **Commit behavior:**
+   - Should multiline preedit commit with actual newlines?
+   - Application behavior varies (some accept `\n`, some don't)
+   - May need to commit line-by-line or replace newlines
+
+**Possible Approaches:**
+
+A. **Keep single-line only** (simplest)
+   - Document limitation
+   - Disable/ignore multiline commands
+   - Focus on single-line vim editing power
+
+B. **Virtual multiline** (moderate complexity)
+   - Neovim buffer has multiple lines
+   - Preedit shows flattened version (newlines as spaces or `↵`)
+   - Commit sends actual newlines
+   - Cursor position maps between representations
+
+C. **Full multiline** (complex)
+   - Investigate if compositor supports multiline preedit
+   - Custom rendering in candidate window area
+   - Full line tracking and cursor management
 
 ---
 
