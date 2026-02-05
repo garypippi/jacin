@@ -36,14 +36,14 @@ Working:
 - Enter confirms skkeleton conversion (stays in preedit when ▽/▼ markers present)
 - Ctrl+Enter commits preedit text to application
 - Escape switches to normal mode in neovim
+- Cursor position display: line cursor in insert mode, block cursor in normal mode
 
 Known Issues:
-- Cursor position not displayed in preedit (always at end)
 - Vim motions like `diw`, `ciw` not working (text objects)
 
 Not yet implemented:
-- Proper cursor position tracking from neovim
 - Text object motions (diw, ciw, etc.)
+- Ctrl+C to clear preedit (currently exits IME)
 
 ## Architecture
 

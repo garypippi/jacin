@@ -23,8 +23,10 @@ pub enum ToNeovim {
 /// Messages sent from Neovim to IME
 #[derive(Debug, Clone)]
 pub enum FromNeovim {
-    /// Preedit text changed
-    Preedit(String),
+    /// Preedit text changed (text, cursor_begin, cursor_end)
+    /// cursor_begin == cursor_end for line cursor (insert mode)
+    /// cursor_begin < cursor_end for block cursor (normal mode)
+    Preedit(String, usize, usize),
     /// Text should be committed
     Commit(String),
     /// Delete surrounding text (before_length, after_length)
@@ -214,7 +216,7 @@ async fn handle_key(
     if key == "<C-c>" {
         nvim.command("normal! 0D").await?;
         nvim.command("startinsert").await?;
-        let _ = tx.send(FromNeovim::Preedit(String::new()));
+        let _ = tx.send(FromNeovim::Preedit(String::new(), 0, 0));
         let _ = tx.send(FromNeovim::Candidates(vec![], 0));
         return Ok(());
     }
@@ -229,7 +231,7 @@ async fn handle_key(
             // Clear the line for next input
             nvim.command("normal! 0D").await?;
             nvim.command("startinsert").await?;
-            let _ = tx.send(FromNeovim::Preedit(String::new()));
+            let _ = tx.send(FromNeovim::Preedit(String::new(), 0, 0));
         }
         return Ok(());
     }
@@ -285,11 +287,14 @@ EOF"#,
             // Give skkeleton time to process the confirmation
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-            // Get updated preedit
+            // Get updated preedit and cursor position (insert mode after confirm)
             let line = nvim.command_output("echo getline('.')").await?;
             let line = line.trim().to_string();
+            let col_str = nvim.command_output("echo col('.')").await?;
+            let col: usize = col_str.trim().parse().unwrap_or(1);
+            let cursor_pos = col.saturating_sub(1);
 
-            let _ = tx.send(FromNeovim::Preedit(line));
+            let _ = tx.send(FromNeovim::Preedit(line, cursor_pos, cursor_pos));
             let _ = tx.send(FromNeovim::Candidates(vec![], 0));
         }
         // If no cmp visible, just ignore the key
@@ -309,7 +314,7 @@ EOF"#,
         let result = nvim.command_output("echo skkeleton#is_enabled()").await?;
         eprintln!("[NVIM] skkeleton enabled: {}", result.trim());
         // Clear preedit display
-        let _ = tx.send(FromNeovim::Preedit(String::new()));
+        let _ = tx.send(FromNeovim::Preedit(String::new(), 0, 0));
         return Ok(());
     }
 
@@ -329,12 +334,52 @@ EOF"#,
     // Small delay to let skkeleton process
     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
-    // Get the current line content as "preedit"
-    let line = nvim.command_output("echo getline('.')").await?;
-    let line = line.trim().to_string();
+    // Get line, cursor position, and mode in one lua call
+    let result = nvim
+        .command_output(
+            r#"lua << EOF
+            local line = vim.fn.getline('.')
+            local col = vim.fn.col('.')
+            local mode = vim.fn.mode()
+            local cursor_end = col
+            if mode == 'n' or mode == 'v' then
+                -- Get byte length of character at cursor for block cursor
+                local char_at_cursor = vim.fn.matchstr(line, '.', col - 1)
+                if #char_at_cursor > 0 then
+                    cursor_end = col + #char_at_cursor
+                else
+                    cursor_end = col + 1
+                end
+            end
+            print(string.format('%s\t%d\t%d\t%s', line, col, cursor_end, mode))
+EOF"#,
+        )
+        .await
+        .unwrap_or_default();
 
-    eprintln!("[NVIM] preedit: {:?}", line);
-    let _ = tx.send(FromNeovim::Preedit(line.clone()));
+    // Parse result: "line\tcol\tcursor_end\tmode"
+    let result = result.trim();
+    let parts: Vec<&str> = result.split('\t').collect();
+    let (line, cursor_begin, cursor_end) = if parts.len() >= 4 {
+        let line = parts[0].to_string();
+        let col: usize = parts[1].parse().unwrap_or(1);
+        let end: usize = parts[2].parse().unwrap_or(col);
+        let mode = parts[3];
+        // Convert to 0-indexed
+        let cursor_begin = col.saturating_sub(1);
+        let cursor_end = end.saturating_sub(1);
+        eprintln!("[NVIM] preedit: {:?}, col: {}, end: {}, mode: {}", line, col, end, mode);
+        (line, cursor_begin, cursor_end)
+    } else {
+        // Fallback: simple getline
+        let line = nvim.command_output("echo getline('.')").await?;
+        let line = line.trim().to_string();
+        let len = line.len();
+        eprintln!("[NVIM] preedit (fallback): {:?}", line);
+        (line, len, len)
+    };
+
+    let _ = tx.send(FromNeovim::Preedit(line.clone(), cursor_begin, cursor_end));
 
     // Check for SKKeleton candidates first, then fall back to nvim-cmp
     if let Ok((candidates, selected)) = get_skkeleton_candidates(nvim, &line).await

@@ -118,6 +118,8 @@ fn main() -> anyhow::Result<()> {
         ready_time: None,
         ignored_keys: std::collections::HashSet::new(),
         preedit: String::new(),
+        cursor_begin: 0,
+        cursor_end: 0,
         nvim,
         candidate_window,
         candidates: Vec::new(),
@@ -229,6 +231,8 @@ pub struct State {
     ignored_keys: std::collections::HashSet<u32>,
     // Preedit state
     preedit: String,
+    cursor_begin: usize,
+    cursor_end: usize,
     // Neovim backend
     nvim: Option<NeovimHandle>,
     // Candidate window
@@ -371,12 +375,13 @@ impl State {
     }
 
     fn update_preedit(&mut self) {
-        let cursor_pos = self.preedit.len() as i32;
+        let cursor_begin = self.cursor_begin as i32;
+        let cursor_end = self.cursor_end as i32;
         self.input_method
-            .set_preedit_string(self.preedit.clone(), cursor_pos, cursor_pos);
+            .set_preedit_string(self.preedit.clone(), cursor_begin, cursor_end);
         self.serial += 1;
         self.input_method.commit(self.serial);
-        eprintln!("[PREEDIT] updated: {:?}", self.preedit);
+        eprintln!("[PREEDIT] updated: {:?}, cursor: {}..{}", self.preedit, cursor_begin, cursor_end);
     }
 
     fn handle_nvim_message(&mut self, msg: FromNeovim) {
@@ -384,9 +389,11 @@ impl State {
             FromNeovim::Ready => {
                 eprintln!("[NVIM] Backend ready!");
             }
-            FromNeovim::Preedit(text) => {
-                eprintln!("[NVIM] Preedit: {:?}", text);
+            FromNeovim::Preedit(text, cursor_begin, cursor_end) => {
+                eprintln!("[NVIM] Preedit: {:?}, cursor: {}..{}", text, cursor_begin, cursor_end);
                 self.preedit = text;
+                self.cursor_begin = cursor_begin;
+                self.cursor_end = cursor_end;
                 self.update_preedit();
             }
             FromNeovim::Commit(text) => {

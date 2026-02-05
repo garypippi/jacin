@@ -126,16 +126,15 @@ Ctrl+Enter: → commit "今日はいい天気" to app
 - **Escape** switches to normal mode in neovim
 - **Ctrl+C** exits IME (releases keyboard grab)
 
+### Cursor Position Display ✓
+
+- Insert mode: line cursor at current position
+- Normal mode: block cursor (highlighted character) on current character
+- Properly handles multibyte characters (Japanese UTF-8)
+
 ---
 
 ## Known Issues / TODO
-
-### Cursor Position Not Displayed
-
-The preedit cursor is always shown at the end of text. Need to:
-- Query `col('.')` from neovim to get actual cursor position
-- Handle byte offset conversion for multibyte characters (Japanese)
-- Update preedit cursor position in `set_preedit_string()`
 
 ### Vim Text Objects Not Working
 
