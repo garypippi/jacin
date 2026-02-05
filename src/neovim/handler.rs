@@ -282,7 +282,11 @@ EOF"#,
     }
 
     // Handle " in normal mode - register prefix for operators like "ay$
-    if key == "\"" && PENDING_MOTION.load(Ordering::SeqCst) == 0 {
+    // Skip if PENDING_REGISTER > 0 (we're waiting for register name after <C-r>)
+    if key == "\""
+        && PENDING_MOTION.load(Ordering::SeqCst) == 0
+        && PENDING_REGISTER.load(Ordering::SeqCst) == 0
+    {
         let mode_str = nvim.command_output("echo mode(1)").await?;
         let mode = mode_str.trim();
         if mode == "n" {
@@ -386,9 +390,9 @@ EOF"#,
         return Ok(());
     }
 
-    // Get line content
+    // Get line content (only trim trailing newline, preserve spaces)
     let line = nvim.command_output("echo getline('.')").await?;
-    let line = line.trim().to_string();
+    let line = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
 
     // Get cursor column (1-indexed byte position)
     let col_str = nvim.command_output("echo col('.')").await?;

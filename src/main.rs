@@ -654,8 +654,15 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
             zwp_input_method_v2::Event::Deactivate => {
                 eprintln!("IME deactivated");
                 state.wayland.active = false;
-                // Hide candidates when deactivated
+                // Clear preedit and hide candidates when deactivated
+                // This prevents stale preedit from being committed when switching windows
+                state.ime.clear_preedit();
+                state.wayland.clear_preedit();
                 state.hide_candidates();
+                // Also clear Neovim buffer to reset state
+                if let Some(ref nvim) = state.nvim {
+                    nvim.send_key("<Esc>ggdG");
+                }
             }
             zwp_input_method_v2::Event::SurroundingText { .. } => {
                 // Noisy, don't print
