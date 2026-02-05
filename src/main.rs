@@ -338,22 +338,34 @@ impl State {
     fn keysym_to_vim(&self, keysym: xkb::Keysym, utf8: &str) -> Option<String> {
         use xkbcommon::xkb::Keysym;
 
+        // Get base key representation first
+        let base_key = match keysym {
+            Keysym::Return | Keysym::KP_Enter => Some("CR".to_string()),
+            Keysym::BackSpace => Some("BS".to_string()),
+            Keysym::Tab => Some("Tab".to_string()),
+            Keysym::Escape => Some("Esc".to_string()),
+            Keysym::space => Some("Space".to_string()),
+            Keysym::Left => Some("Left".to_string()),
+            Keysym::Right => Some("Right".to_string()),
+            Keysym::Up => Some("Up".to_string()),
+            Keysym::Down => Some("Down".to_string()),
+            _ if keysym.raw() >= Keysym::a.raw() && keysym.raw() <= Keysym::z.raw() => {
+                // Lowercase letter
+                let c = (keysym.raw() - Keysym::a.raw() + b'a' as u32) as u8 as char;
+                Some(c.to_string())
+            }
+            _ => None,
+        };
+
         // Handle Ctrl combinations
         if self.ctrl_pressed {
-            // Extract the base character for Ctrl+letter
-            let base_char = if keysym.raw() >= Keysym::a.raw() && keysym.raw() <= Keysym::z.raw() {
-                Some((keysym.raw() - Keysym::a.raw() + b'a' as u32) as u8 as char)
-            } else {
-                None
-            };
-
-            if let Some(c) = base_char {
-                return Some(format!("<C-{}>", c));
+            if let Some(key) = base_key {
+                return Some(format!("<C-{}>", key));
             }
             return None;
         }
 
-        // Handle special keys
+        // Non-Ctrl: wrap special keys in <>, return letters/printable as-is
         match keysym {
             Keysym::Return | Keysym::KP_Enter => Some("<CR>".to_string()),
             Keysym::BackSpace => Some("<BS>".to_string()),

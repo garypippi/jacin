@@ -210,32 +210,28 @@ async fn handle_key(
     // Ensure we're in insert mode
     nvim.command("startinsert").await?;
 
-    // Handle Enter key - check if skkeleton is in conversion mode first
-    if key == "<CR>" {
+    // Handle Ctrl+Enter - commit preedit to application
+    if key == "<C-CR>" {
         let line = nvim.command_output("echo getline('.')").await?;
         let line = line.trim().to_string();
 
-        // Check for skkeleton markers:
-        // ▽ = input mode (typing kana)
-        // ▼ = henkan mode (conversion/candidate selection)
-        if line.starts_with('▼') || line.starts_with('▽') {
-            // In skkeleton mode - pass Enter to skkeleton to confirm conversion
-            // Fall through to normal key handling
-        } else {
-            // Not in skkeleton mode - commit the current line
-            if !line.is_empty() {
-                let _ = tx.send(FromNeovim::Commit(line));
-                // Clear the line for next input
-                nvim.command("normal! 0D").await?;
-            }
-            return Ok(());
+        if !line.is_empty() {
+            let _ = tx.send(FromNeovim::Commit(line));
+            // Clear the line for next input
+            nvim.command("normal! 0D").await?;
+            let _ = tx.send(FromNeovim::Preedit(String::new()));
         }
+        return Ok(());
     }
 
-    // Handle Escape - clear preedit
+    // Enter key passes through to Neovim (confirms skkeleton, or newline in buffer)
+    // No special handling needed - falls through to normal key handling
+
+    // Handle Escape - clear preedit and cancel
     if key == "<Esc>" {
         nvim.command("normal! 0D").await?;
         let _ = tx.send(FromNeovim::Preedit(String::new()));
+        let _ = tx.send(FromNeovim::Candidates(vec![], 0));
         return Ok(());
     }
 
