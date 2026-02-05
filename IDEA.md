@@ -97,25 +97,17 @@ SKK is a Japanese input method where:
 
 ---
 
-## Future Ideas: Leveraging Neovim Power
+## Implemented Features
 
-### Vim Modal Editing in Preedit
+### IME Toggle via Alt+`
 
-The main advantage of Neovim backend over fcitx+skk is full vim power in preedit:
+- **Alt+`** triggers SIGUSR1 signal to toggle IME (configured in Hyprland keybind)
+- Avoids Ctrl+J conflict with browser shortcuts
+- Passthrough mode by default - keyboard only grabbed when IME is enabled
 
-- **Normal mode**: `hjkl`, `w`/`b` word motions, `ciw`, `r`, `x`, etc.
-- **Registers**: `"ay` to save, `"ap` to paste
-- **Undo/redo**: Full undo tree
-- **Macros**: `qa...q` recording, `@a` playback
+### Separate Confirm vs Commit ✓
 
-**Preedit-only mode**: Vim features only active when preedit has text. Empty preedit = 100% passthrough to app (avoids conflicts with browser shortcuts like Ctrl+J).
-
-### Separate Confirm vs Commit
-
-Current problem: Enter both confirms skkeleton conversion AND commits to app.
-
-**Desired behavior:**
-- **Enter** = confirm skkeleton conversion (stay in preedit, keep editing)
+- **Enter** = confirm skkeleton conversion (stay in preedit when ▽/▼ markers present)
 - **Ctrl+Enter** = commit preedit text to application
 
 This allows composing longer text with multiple conversions:
@@ -128,6 +120,42 @@ Space: → 今日はいい▼天気
 Enter: → 今日はいい天気 (still in preedit!)
 Ctrl+Enter: → commit "今日はいい天気" to app
 ```
+
+### Basic Vim Mode
+
+- **Escape** switches to normal mode in neovim
+- **Ctrl+C** exits IME (releases keyboard grab)
+
+---
+
+## Known Issues / TODO
+
+### Cursor Position Not Displayed
+
+The preedit cursor is always shown at the end of text. Need to:
+- Query `col('.')` from neovim to get actual cursor position
+- Handle byte offset conversion for multibyte characters (Japanese)
+- Update preedit cursor position in `set_preedit_string()`
+
+### Vim Text Objects Not Working
+
+Motions like `diw`, `ciw`, `daw` don't work. Possible causes:
+- Single-line buffer limitation
+- Text object detection issues with Japanese characters
+- Need to investigate neovim's response to these commands
+
+---
+
+## Future Ideas: Leveraging Neovim Power
+
+### Full Vim Modal Editing in Preedit
+
+The main advantage of Neovim backend over fcitx+skk is full vim power in preedit:
+
+- **Normal mode**: `hjkl`, `w`/`b` word motions, `ciw`, `r`, `x`, etc.
+- **Registers**: `"ay` to save, `"ap` to paste
+- **Undo/redo**: Full undo tree
+- **Macros**: `qa...q` recording, `@a` playback
 
 ### Other nvim-cmp Sources
 

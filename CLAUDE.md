@@ -28,15 +28,22 @@ cargo fmt            # Format
 ## Current State
 
 Working:
-- Basic Japanese input via skkeleton (Ctrl+J to toggle)
+- Basic Japanese input via skkeleton
+- Alt+` to toggle IME (via SIGUSR1 signal, triggered by Hyprland keybind)
+- Passthrough mode by default (keyboard only grabbed when IME enabled)
 - Candidate window follows cursor (via zwp_input_popup_surface_v2)
 - nvim-cmp integration for candidate selection (Ctrl+N/P, Ctrl+K to confirm)
-- Enter confirms skkeleton conversion, commits if no conversion active
+- Enter confirms skkeleton conversion (stays in preedit when ▽/▼ markers present)
+- Ctrl+Enter commits preedit text to application
+- Escape switches to normal mode in neovim
+
+Known Issues:
+- Cursor position not displayed in preedit (always at end)
+- Vim motions like `diw`, `ciw` not working (text objects)
 
 Not yet implemented:
-- Vim modal editing in preedit (normal mode, motions)
-- Separate Enter (confirm) vs Ctrl+Enter (commit)
-- Preedit-only mode (passthrough when empty)
+- Proper cursor position tracking from neovim
+- Text object motions (diw, ciw, etc.)
 
 ## Architecture
 
