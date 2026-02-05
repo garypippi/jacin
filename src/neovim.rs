@@ -198,6 +198,9 @@ EOF
     .await
     .ok();
 
+    // Start in insert mode
+    nvim.command("startinsert").await?;
+
     eprintln!("[NVIM] Initialization complete");
     Ok(())
 }
@@ -207,8 +210,14 @@ async fn handle_key(
     key: &str,
     tx: &Sender<FromNeovim>,
 ) -> anyhow::Result<()> {
-    // Ensure we're in insert mode
-    nvim.command("startinsert").await?;
+    // Handle Ctrl+C - clear preedit and reset to insert mode
+    if key == "<C-c>" {
+        nvim.command("normal! 0D").await?;
+        nvim.command("startinsert").await?;
+        let _ = tx.send(FromNeovim::Preedit(String::new()));
+        let _ = tx.send(FromNeovim::Candidates(vec![], 0));
+        return Ok(());
+    }
 
     // Handle Ctrl+Enter - commit preedit to application
     if key == "<C-CR>" {
@@ -219,21 +228,14 @@ async fn handle_key(
             let _ = tx.send(FromNeovim::Commit(line));
             // Clear the line for next input
             nvim.command("normal! 0D").await?;
+            nvim.command("startinsert").await?;
             let _ = tx.send(FromNeovim::Preedit(String::new()));
         }
         return Ok(());
     }
 
-    // Enter key passes through to Neovim (confirms skkeleton, or newline in buffer)
-    // No special handling needed - falls through to normal key handling
-
-    // Handle Escape - clear preedit and cancel
-    if key == "<Esc>" {
-        nvim.command("normal! 0D").await?;
-        let _ = tx.send(FromNeovim::Preedit(String::new()));
-        let _ = tx.send(FromNeovim::Candidates(vec![], 0));
-        return Ok(());
-    }
+    // Escape passes through to Neovim (switches to normal mode)
+    // No special handling - falls through to normal key handling
 
     // Handle Backspace specially - if line is empty, delete from committed text
     if key == "<BS>" {
