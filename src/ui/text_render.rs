@@ -199,7 +199,8 @@ pub fn render_candidates(
         let scrollbar_height = height as f32 - padding * 2.0;
 
         // Scrollbar track
-        if let Some(rect) = Rect::from_xywh(scrollbar_x, padding, SCROLLBAR_WIDTH, scrollbar_height) {
+        if let Some(rect) = Rect::from_xywh(scrollbar_x, padding, SCROLLBAR_WIDTH, scrollbar_height)
+        {
             let mut paint = Paint::default();
             paint.set_color(scrollbar_bg);
             pixmap.fill_rect(rect, &paint, Transform::identity(), None);
@@ -210,7 +211,8 @@ pub fn render_candidates(
         let thumb_height = thumb_height.max(20.0); // Minimum thumb size
         let scroll_range = total_count - visible_count;
         let thumb_y = if scroll_range > 0 {
-            padding + (scroll_offset as f32 / scroll_range as f32) * (scrollbar_height - thumb_height)
+            padding
+                + (scroll_offset as f32 / scroll_range as f32) * (scrollbar_height - thumb_height)
         } else {
             padding
         };
@@ -229,11 +231,19 @@ pub fn render_candidates(
 const SCROLLBAR_WIDTH: f32 = 8.0;
 
 /// Calculate required window size for candidates
-pub fn calculate_window_size(renderer: &mut TextRenderer, candidates: &[String], has_scrollbar: bool) -> (u32, u32) {
+pub fn calculate_window_size(
+    renderer: &mut TextRenderer,
+    candidates: &[String],
+    has_scrollbar: bool,
+) -> (u32, u32) {
     let line_height = renderer.line_height();
     let padding = 8.0;
     let number_width = 24.0;
-    let scrollbar_space = if has_scrollbar { SCROLLBAR_WIDTH + 4.0 } else { 0.0 };
+    let scrollbar_space = if has_scrollbar {
+        SCROLLBAR_WIDTH + 4.0
+    } else {
+        0.0
+    };
 
     // Calculate max width needed
     let mut max_width = 200.0f32; // Minimum width

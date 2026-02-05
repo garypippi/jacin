@@ -1,100 +1,38 @@
-//! Neovim backend for IME
+//! Neovim backend handler
 //!
 //! Runs Neovim in embedded mode with vim-skkeleton for Japanese input.
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::thread;
-use std::time::Duration;
+use tokio::runtime::Runtime;
 
 use nvim_rs::create::tokio::new_child_cmd;
 use nvim_rs::{Handler, Neovim};
 use tokio::process::Command;
-use tokio::runtime::Runtime;
 
-/// Messages sent from IME to Neovim
-#[derive(Debug)]
-pub enum ToNeovim {
-    /// Send a key to Neovim (raw key string like "a", "A", "<BS>", "<CR>")
-    Key(String),
-    /// Shutdown Neovim
-    Shutdown,
-}
-
-/// Messages sent from Neovim to IME
-#[derive(Debug, Clone)]
-pub enum FromNeovim {
-    /// Preedit text changed (text, cursor_begin, cursor_end)
-    /// cursor_begin == cursor_end for line cursor (insert mode)
-    /// cursor_begin < cursor_end for block cursor (normal mode)
-    Preedit(String, usize, usize),
-    /// Text should be committed
-    Commit(String),
-    /// Delete surrounding text (before_length, after_length)
-    DeleteSurrounding(u32, u32),
-    /// Completion candidates from nvim-cmp (candidates, selected_index)
-    Candidates(Vec<String>, usize),
-    /// Neovim is ready
-    Ready,
-}
-
-/// Handle to communicate with Neovim backend
-pub struct NeovimHandle {
-    pub sender: Sender<ToNeovim>,
-    pub receiver: Receiver<FromNeovim>,
-}
-
-impl NeovimHandle {
-    /// Send a key to Neovim
-    pub fn send_key(&self, key: &str) {
-        let _ = self.sender.send(ToNeovim::Key(key.to_string()));
-    }
-
-    /// Try to receive a message from Neovim (non-blocking)
-    pub fn try_recv(&self) -> Option<FromNeovim> {
-        self.receiver.try_recv().ok()
-    }
-
-    /// Receive with timeout
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<FromNeovim> {
-        self.receiver.recv_timeout(timeout).ok()
-    }
-
-    /// Shutdown Neovim
-    pub fn shutdown(&self) {
-        let _ = self.sender.send(ToNeovim::Shutdown);
-    }
-}
+use super::protocol::{
+    CandidateInfo, CmpCandidatesJson, CompleteInfoJson, FromNeovim, PreeditInfo, ToNeovim,
+};
 
 /// Empty handler - we don't need to handle notifications for now
 #[derive(Clone)]
-struct NvimHandler;
+pub struct NvimHandler;
 
 impl Handler for NvimHandler {
     type Writer = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
 }
 
-/// Spawn Neovim backend in a separate thread
-pub fn spawn_neovim() -> anyhow::Result<NeovimHandle> {
-    let (to_nvim_tx, to_nvim_rx) = unbounded::<ToNeovim>();
-    let (from_nvim_tx, from_nvim_rx) = unbounded::<FromNeovim>();
-
-    thread::spawn(move || {
-        let rt = Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(async move {
-            if let Err(e) = run_neovim(to_nvim_rx, from_nvim_tx).await {
-                eprintln!("[NVIM] Error: {}", e);
-            }
-        });
-    });
-
-    Ok(NeovimHandle {
-        sender: to_nvim_tx,
-        receiver: from_nvim_rx,
-    })
-}
-
 type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
+
+/// Run the Neovim event loop in a blocking manner
+pub fn run_blocking(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>) {
+    let rt = Runtime::new().expect("Failed to create tokio runtime");
+    rt.block_on(async move {
+        if let Err(e) = run_neovim(rx, tx).await {
+            eprintln!("[NVIM] Error: {}", e);
+        }
+    });
+}
 
 async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>) -> anyhow::Result<()> {
     eprintln!("[NVIM] Starting Neovim...");
@@ -217,8 +155,8 @@ async fn handle_key(
     if key == "<C-c>" {
         nvim.command("normal! 0D").await?;
         nvim.command("startinsert").await?;
-        let _ = tx.send(FromNeovim::Preedit(String::new(), 0, 0));
-        let _ = tx.send(FromNeovim::Candidates(vec![], 0));
+        let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
+        let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
         return Ok(());
     }
 
@@ -232,7 +170,7 @@ async fn handle_key(
             // Clear the line for next input
             nvim.command("normal! 0D").await?;
             nvim.command("startinsert").await?;
-            let _ = tx.send(FromNeovim::Preedit(String::new(), 0, 0));
+            let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
         }
         return Ok(());
     }
@@ -243,16 +181,12 @@ async fn handle_key(
         let line = line.trim();
 
         // Only pass Enter to neovim if in conversion mode (has markers)
-        if line.contains('▼') || line.contains('▽') {
-            // Fall through to normal key handling
-        } else {
+        if !line.contains('▼') && !line.contains('▽') {
             // No markers - ignore Enter (don't create newlines)
             return Ok(());
         }
+        // Fall through to normal key handling
     }
-
-    // Escape passes through to Neovim (switches to normal mode)
-    // No special handling - falls through to normal key handling
 
     // Handle Backspace specially - if line is empty, delete from committed text
     if key == "<BS>" {
@@ -261,7 +195,10 @@ async fn handle_key(
 
         if line.is_empty() {
             // Nothing in preedit, delete from committed text
-            let _ = tx.send(FromNeovim::DeleteSurrounding(1, 0));
+            let _ = tx.send(FromNeovim::DeleteSurrounding {
+                before: 1,
+                after: 0,
+            });
             return Ok(());
         }
         // Otherwise, let Neovim handle the backspace normally (fall through)
@@ -295,8 +232,13 @@ EOF"#,
             let col: usize = col_str.trim().parse().unwrap_or(1);
             let cursor_pos = col.saturating_sub(1);
 
-            let _ = tx.send(FromNeovim::Preedit(line, cursor_pos, cursor_pos));
-            let _ = tx.send(FromNeovim::Candidates(vec![], 0));
+            let _ = tx.send(FromNeovim::Preedit(PreeditInfo::new(
+                line,
+                cursor_pos,
+                cursor_pos,
+                "i".to_string(),
+            )));
+            let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
         }
         // If no cmp visible, just ignore the key
         return Ok(());
@@ -315,7 +257,7 @@ EOF"#,
         let result = nvim.command_output("echo skkeleton#is_enabled()").await?;
         eprintln!("[NVIM] skkeleton enabled: {}", result.trim());
         // Clear preedit display
-        let _ = tx.send(FromNeovim::Preedit(String::new(), 0, 0));
+        let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
         return Ok(());
     }
 
@@ -327,7 +269,10 @@ EOF"#,
     let pending_state = PENDING_MOTION.load(Ordering::SeqCst);
 
     if pending_state > 0 {
-        eprintln!("[NVIM] In operator-pending mode (state={}), sending key: {}", pending_state, key);
+        eprintln!(
+            "[NVIM] In operator-pending mode (state={}), sending key: {}",
+            pending_state, key
+        );
         let _ = nvim.input(key).await;
 
         // Check if this key completes the motion
@@ -342,8 +287,8 @@ EOF"#,
                         false
                     }
                     // Single char motions that complete operator
-                    "w" | "e" | "b" | "h" | "j" | "k" | "l" | "$" | "0" | "^" |
-                    "G" | "{" | "}" | "(" | ")" | "%" => true,
+                    "w" | "e" | "b" | "h" | "j" | "k" | "l" | "$" | "0" | "^" | "G" | "{" | "}"
+                    | "(" | ")" | "%" => true,
                     // Escape cancels
                     "<Esc>" => true,
                     _ => false,
@@ -417,34 +362,41 @@ EOF"#,
         "[NVIM] preedit: {:?}, col: {}, cursor: {}..{}, mode: {}",
         line, col, cursor_begin, cursor_end, mode
     );
-    let _ = tx.send(FromNeovim::Preedit(line.clone(), cursor_begin, cursor_end));
+    let _ = tx.send(FromNeovim::Preedit(PreeditInfo::new(
+        line.clone(),
+        cursor_begin,
+        cursor_end,
+        mode.to_string(),
+    )));
 
     // Check for SKKeleton candidates first, then fall back to nvim-cmp
-    if let Ok((candidates, selected)) = get_skkeleton_candidates(nvim, &line).await
+    if let Ok(candidates) = get_skkeleton_candidates(nvim, &line).await
         && !candidates.is_empty()
     {
-        let _ = tx.send(FromNeovim::Candidates(candidates, selected));
+        let _ = tx.send(FromNeovim::Candidates(candidates));
         return Ok(());
     }
 
     // Check for completion candidates (nvim-cmp)
-    if let Ok((candidates, selected)) = get_completion_candidates(nvim).await
-        && !candidates.is_empty()
-    {
-        let _ = tx.send(FromNeovim::Candidates(candidates, selected));
+    if let Ok(candidates) = get_completion_candidates(nvim).await {
+        if !candidates.is_empty() {
+            let _ = tx.send(FromNeovim::Candidates(candidates));
+        } else {
+            // Clear candidates if none available
+            let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
+        }
     } else {
-        // Clear candidates if none available
-        let _ = tx.send(FromNeovim::Candidates(vec![], 0));
+        let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
     }
 
     Ok(())
 }
 
-/// Query nvim-cmp for completion candidates and selection index using its Lua API
+/// Query nvim-cmp for completion candidates using its Lua API
 async fn get_skkeleton_candidates(
     nvim: &Neovim<NvimWriter>,
     _preedit: &str,
-) -> anyhow::Result<(Vec<String>, usize)> {
+) -> anyhow::Result<CandidateInfo> {
     // Use nvim-cmp's Lua API directly
     let result = nvim
         .command_output(
@@ -497,90 +449,25 @@ EOF"#,
     let result = result.trim();
 
     if result.starts_with('{')
-        && let Some((candidates, selected)) = parse_candidates_json(result)
-        && !candidates.is_empty()
+        && let Ok(parsed) = serde_json::from_str::<CmpCandidatesJson>(result)
     {
+        let mut info = parsed.into_candidate_info();
         // Clamp selection to valid range
-        let selected = selected.min(candidates.len().saturating_sub(1));
-        return Ok((candidates, selected));
-    }
-
-    Ok((vec![], 0))
-}
-
-/// Parse candidates JSON: {"words":["a","b"],"selected":0}
-fn parse_candidates_json(json: &str) -> Option<(Vec<String>, usize)> {
-    // Find words array
-    let words_start = json.find("\"words\":")?;
-    let array_start = json[words_start..].find('[')?;
-    let array_end = json[words_start + array_start..].find(']')?;
-    let array_str = &json[words_start + array_start..words_start + array_start + array_end + 1];
-    let words = parse_json_string_array(array_str);
-
-    // Find selected index
-    let selected = if let Some(sel_start) = json.find("\"selected\":") {
-        let num_start = sel_start + 11;
-        let num_end = json[num_start..]
-            .find(|c: char| !c.is_ascii_digit() && c != '-')
-            .unwrap_or(json.len() - num_start);
-        json[num_start..num_start + num_end]
-            .parse::<i32>()
-            .unwrap_or(-1)
-    } else {
-        -1
-    };
-
-    // Convert -1 (no selection) to 0
-    let selected = if selected >= 0 { selected as usize } else { 0 };
-
-    Some((words, selected))
-}
-
-/// Parse a simple JSON string array like ["a", "b", "c"]
-fn parse_json_string_array(json: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let json = json.trim();
-
-    if !json.starts_with('[') {
-        return items;
-    }
-
-    let mut in_string = false;
-    let mut escape = false;
-    let mut current = String::new();
-
-    for c in json.chars() {
-        if escape {
-            current.push(c);
-            escape = false;
-            continue;
+        if !info.candidates.is_empty() {
+            info.selected = info.selected.min(info.candidates.len().saturating_sub(1));
         }
-
-        match c {
-            '\\' => escape = true,
-            '"' => {
-                if in_string {
-                    if !current.is_empty() {
-                        items.push(current.clone());
-                    }
-                    current.clear();
-                }
-                in_string = !in_string;
-            }
-            _ if in_string => current.push(c),
-            _ => {}
-        }
+        return Ok(info);
     }
 
-    items
+    Ok(CandidateInfo::empty())
 }
 
 /// Query nvim-cmp for completion candidates (fallback using pumvisible)
-async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<(Vec<String>, usize)> {
+async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<CandidateInfo> {
     // Check if completion menu is visible
     let pum_visible = nvim.command_output("echo pumvisible()").await?;
     if pum_visible.trim() != "1" {
-        return Ok((vec![], 0));
+        return Ok(CandidateInfo::empty());
     }
 
     // Get completion info using complete_info()
@@ -588,53 +475,16 @@ async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<
         .command_output("echo json_encode(complete_info(['items', 'selected']))")
         .await?;
 
-    // Parse JSON to extract candidate words and selection
-    let (candidates, selected) = parse_completion_items(&info);
-    eprintln!("[NVIM] Found {} candidates, selected={}", candidates.len(), selected);
-
-    Ok((candidates, selected))
-}
-
-/// Parse completion items from complete_info() JSON output
-fn parse_completion_items(json_str: &str) -> (Vec<String>, usize) {
-    // Simple JSON parsing - extract "word" fields from items array
-    // Format: {"items":[{"word":"candidate1",...},{"word":"candidate2",...}],"selected":0}
-    let mut candidates = Vec::new();
-
-    // Find items array
-    if let Some(items_start) = json_str.find("\"items\":[") {
-        let items_section = &json_str[items_start..];
-        // Extract each word field
-        let mut search_pos = 0;
-        while let Some(word_pos) = items_section[search_pos..].find("\"word\":\"") {
-            let start = search_pos + word_pos + 8; // skip "word":"
-            if let Some(end_pos) = items_section[start..].find('"') {
-                let word = &items_section[start..start + end_pos];
-                // Unescape basic JSON escapes
-                let word = word.replace("\\\"", "\"").replace("\\\\", "\\");
-                candidates.push(word);
-                search_pos = start + end_pos;
-            } else {
-                break;
-            }
-        }
+    // Parse JSON using serde
+    if let Ok(parsed) = serde_json::from_str::<CompleteInfoJson>(&info) {
+        let candidates = parsed.into_candidate_info();
+        eprintln!(
+            "[NVIM] Found {} candidates, selected={}",
+            candidates.candidates.len(),
+            candidates.selected
+        );
+        return Ok(candidates);
     }
 
-    // Find selected index
-    let selected = if let Some(sel_start) = json_str.find("\"selected\":") {
-        let num_start = sel_start + 11;
-        let num_end = json_str[num_start..]
-            .find(|c: char| !c.is_ascii_digit() && c != '-')
-            .unwrap_or(json_str.len() - num_start);
-        json_str[num_start..num_start + num_end]
-            .parse::<i32>()
-            .unwrap_or(-1)
-    } else {
-        -1
-    };
-
-    // Convert -1 (no selection) to 0
-    let selected = if selected >= 0 { selected as usize } else { 0 };
-
-    (candidates, selected)
+    Ok(CandidateInfo::empty())
 }

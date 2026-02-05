@@ -38,7 +38,9 @@ On Wayland, IME is compositor-controlled:
 
 ---
 
-## Planned Architecture
+## Architecture
+
+### High-Level Flow
 
 ```
 Keyboard
@@ -49,19 +51,51 @@ Custom IME (Wayland client)
   - binds zwp_input_method_v2
   - handles key events
   - manages preedit / commit
-  - renders candidate UI (layer-shell or xdg_popup)
+  - renders candidate UI (input_popup_surface)
   ↓
 Hyprland
   ↓
 Applications (via zwp_text_input_v3)
 ```
 
-### IME Frontend Responsibilities
+### Module Structure
 
-- Wayland protocol handling
-- Key state machine
-- Preedit lifecycle
-- Candidate window UI
+```
+src/
+  main.rs                    # Entry point, Wayland dispatch, coordination
+  state/
+    wayland.rs               # WaylandState (protocol handles, serial)
+    keyboard.rs              # KeyboardState (XKB, modifiers, debouncing)
+    ime.rs                   # ImeState, ImeMode state machine, VimMode
+  neovim/
+    mod.rs                   # NeovimHandle (public API)
+    protocol.rs              # ToNeovim, FromNeovim typed messages
+    handler.rs               # Tokio-side message handling
+    event_source.rs          # Calloop event source (infrastructure)
+  ui/
+    candidate_window.rs      # Candidate popup UI
+    text_render.rs           # Font rendering with fontdue
+```
+
+### State Management
+
+**ImeMode State Machine** (replaces boolean flags):
+- `Disabled` - IME off, keyboard not grabbed, passthrough mode
+- `Enabling` - Waiting for keymap after keyboard grab
+- `Enabled` - Active, processing input (contains `VimMode` and `skkeleton_active`)
+- `Disabling` - Releasing keyboard
+
+**VimMode** (within Enabled state):
+- `Insert` - Characters inserted at cursor
+- `Normal` - Commands and motions
+- `Visual` - Selection active
+- `OperatorPending` - Waiting for motion (e.g., after `d`)
+
+### Neovim Communication
+
+- **Bounded channels** (capacity 64) for backpressure
+- **Typed protocol** with serde for JSON parsing
+- **Separate thread** running Tokio runtime for async Neovim IPC
 
 ### IME Backend: Neovim + vim-skkeleton
 

@@ -18,12 +18,33 @@ cargo clippy         # Lint
 cargo fmt            # Format
 ```
 
-## Key Files
+## Module Structure
 
-- `src/main.rs` - Wayland event loop, protocol dispatch, State struct
-- `src/neovim.rs` - Neovim IPC, key handling, skkeleton/cmp integration
-- `src/candidate_window.rs` - Candidate popup UI using input_popup_surface
-- `src/text_renderer.rs` - Font rendering with fontdue
+```
+src/
+  main.rs                    # Entry point, Wayland dispatch, coordination
+  state/
+    mod.rs                   # Re-exports
+    wayland.rs               # WaylandState (protocol handles, serial)
+    keyboard.rs              # KeyboardState (XKB, modifiers, debouncing)
+    ime.rs                   # ImeState, ImeMode state machine, VimMode
+  neovim/
+    mod.rs                   # NeovimHandle (public API)
+    protocol.rs              # ToNeovim, FromNeovim typed messages (serde)
+    handler.rs               # Tokio-side Neovim message handling
+    event_source.rs          # Calloop event source (infrastructure)
+  ui/
+    mod.rs                   # Re-exports
+    candidate_window.rs      # Candidate popup UI (input_popup_surface)
+    text_render.rs           # Font rendering with fontdue
+```
+
+## Key Components
+
+- **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `ImeState`
+- **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
+- **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
+- **UI module**: Candidate window and text rendering
 
 ## Current State
 

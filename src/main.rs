@@ -1,7 +1,6 @@
 use std::os::fd::{AsFd, AsRawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use calloop::{
     EventLoop, LoopSignal,
@@ -22,13 +21,18 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 };
 use xkbcommon::xkb;
 
-mod candidate_window;
 mod neovim;
-mod text_render;
+mod state;
+mod ui;
 
-use candidate_window::CandidateWindow;
-use neovim::{FromNeovim, NeovimHandle};
-use text_render::TextRenderer;
+use neovim::{FromNeovim, NeovimHandle, OldFromNeovim};
+use state::{ImeState, KeyboardState, WaylandState};
+use ui::{CandidateWindow, TextRenderer};
+
+// Helper to convert new FromNeovim to old format during transition
+fn convert_nvim_msg(msg: FromNeovim) -> OldFromNeovim {
+    msg.into()
+}
 
 fn main() -> anyhow::Result<()> {
     // Connect to Wayland display
@@ -55,9 +59,6 @@ fn main() -> anyhow::Result<()> {
         .expect("wl_compositor not available");
 
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("wl_shm not available");
-
-    // Create xkb context
-    let xkb_context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
 
     // Create input method for this seat
     let input_method = input_method_manager.get_input_method(&seat, &qh, ());
@@ -101,29 +102,13 @@ fn main() -> anyhow::Result<()> {
     // Create application state
     let mut state = State {
         loop_signal: None,
-        qh: qh.clone(),
-        input_method,
-        keyboard_grab: None,
-        xkb_context,
-        xkb_state: None,
-        active: false,
-        serial: 0,
-        ctrl_pressed: false,
-        alt_pressed: false,
+        wayland: WaylandState::new(qh.clone(), input_method),
+        keyboard: KeyboardState::new(),
+        ime: ImeState::new(),
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
-        skkeleton_enabled: false,
-        grab_pending_keymap: false,
-        pending_skkeleton_enable: false,
-        ready_time: None,
-        ignored_keys: std::collections::HashSet::new(),
-        preedit: String::new(),
-        cursor_begin: 0,
-        cursor_end: 0,
         nvim,
         candidate_window,
-        candidates: Vec::new(),
-        selected_candidate: 0,
     };
 
     // Set up calloop event loop
@@ -160,7 +145,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Add ping source to event loop (just to wake it up, we handle toggle in the callback)
-    event_loop.handle().insert_source(ping_source, |_, _, _| {})?;
+    event_loop
+        .handle()
+        .insert_source(ping_source, |_, _, _| {})?;
 
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -184,7 +171,7 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_default();
 
         for msg in messages {
-            state.handle_nvim_message(msg);
+            state.handle_nvim_message(convert_nvim_msg(msg));
         }
 
         if state.pending_exit
@@ -195,9 +182,7 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     // Cleanup
-    if let Some(grab) = state.keyboard_grab.take() {
-        grab.release();
-    }
+    state.wayland.release_keyboard();
     if let Some(ref nvim) = state.nvim {
         nvim.shutdown();
     }
@@ -213,65 +198,44 @@ fn main() -> anyhow::Result<()> {
 
 pub struct State {
     loop_signal: Option<LoopSignal>,
-    qh: QueueHandle<State>,
-    input_method: zwp_input_method_v2::ZwpInputMethodV2,
-    keyboard_grab: Option<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2>,
-    xkb_context: xkb::Context,
-    xkb_state: Option<xkb::State>,
-    active: bool,
-    serial: u32,
-    ctrl_pressed: bool,
-    alt_pressed: bool,
+    // Component state structs
+    wayland: WaylandState,
+    keyboard: KeyboardState,
+    ime: ImeState,
+    // Exit and toggle flags
     pending_exit: bool,
     toggle_flag: Arc<AtomicBool>,
-    skkeleton_enabled: bool,
-    grab_pending_keymap: bool,
-    pending_skkeleton_enable: bool,
-    ready_time: Option<Instant>,
-    ignored_keys: std::collections::HashSet<u32>,
-    // Preedit state
-    preedit: String,
-    cursor_begin: usize,
-    cursor_end: usize,
     // Neovim backend
     nvim: Option<NeovimHandle>,
     // Candidate window
     candidate_window: Option<CandidateWindow>,
-    candidates: Vec<String>,
-    selected_candidate: usize,
 }
 
 impl State {
     fn handle_ime_toggle(&mut self) {
-        self.skkeleton_enabled = !self.skkeleton_enabled;
-        eprintln!(
-            "[IME] Toggle: skkeleton_enabled = {}",
-            self.skkeleton_enabled
-        );
+        let was_enabled = self.ime.is_enabled();
+        eprintln!("[IME] Toggle: was_enabled = {}", was_enabled);
 
-        if self.skkeleton_enabled {
-            // Grab keyboard - skkeleton toggle will be sent after keymap loads
-            if self.active && self.keyboard_grab.is_none() {
+        if !was_enabled {
+            // Enable IME - grab keyboard, skkeleton toggle will be sent after keymap loads
+            if self.wayland.active && self.wayland.keyboard_grab.is_none() {
                 eprintln!("[IME] Grabbing keyboard");
-                let grab = self.input_method.grab_keyboard(&self.qh, ());
-                self.keyboard_grab = Some(grab);
-                self.grab_pending_keymap = true;
-                self.pending_skkeleton_enable = true;
+                self.wayland.grab_keyboard();
+                self.keyboard.pending_keymap = true;
+                self.ime.start_enabling(true); // Will enable skkeleton after keymap
             }
         } else {
-            // Release keyboard and disable skkeleton
-            if let Some(grab) = self.keyboard_grab.take() {
-                eprintln!("[IME] Releasing keyboard");
-                grab.release();
-            }
+            // Disable IME - release keyboard and disable skkeleton
+            eprintln!("[IME] Releasing keyboard");
+            self.wayland.release_keyboard();
             // Send toggle to Neovim to disable skkeleton
             if let Some(ref nvim) = self.nvim {
                 nvim.send_key("<A-`>");
             }
             // Clear preedit
-            self.preedit.clear();
-            self.input_method.set_preedit_string(String::new(), -1, -1);
-            self.input_method.commit(self.serial);
+            self.ime.clear_preedit();
+            self.wayland.clear_preedit();
+            self.ime.disable();
         }
     }
 
@@ -283,58 +247,33 @@ impl State {
         };
         eprintln!(
             "[KEY] code={}, state={}, ctrl={}",
-            key, state_str, self.ctrl_pressed
+            key, state_str, self.keyboard.ctrl_pressed
         );
 
-        // Handle key releases - remove from ignored_keys if present
+        // Handle key releases
         if key_state != wl_keyboard::KeyState::Pressed {
-            if self.ignored_keys.remove(&key) {
-                eprintln!("[KEY] Removed key {} from ignored set", key);
-            }
+            self.keyboard.handle_key_release(key);
             return;
         }
 
-        // Check if this key is still being ignored (was pressed before we were ready)
-        if self.ignored_keys.contains(&key) {
-            eprintln!("[KEY] Ignoring repeat of key {} (pressed before ready)", key);
+        // Check if key should be ignored
+        if self.keyboard.should_ignore_key(key) {
+            eprintln!("[KEY] Ignoring key {}", key);
             return;
         }
 
-        // Ignore keys until keymap is received after a grab
-        if self.grab_pending_keymap {
-            eprintln!("[KEY] Ignoring key {} - waiting for keymap", key);
-            self.ignored_keys.insert(key);
-            return;
-        }
-
-        // Ignore keys for 100ms after ready to let stale repeat events clear
-        if let Some(ready_time) = self.ready_time {
-            if ready_time.elapsed().as_millis() < 200 {
-                eprintln!("[KEY] Ignoring key {} - debounce after ready", key);
-                self.ignored_keys.insert(key);
-                return;
-            }
-            self.ready_time = None;
-        }
-
-        let Some(xkb_state) = &self.xkb_state else {
+        // Get keysym and UTF-8
+        let Some((keysym, utf8)) = self.keyboard.get_key_info(key) else {
             eprintln!("No xkb state, cannot process key");
             return;
         };
-
-        // Convert evdev keycode to xkb keycode (evdev + 8)
-        let keycode = xkb::Keycode::new(key + 8);
-        let keysym = xkb_state.key_get_one_sym(keycode);
-        let utf8 = xkb_state.key_get_utf8(keycode);
         eprintln!("[KEY] keysym={:?}, utf8={:?}", keysym, utf8);
 
         // Handle Ctrl+C to exit
         use xkbcommon::xkb::Keysym;
-        if self.ctrl_pressed && keysym == Keysym::c {
+        if self.keyboard.ctrl_pressed && keysym == Keysym::c {
             eprintln!("\nCtrl+C pressed, releasing keyboard and exiting...");
-            if let Some(grab) = self.keyboard_grab.take() {
-                grab.release();
-            }
+            self.wayland.release_keyboard();
             self.pending_exit = true;
             return;
         }
@@ -350,78 +289,76 @@ impl State {
         } else if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
             // Fallback: if no Neovim or no vim key, use local preedit
             if self.nvim.is_none() {
-                self.preedit.push_str(&utf8);
-                eprintln!("[PREEDIT] buffer={:?}", self.preedit);
+                self.ime.preedit.push_str(&utf8);
+                eprintln!("[PREEDIT] buffer={:?}", self.ime.preedit);
                 self.update_preedit();
             }
         } else {
-            eprintln!("[SKIP] no printable char, ctrl={}", self.ctrl_pressed);
+            eprintln!(
+                "[SKIP] no printable char, ctrl={}",
+                self.keyboard.ctrl_pressed
+            );
         }
     }
 
     fn show_candidates(&mut self) {
         if let Some(ref mut window) = self.candidate_window {
-            let qh = self.qh.clone();
-            window.show(&self.candidates, self.selected_candidate, &qh);
+            let qh = self.wayland.qh.clone();
+            window.show(&self.ime.candidates, self.ime.selected_candidate, &qh);
         }
     }
 
     fn hide_candidates(&mut self) {
-        self.candidates.clear();
-        self.selected_candidate = 0;
+        self.ime.clear_candidates();
         if let Some(ref mut window) = self.candidate_window {
             window.hide();
         }
     }
 
     fn update_preedit(&mut self) {
-        let cursor_begin = self.cursor_begin as i32;
-        let cursor_end = self.cursor_end as i32;
-        self.input_method
-            .set_preedit_string(self.preedit.clone(), cursor_begin, cursor_end);
-        self.serial += 1;
-        self.input_method.commit(self.serial);
-        eprintln!("[PREEDIT] updated: {:?}, cursor: {}..{}", self.preedit, cursor_begin, cursor_end);
+        let cursor_begin = self.ime.cursor_begin as i32;
+        let cursor_end = self.ime.cursor_end as i32;
+        self.wayland
+            .set_preedit(&self.ime.preedit, cursor_begin, cursor_end);
+        eprintln!(
+            "[PREEDIT] updated: {:?}, cursor: {}..{}",
+            self.ime.preedit, cursor_begin, cursor_end
+        );
     }
 
-    fn handle_nvim_message(&mut self, msg: FromNeovim) {
+    fn handle_nvim_message(&mut self, msg: OldFromNeovim) {
         match msg {
-            FromNeovim::Ready => {
+            OldFromNeovim::Ready => {
                 eprintln!("[NVIM] Backend ready!");
             }
-            FromNeovim::Preedit(text, cursor_begin, cursor_end) => {
-                eprintln!("[NVIM] Preedit: {:?}, cursor: {}..{}", text, cursor_begin, cursor_end);
-                self.preedit = text;
-                self.cursor_begin = cursor_begin;
-                self.cursor_end = cursor_end;
+            OldFromNeovim::Preedit(text, cursor_begin, cursor_end) => {
+                eprintln!(
+                    "[NVIM] Preedit: {:?}, cursor: {}..{}",
+                    text, cursor_begin, cursor_end
+                );
+                self.ime.set_preedit(text, cursor_begin, cursor_end);
                 self.update_preedit();
             }
-            FromNeovim::Commit(text) => {
+            OldFromNeovim::Commit(text) => {
                 eprintln!("[NVIM] Commit: {:?}", text);
-                self.preedit.clear();
-                self.input_method.commit_string(text);
-                self.input_method.set_preedit_string(String::new(), 0, 0);
-                self.serial += 1;
-                self.input_method.commit(self.serial);
+                self.ime.clear_preedit();
+                self.wayland.commit_string(&text);
                 // Hide candidates on commit
                 self.hide_candidates();
             }
-            FromNeovim::DeleteSurrounding(before, after) => {
+            OldFromNeovim::DeleteSurrounding(before, after) => {
                 eprintln!(
                     "[NVIM] DeleteSurrounding: before={}, after={}",
                     before, after
                 );
-                self.input_method.delete_surrounding_text(before, after);
-                self.serial += 1;
-                self.input_method.commit(self.serial);
+                self.wayland.delete_surrounding(before, after);
             }
-            FromNeovim::Candidates(candidates, selected) => {
+            OldFromNeovim::Candidates(candidates, selected) => {
                 eprintln!("[NVIM] Candidates: {:?}, selected={}", candidates, selected);
                 if candidates.is_empty() {
                     self.hide_candidates();
                 } else {
-                    self.candidates = candidates;
-                    self.selected_candidate = selected;
+                    self.ime.set_candidates(candidates, selected);
                     self.show_candidates();
                 }
             }
@@ -438,7 +375,7 @@ impl State {
         if let Some(ref nvim) = self.nvim {
             // Block waiting for response with 200ms timeout
             if let Some(msg) = nvim.recv_timeout(std::time::Duration::from_millis(200)) {
-                self.handle_nvim_message(msg);
+                self.handle_nvim_message(convert_nvim_msg(msg));
             }
         }
     }
@@ -466,7 +403,7 @@ impl State {
         };
 
         // Handle Alt combinations
-        if self.alt_pressed {
+        if self.keyboard.alt_pressed {
             // Alt+` (grave) for IME toggle
             if keysym == Keysym::grave {
                 return Some("<A-`>".to_string());
@@ -476,7 +413,7 @@ impl State {
         }
 
         // Handle Ctrl combinations
-        if self.ctrl_pressed {
+        if self.keyboard.ctrl_pressed {
             if let Some(key) = base_key {
                 return Some(format!("<C-{}>", key));
             }
@@ -512,25 +449,23 @@ impl State {
         mods_locked: u32,
         group: u32,
     ) {
-        // Ctrl modifier is typically bit 2 (0x4)
-        // Alt modifier is typically bit 3 (0x8)
-        const CTRL_MASK: u32 = 0x4;
-        const ALT_MASK: u32 = 0x8;
+        let old_ctrl = self.keyboard.ctrl_pressed;
+        let old_alt = self.keyboard.alt_pressed;
 
-        let old_ctrl = self.ctrl_pressed;
-        let old_alt = self.alt_pressed;
-        self.ctrl_pressed = (mods_depressed & CTRL_MASK) != 0;
-        self.alt_pressed = (mods_depressed & ALT_MASK) != 0;
+        self.keyboard
+            .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
 
-        if old_ctrl != self.ctrl_pressed {
-            eprintln!("[MOD] ctrl changed: {} -> {}", old_ctrl, self.ctrl_pressed);
+        if old_ctrl != self.keyboard.ctrl_pressed {
+            eprintln!(
+                "[MOD] ctrl changed: {} -> {}",
+                old_ctrl, self.keyboard.ctrl_pressed
+            );
         }
-        if old_alt != self.alt_pressed {
-            eprintln!("[MOD] alt changed: {} -> {}", old_alt, self.alt_pressed);
-        }
-
-        if let Some(xkb_state) = &mut self.xkb_state {
-            xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+        if old_alt != self.keyboard.alt_pressed {
+            eprintln!(
+                "[MOD] alt changed: {} -> {}",
+                old_alt, self.keyboard.alt_pressed
+            );
         }
     }
 }
@@ -705,20 +640,20 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
     ) {
         match event {
             zwp_input_method_v2::Event::Activate => {
-                state.active = true;
+                state.wayland.active = true;
                 eprintln!("IME activated!");
 
-                // Only grab keyboard if skkeleton is enabled (user pressed Alt+`)
+                // Only grab keyboard if IME is enabled (user pressed Alt+`)
                 // This enables passthrough mode by default
-                if state.skkeleton_enabled && state.keyboard_grab.is_none() {
+                if state.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
                     let grab = input_method.grab_keyboard(qh, ());
-                    state.keyboard_grab = Some(grab);
-                    eprintln!("Keyboard grabbed (skkeleton enabled)");
+                    state.wayland.keyboard_grab = Some(grab);
+                    eprintln!("Keyboard grabbed (IME enabled)");
                 }
             }
             zwp_input_method_v2::Event::Deactivate => {
                 eprintln!("IME deactivated");
-                state.active = false;
+                state.wayland.active = false;
                 // Hide candidates when deactivated
                 state.hide_candidates();
             }
@@ -765,22 +700,15 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         unsafe { memmap_keymap(fd.as_fd().as_raw_fd(), size as usize) };
 
                     if let Some(data) = keymap_data {
-                        // Parse the keymap
-                        if let Some(keymap) = xkb::Keymap::new_from_string(
-                            &state.xkb_context,
-                            data,
-                            xkb::KEYMAP_FORMAT_TEXT_V1,
-                            xkb::KEYMAP_COMPILE_NO_FLAGS,
-                        ) {
-                            state.xkb_state = Some(xkb::State::new(&keymap));
-                            state.grab_pending_keymap = false;
+                        // Parse the keymap using KeyboardState
+                        if state.keyboard.load_keymap(&data) {
                             eprintln!("Keymap loaded successfully");
 
-                            // Now send the skkeleton toggle if pending
-                            if state.pending_skkeleton_enable {
-                                state.pending_skkeleton_enable = false;
-                                // Set ready_time - ignore keys for 100ms to let repeat events clear
-                                state.ready_time = Some(Instant::now());
+                            // Complete enabling if transitioning
+                            let should_toggle = state.ime.complete_enabling();
+                            if should_toggle {
+                                // Set ready_time for debouncing
+                                state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
                                     eprintln!("[IME] Sending skkeleton toggle");
                                     nvim.send_key("<A-`>");

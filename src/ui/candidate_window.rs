@@ -11,8 +11,8 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_v2, zwp_input_popup_surface_v2,
 };
 
+use super::text_render::{self, TextRenderer};
 use crate::State;
-use crate::text_render::{self, TextRenderer};
 
 /// Double buffer state
 struct Buffer {
@@ -105,8 +105,11 @@ impl CandidateWindow {
             .cloned()
             .collect();
         let has_scrollbar = candidates.len() > MAX_VISIBLE_CANDIDATES;
-        let (new_width, new_height) =
-            text_render::calculate_window_size(&mut self.renderer, &visible_candidates, has_scrollbar);
+        let (new_width, new_height) = text_render::calculate_window_size(
+            &mut self.renderer,
+            &visible_candidates,
+            has_scrollbar,
+        );
 
         self.width = new_width;
         self.height = new_height;
@@ -130,7 +133,6 @@ impl CandidateWindow {
 
     /// Render candidates to buffer and attach to surface
     fn render(&mut self, candidates: &[String], selected: usize, qh: &QueueHandle<State>) {
-
         // Ensure pool is large enough
         let buffer_size = (self.width * self.height * 4) as usize;
         if buffer_size * 2 > self.pool_size {
