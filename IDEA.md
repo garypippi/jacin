@@ -94,3 +94,44 @@ SKK is a Japanese input method where:
 - wlroots / Wayland protocol details for IME implementation
 - Common pitfalls when implementing `zwp_input_method_v2`
 - Designing IME UI positioning (cursor rect, candidate window)
+
+---
+
+## Future Ideas: Leveraging Neovim Power
+
+### Vim Modal Editing in Preedit
+
+The main advantage of Neovim backend over fcitx+skk is full vim power in preedit:
+
+- **Normal mode**: `hjkl`, `w`/`b` word motions, `ciw`, `r`, `x`, etc.
+- **Registers**: `"ay` to save, `"ap` to paste
+- **Undo/redo**: Full undo tree
+- **Macros**: `qa...q` recording, `@a` playback
+
+**Preedit-only mode**: Vim features only active when preedit has text. Empty preedit = 100% passthrough to app (avoids conflicts with browser shortcuts like Ctrl+J).
+
+### Separate Confirm vs Commit
+
+Current problem: Enter both confirms skkeleton conversion AND commits to app.
+
+**Desired behavior:**
+- **Enter** = confirm skkeleton conversion (stay in preedit, keep editing)
+- **Ctrl+Enter** = commit preedit text to application
+
+This allows composing longer text with multiple conversions:
+```
+Type: きょうは → ▽きょうは
+Space: → ▼今日は
+Enter: → 今日は (confirmed, still in preedit!)
+Type more: → 今日はいい▽てんき
+Space: → 今日はいい▼天気
+Enter: → 今日はいい天気 (still in preedit!)
+Ctrl+Enter: → commit "今日はいい天気" to app
+```
+
+### Other nvim-cmp Sources
+
+Could add completion sources beyond skkeleton:
+- Emoji: `:thinking:` → 🤔
+- Math symbols: `\alpha` → α
+- User snippets/abbreviations
