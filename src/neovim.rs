@@ -3,6 +3,7 @@
 //! Runs Neovim in embedded mode with vim-skkeleton for Japanese input.
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -318,67 +319,104 @@ EOF"#,
         return Ok(());
     }
 
-    // For special keys like <CR>, etc., we need to use \<...> notation in Vimscript
-    let vim_key = if key.starts_with('<') && key.ends_with('>') {
-        // Convert <CR> to \<CR> for Vimscript interpretation
-        format!("\\{}", key)
-    } else {
-        // Regular characters - escape special chars
-        key.replace('\\', "\\\\").replace('"', "\\\"")
-    };
-    // Use 'm' flag to allow remapping (skkeleton intercepts via mappings)
-    let cmd = format!("call feedkeys(\"{}\", 'm')", vim_key);
+    // Check if we're in operator-pending mode from previous key
+    // Track motion completion locally to avoid RPC hangs
+    static PENDING_MOTION: AtomicU8 = AtomicU8::new(0);
+    // 0 = not pending, 1 = waiting for motion, 2 = waiting for text object char (after i/a)
 
-    nvim.command(&cmd).await?;
+    let pending_state = PENDING_MOTION.load(Ordering::SeqCst);
+
+    if pending_state > 0 {
+        eprintln!("[NVIM] In operator-pending mode (state={}), sending key: {}", pending_state, key);
+        let _ = nvim.input(key).await;
+
+        // Check if this key completes the motion
+        let completes_motion = match pending_state {
+            1 => {
+                // Waiting for motion - single char motions complete immediately
+                // Text objects (i/a) need one more char
+                match key {
+                    "i" | "a" => {
+                        // Text object prefix - wait for one more char
+                        PENDING_MOTION.store(2, Ordering::SeqCst);
+                        false
+                    }
+                    // Single char motions that complete operator
+                    "w" | "e" | "b" | "h" | "j" | "k" | "l" | "$" | "0" | "^" |
+                    "G" | "{" | "}" | "(" | ")" | "%" => true,
+                    // Escape cancels
+                    "<Esc>" => true,
+                    _ => false,
+                }
+            }
+            2 => {
+                // Waiting for text object char (w, p, ", ', etc.)
+                // Any char completes it
+                true
+            }
+            _ => false,
+        };
+
+        if completes_motion {
+            eprintln!("[NVIM] Motion completed, resuming normal queries");
+            PENDING_MOTION.store(0, Ordering::SeqCst);
+            // Give vim time to process the complete command
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            // Fall through to normal query path
+        } else {
+            return Ok(());
+        }
+    } else {
+        // Normal path - send key
+        let _ = nvim.input(key).await;
+    }
 
     // Small delay to let skkeleton process
     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
-    // Get line, cursor position, and mode in one lua call
-    let result = nvim
-        .command_output(
-            r#"lua << EOF
-            local line = vim.fn.getline('.')
-            local col = vim.fn.col('.')
-            local mode = vim.fn.mode()
-            local cursor_end = col
-            if mode == 'n' or mode == 'v' then
-                -- Get byte length of character at cursor for block cursor
-                local char_at_cursor = vim.fn.matchstr(line, '.', col - 1)
-                if #char_at_cursor > 0 then
-                    cursor_end = col + #char_at_cursor
-                else
-                    cursor_end = col + 1
-                end
-            end
-            print(string.format('%s\t%d\t%d\t%s', line, col, cursor_end, mode))
-EOF"#,
-        )
-        .await
-        .unwrap_or_default();
+    // Quick mode check first - if operator-pending, skip the full query
+    // This prevents hanging when vim is waiting for motion (e.g., after 'd')
+    let mode_str = nvim.command_output("echo mode(1)").await?;
+    let mode = mode_str.trim();
 
-    // Parse result: "line\tcol\tcursor_end\tmode"
-    let result = result.trim();
-    let parts: Vec<&str> = result.split('\t').collect();
-    let (line, cursor_begin, cursor_end) = if parts.len() >= 4 {
-        let line = parts[0].to_string();
-        let col: usize = parts[1].parse().unwrap_or(1);
-        let end: usize = parts[2].parse().unwrap_or(col);
-        let mode = parts[3];
-        // Convert to 0-indexed
-        let cursor_begin = col.saturating_sub(1);
-        let cursor_end = end.saturating_sub(1);
-        eprintln!("[NVIM] preedit: {:?}, col: {}, end: {}, mode: {}", line, col, end, mode);
-        (line, cursor_begin, cursor_end)
+    if mode.starts_with("no") {
+        // Operator-pending mode (no, nov, etc.)
+        // Set flag and skip query - vim is waiting for more input
+        PENDING_MOTION.store(1, Ordering::SeqCst);
+        eprintln!("[NVIM] Entered operator-pending mode ({})", mode);
+        return Ok(());
+    }
+
+    // Get line content
+    let line = nvim.command_output("echo getline('.')").await?;
+    let line = line.trim().to_string();
+
+    // Get cursor column (1-indexed byte position)
+    let col_str = nvim.command_output("echo col('.')").await?;
+    let col: usize = col_str.trim().parse().unwrap_or(1);
+
+    // Calculate cursor range
+    let cursor_begin = col.saturating_sub(1);
+    let cursor_end = if mode == "n" || mode == "v" || mode.starts_with('v') {
+        // Normal/visual mode: block cursor - need character width
+        let char_len_str = nvim
+            .command_output(&format!(
+                "echo strlen(matchstr(getline('.'), '.', {}))",
+                col - 1
+            ))
+            .await
+            .unwrap_or_default();
+        let char_len: usize = char_len_str.trim().parse().unwrap_or(1);
+        cursor_begin + char_len.max(1)
     } else {
-        // Fallback: simple getline
-        let line = nvim.command_output("echo getline('.')").await?;
-        let line = line.trim().to_string();
-        let len = line.len();
-        eprintln!("[NVIM] preedit (fallback): {:?}", line);
-        (line, len, len)
+        // Insert mode: line cursor
+        cursor_begin
     };
 
+    eprintln!(
+        "[NVIM] preedit: {:?}, col: {}, cursor: {}..{}, mode: {}",
+        line, col, cursor_begin, cursor_end, mode
+    );
     let _ = tx.send(FromNeovim::Preedit(line.clone(), cursor_begin, cursor_end));
 
     // Check for SKKeleton candidates first, then fall back to nvim-cmp

@@ -134,14 +134,23 @@ Ctrl+Enter: → commit "今日はいい天気" to app
 
 ---
 
+### Vim Text Object Motions ✓
+
+Text object motions like `diw`, `ciw`, `daw` now work:
+- Tracks operator-pending mode locally to avoid RPC hangs
+- Detects motion completion (simple motions, text object prefixes)
+- Resumes normal queries after operation completes
+
+---
+
 ## Known Issues / TODO
 
-### Vim Text Objects Not Working
+### Ctrl+C Behavior
 
-Motions like `diw`, `ciw`, `daw` don't work. Possible causes:
-- Single-line buffer limitation
-- Text object detection issues with Japanese characters
-- Need to investigate neovim's response to these commands
+Currently Ctrl+C exits the IME. Should instead:
+- Clear preedit text
+- Return to insert mode
+- Stay active
 
 ---
 
