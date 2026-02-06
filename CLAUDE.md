@@ -73,7 +73,6 @@ Working:
 - Keypress display: shows insert mode entry keys (i, a, A, o), register paste sequences (<C-r>a), and completed operator sequences (d$, "ay$) for 1.5s
 
 Known Issues:
-- Ctrl+C exits IME (should clear preedit instead)
 - Multiline operations (yy, dd, cc, p, P) not yet supported (single-line preedit only)
 
 ## Architecture

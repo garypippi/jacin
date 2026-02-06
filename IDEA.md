@@ -194,13 +194,6 @@ Register-pending state tracking (via unified `PendingState` enum):
 
 ## Known Issues / TODO
 
-### Ctrl+C Behavior
-
-Currently Ctrl+C exits the IME. Should instead:
-- Clear preedit text
-- Return to insert mode
-- Stay active
-
 ### Multiline Preedit Support
 
 Currently the IME only supports single-line preedit. Operations that involve multiple lines don't work:
@@ -270,9 +263,6 @@ The main advantage of Neovim backend over fcitx+skk is full vim power in preedit
 - **Undo/redo**: Full undo tree
 - **Macros**: `qa...q` recording, `@a` playback
 
-### Other nvim-cmp Sources
+### Other nvim-cmp Sources ✓
 
-Could add completion sources beyond skkeleton:
-- Emoji: `:thinking:` → 🤔
-- Math symbols: `\alpha` → α
-- User snippets/abbreviations
+Already works — any nvim-cmp source configured in Neovim flows through the existing candidate pipeline.

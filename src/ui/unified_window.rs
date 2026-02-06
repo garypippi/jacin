@@ -439,12 +439,12 @@ impl UnifiedPopup {
 
             // Draw line cursor
             let cursor_draw_x = cursor_x - scroll_offset;
-            if cursor_draw_x >= PADDING && cursor_draw_x <= layout.width as f32 - PADDING {
-                if let Some(rect) = Rect::from_xywh(cursor_draw_x, layout.preedit_y, 2.0, line_height) {
-                    let mut paint = Paint::default();
-                    paint.set_color(text_color);
-                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-                }
+            if cursor_draw_x >= PADDING && cursor_draw_x <= layout.width as f32 - PADDING
+                && let Some(rect) = Rect::from_xywh(cursor_draw_x, layout.preedit_y, 2.0, line_height)
+            {
+                let mut paint = Paint::default();
+                paint.set_color(text_color);
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
         }
 
