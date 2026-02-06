@@ -21,6 +21,8 @@ static PENDING_MOTION: AtomicU8 = AtomicU8::new(0);
 /// 0 = not pending, 1 = waiting for register name (insert mode <C-r>)
 /// 2 = waiting for register name (normal mode ")
 static PENDING_REGISTER: AtomicU8 = AtomicU8::new(0);
+/// 0 = not pending, 1 = Neovim blocked in getchar (after q, f, t, r, m, etc.)
+static PENDING_GETCHAR: AtomicU8 = AtomicU8::new(0);
 
 /// Check if waiting for motion (operator pending mode)
 pub fn is_motion_pending() -> bool {
@@ -40,6 +42,11 @@ pub fn pending_motion_state() -> u8 {
 /// Get the pending register state (0 = none, 1 = insert <C-r>, 2 = normal ")
 pub fn pending_register_state() -> u8 {
     PENDING_REGISTER.load(Ordering::SeqCst)
+}
+
+/// Check if Neovim is blocked in getchar (after q, f, t, r, m, etc.)
+pub fn is_getchar_pending() -> bool {
+    PENDING_GETCHAR.load(Ordering::SeqCst) > 0
 }
 
 /// Empty handler - we don't need to handle notifications for now
@@ -180,6 +187,27 @@ async fn handle_key(
     tx: &Sender<FromNeovim>,
     config: &Config,
 ) -> anyhow::Result<()> {
+    // Handle getchar-pending: Neovim is blocked waiting for a character (after q, f, t, r, m, etc.)
+    // Send the key to complete the getchar, then fall through to normal query path
+    if PENDING_GETCHAR.load(Ordering::SeqCst) > 0 {
+        eprintln!("[NVIM] Completing getchar with key: {}", key);
+        let _ = nvim.input(key).await;
+        PENDING_GETCHAR.store(0, Ordering::SeqCst);
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        // Fall through to query preedit/mode normally
+        // (key was already sent, skip the normal send path)
+        let mode_result = nvim.get_mode().await?;
+        let (mode, blocking) = parse_get_mode(&mode_result);
+        if blocking {
+            // Still blocked (unlikely but handle gracefully)
+            PENDING_GETCHAR.store(1, Ordering::SeqCst);
+            eprintln!("[NVIM] Still blocked in getchar after key: {}", key);
+            return Ok(());
+        }
+        // Query preedit with current mode
+        return query_and_send_preedit(nvim, tx, &mode).await;
+    }
+
     // Handle Ctrl+C - clear preedit and reset to insert mode
     if key == "<C-c>" {
         nvim.command("normal! 0D").await?;
@@ -413,10 +441,16 @@ EOF"#,
     // Small delay to let skkeleton process
     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
-    // Quick mode check first - if operator-pending, skip the full query
-    // This prevents hanging when vim is waiting for motion (e.g., after 'd')
-    let mode_str = nvim.command_output("echo mode(1)").await?;
-    let mode = mode_str.trim();
+    // Use nvim_get_mode() which works even when Neovim is blocked in getchar
+    let mode_result = nvim.get_mode().await?;
+    let (mode, blocking) = parse_get_mode(&mode_result);
+
+    if blocking {
+        // Neovim is blocked waiting for a character (e.g., after q, f, t, r, m)
+        PENDING_GETCHAR.store(1, Ordering::SeqCst);
+        eprintln!("[NVIM] Blocked in getchar (mode={}), waiting for next key", mode);
+        return Ok(());
+    }
 
     if mode.starts_with("no") {
         // Operator-pending mode (no, nov, etc.)
@@ -426,21 +460,48 @@ EOF"#,
         return Ok(());
     }
 
-    // Get line content (only trim trailing newline, preserve spaces)
+    query_and_send_preedit(nvim, tx, &mode).await
+}
+
+/// Parse nvim_get_mode() result into (mode_string, blocking)
+fn parse_get_mode(result: &[(nvim_rs::Value, nvim_rs::Value)]) -> (String, bool) {
+    let mut mode = String::from("n");
+    let mut blocking = false;
+    for (k, v) in result {
+        if let Some(key) = k.as_str() {
+            match key {
+                "mode" => {
+                    if let Some(m) = v.as_str() {
+                        mode = m.to_string();
+                    }
+                }
+                "blocking" => {
+                    blocking = v.as_bool().unwrap_or(false);
+                }
+                _ => {}
+            }
+        }
+    }
+    (mode, blocking)
+}
+
+/// Query preedit state and candidates from Neovim and send to IME
+async fn query_and_send_preedit(
+    nvim: &Neovim<NvimWriter>,
+    tx: &Sender<FromNeovim>,
+    mode: &str,
+) -> anyhow::Result<()> {
     let line = nvim.command_output("echo getline('.')").await?;
     let line = line
         .trim_end_matches('\n')
         .trim_end_matches('\r')
         .to_string();
 
-    // Get cursor column (1-indexed byte position)
     let col_str = nvim.command_output("echo col('.')").await?;
     let col: usize = col_str.trim().parse().unwrap_or(1);
 
-    // Calculate cursor range
     let cursor_begin = col.saturating_sub(1);
     let cursor_end = if mode == "n" || mode == "v" || mode.starts_with('v') {
-        // Normal/visual mode: block cursor - need character width
         let char_len_str = nvim
             .command_output(&format!(
                 "echo strlen(matchstr(getline('.'), '.', {}))",
@@ -451,7 +512,6 @@ EOF"#,
         let char_len: usize = char_len_str.trim().parse().unwrap_or(1);
         cursor_begin + char_len.max(1)
     } else {
-        // Insert mode: line cursor
         cursor_begin
     };
 
@@ -466,7 +526,6 @@ EOF"#,
         mode.to_string(),
     )));
 
-    // Check for SKKeleton candidates first, then fall back to nvim-cmp
     if let Ok(candidates) = get_skkeleton_candidates(nvim, &line).await
         && !candidates.is_empty()
     {
@@ -474,12 +533,10 @@ EOF"#,
         return Ok(());
     }
 
-    // Check for completion candidates (nvim-cmp)
     if let Ok(candidates) = get_completion_candidates(nvim).await {
         if !candidates.is_empty() {
             let _ = tx.send(FromNeovim::Candidates(candidates));
         } else {
-            // Clear candidates if none available
             let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
         }
     } else {
