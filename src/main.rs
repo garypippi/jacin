@@ -821,17 +821,21 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
             zwp_input_method_v2::Event::Deactivate => {
                 eprintln!("IME deactivated");
                 state.wayland.active = false;
-                // Release keyboard grab to stop receiving key events while deactivated
-                state.wayland.release_keyboard();
-                // Clear local state (don't send Wayland protocol requests while deactivated,
-                // the compositor automatically clears preedit on deactivate)
-                state.ime.clear_preedit();
-                state.ime.clear_candidates();
-                state.keypress.clear();
-                state.hide_popup();
-                // Clear Neovim buffer to reset state for next activation
-                if let Some(ref nvim) = state.nvim {
-                    nvim.send_key("<Esc>ggdG");
+                // Only do cleanup when IME is enabled — avoids flooding Neovim
+                // during rapid compositor activate/deactivate cycles (window switching)
+                if state.ime.is_enabled() {
+                    // Release keyboard grab to stop receiving key events while deactivated
+                    state.wayland.release_keyboard();
+                    // Clear local state (don't send Wayland protocol requests while deactivated,
+                    // the compositor automatically clears preedit on deactivate)
+                    state.ime.clear_preedit();
+                    state.ime.clear_candidates();
+                    state.keypress.clear();
+                    state.hide_popup();
+                    // Clear Neovim buffer to reset state for next activation
+                    if let Some(ref nvim) = state.nvim {
+                        nvim.send_key("<Esc>ggdG");
+                    }
                 }
             }
             zwp_input_method_v2::Event::SurroundingText { .. } => {
