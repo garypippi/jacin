@@ -241,6 +241,72 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     )
     .await?;
 
+    // Register special key handlers as Lua functions.
+    // Each replaces a multi-RPC Rust handler with a single exec_lua call.
+    nvim.exec_lua(
+        r#"
+        -- Enter: check for henkan markers before passing through
+        function _G.ime_handle_enter()
+            local line = vim.fn.getline('.')
+            if not (line:find('▼') or line:find('▽')) then
+                return { type = 'no_marker' }
+            end
+            vim.api.nvim_input('<CR>')
+            return { type = 'processing' }
+        end
+
+        -- Backspace: detect empty buffer for DeleteSurrounding
+        function _G.ime_handle_bs()
+            local line = vim.fn.getline('.')
+            if line == '' then
+                return { type = 'delete_surrounding' }
+            end
+            vim.api.nvim_input('<BS>')
+            return { type = 'processing' }
+        end
+
+        -- Ctrl+K: confirm cmp completion
+        function _G.ime_handle_confirm()
+            local ok, cmp = pcall(require, 'cmp')
+            if ok and cmp.visible() then
+                cmp.confirm({ select = true })
+                return { type = 'confirmed' }
+            end
+            return { type = 'no_cmp' }
+        end
+
+        -- Ctrl+C: clear preedit and reset to insert mode
+        function _G.ime_handle_clear()
+            vim.cmd('normal! 0D')
+            vim.cmd('startinsert')
+            return { type = 'cleared' }
+        end
+
+        -- Commit: get preedit text, clear buffer, return text for commit
+        function _G.ime_handle_commit()
+            local line = vim.fn.getline('.')
+            if line == '' then
+                return { type = 'empty' }
+            end
+            vim.cmd('normal! 0D')
+            vim.cmd('startinsert')
+            return { type = 'commit', text = line }
+        end
+
+        -- Toggle: switch skkeleton on/off
+        function _G.ime_handle_toggle()
+            vim.cmd('startinsert')
+            local cu = vim.api.nvim_replace_termcodes('<C-u>', true, false, true)
+            vim.api.nvim_feedkeys(cu, 'n', false)
+            local plug = vim.api.nvim_replace_termcodes('<Plug>(skkeleton-toggle)', true, false, true)
+            vim.api.nvim_feedkeys(plug, 'm', false)
+            return { type = 'toggled' }
+        end
+        "#,
+        vec![],
+    )
+    .await?;
+
     // Set up autocmds for push notifications.
     // Insert mode state changes are pushed via vim.rpcnotify instead of being polled.
     nvim.exec_lua(
@@ -318,101 +384,68 @@ async fn handle_key(
         return Ok(());
     }
 
-    // Handle Ctrl+C - clear preedit and reset to insert mode
+    // Handle Ctrl+C - clear preedit and reset to insert mode (1 RPC)
     if key == "<C-c>" {
-        nvim.command("normal! 0D").await?;
-        nvim.command("startinsert").await?;
+        let _ = nvim.exec_lua("return ime_handle_clear()", vec![]).await?;
         *last_mode = String::from("i");
         let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
         let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
         return Ok(());
     }
 
-    // Handle commit key (default: Ctrl+Enter) - commit preedit to application
+    // Handle commit key (default: Ctrl+Enter) - commit preedit to application (1 RPC)
     if key == config.keybinds.commit {
-        let line = nvim.command_output("echo getline('.')").await?;
-        let line = line.trim().to_string();
-
-        if !line.is_empty() {
-            let _ = tx.send(FromNeovim::Commit(line));
-            // Clear the line for next input
-            nvim.command("normal! 0D").await?;
-            nvim.command("startinsert").await?;
+        let result = nvim.exec_lua("return ime_handle_commit()", vec![]).await?;
+        if get_map_str(&result, "type") == Some("commit") {
+            if let Some(text) = get_map_str(&result, "text") {
+                let _ = tx.send(FromNeovim::Commit(text.to_string()));
+            }
             let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
+        } else {
+            let _ = tx.send(FromNeovim::KeyProcessed);
         }
         *last_mode = String::from("i");
         return Ok(());
     }
 
-    // Handle Enter - only pass to neovim if in SKK conversion mode
+    // Handle Enter - only pass to neovim if in SKK conversion mode (1 RPC)
     if key == "<CR>" {
-        let line = nvim.command_output("echo getline('.')").await?;
-        let line = line.trim();
-
-        // Only pass Enter to neovim if in conversion mode (has markers)
-        if !line.contains('▼') && !line.contains('▽') {
-            // No markers - ignore Enter (don't create newlines)
-            let _ = tx.send(FromNeovim::KeyProcessed);
-            return Ok(());
-        }
-        // Fall through to normal key handling
+        let _ = nvim.exec_lua("return ime_handle_enter()", vec![]).await?;
+        // Both cases (no_marker and processing) are fire-and-forget.
+        // If markers present, nvim_input('<CR>') was called in Lua; autocmd pushes snapshot.
+        let _ = tx.send(FromNeovim::KeyProcessed);
+        return Ok(());
     }
 
-    // Handle Backspace specially - if line is empty, delete from committed text
+    // Handle Backspace - detect empty buffer for DeleteSurrounding (1 RPC)
     if key == "<BS>" {
-        let line = nvim.command_output("echo getline('.')").await?;
-        let line = line.trim();
-
-        if line.is_empty() {
-            // Nothing in preedit, delete from committed text
+        let result = nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
+        if get_map_str(&result, "type") == Some("delete_surrounding") {
             let _ = tx.send(FromNeovim::DeleteSurrounding {
                 before: 1,
                 after: 0,
             });
-            return Ok(());
-        }
-        // Otherwise, let Neovim handle the backspace normally (fall through)
-    }
-
-    // Handle Ctrl+K specially - call cmp.confirm() directly to avoid Vim's digraph mode
-    if key == "<C-k>" {
-        let result = nvim
-            .command_output(
-                r#"lua << EOF
-                local ok, cmp = pcall(require, 'cmp')
-                if ok and cmp.visible() then
-                    cmp.confirm({ select = true })
-                    print('confirmed')
-                else
-                    print('no_cmp')
-                end
-EOF"#,
-            )
-            .await
-            .unwrap_or_default();
-
-        if result.trim() == "confirmed" {
-            let snapshot = query_snapshot(nvim, tx).await?;
-            *last_mode = snapshot.mode.clone();
         } else {
+            // nvim_input('<BS>') was called in Lua; autocmd pushes snapshot.
             let _ = tx.send(FromNeovim::KeyProcessed);
         }
         return Ok(());
     }
 
-    // Handle toggle key - trigger the <Plug>(skkeleton-toggle) mapping
+    // Handle Ctrl+K - confirm cmp completion (1 RPC)
+    if key == "<C-k>" {
+        let _ = nvim.exec_lua("return ime_handle_confirm()", vec![]).await?;
+        // If confirmed, cmp.confirm() ran in Lua; TextChangedI autocmd pushes snapshot.
+        // If no cmp visible, nothing happened.
+        let _ = tx.send(FromNeovim::KeyProcessed);
+        return Ok(());
+    }
+
+    // Handle toggle key - trigger the <Plug>(skkeleton-toggle) mapping (1 RPC)
     if key == config.keybinds.toggle {
-        eprintln!("[NVIM] Toggling skkeleton via <Plug> mapping...");
-        // Ensure we're in insert mode (skkeleton toggle is an insert-mode mapping)
-        nvim.command("startinsert").await?;
-        // Clear any existing text using Ctrl+U (works in insert mode)
-        nvim.command("call feedkeys(\"\\<C-u>\", 'n')").await?;
-        // Use 'm' flag to allow remapping (needed for <Plug> to work)
-        nvim.command("call feedkeys(\"\\<Plug>(skkeleton-toggle)\", 'm')")
-            .await?;
-        let result = nvim.command_output("echo skkeleton#is_enabled()").await?;
-        eprintln!("[NVIM] skkeleton enabled: {}", result.trim());
-        // Clear preedit display
+        eprintln!("[NVIM] Toggling skkeleton via Lua handler...");
+        let _ = nvim.exec_lua("return ime_handle_toggle()", vec![]).await?;
+        // feedkeys queued in Lua; skkeleton-handled autocmd will push snapshot.
         *last_mode = String::from("i");
         let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
         return Ok(());
@@ -679,4 +712,13 @@ fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
     }
 
     Ok(snapshot)
+}
+
+/// Extract a string field from a msgpack map (Lua table return value).
+fn get_map_str<'a>(value: &'a nvim_rs::Value, field: &str) -> Option<&'a str> {
+    value
+        .as_map()?
+        .iter()
+        .find(|(k, _)| k.as_str() == Some(field))
+        .and_then(|(_, v)| v.as_str())
 }
