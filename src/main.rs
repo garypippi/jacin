@@ -469,6 +469,14 @@ impl State {
                 self.wayland.commit_string(&text);
                 // Hide popup on commit
                 self.hide_popup();
+                // Release keyboard grab and go back to passthrough mode
+                self.wayland.release_keyboard();
+                self.keypress.clear();
+                self.ime.disable();
+                // Reset Neovim buffer for next input session
+                if let Some(ref nvim) = self.nvim {
+                    nvim.send_key("<Esc>ggdG");
+                }
             }
             OldFromNeovim::DeleteSurrounding(before, after) => {
                 eprintln!(
