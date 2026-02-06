@@ -306,7 +306,6 @@ async fn handle_key(
         eprintln!("[NVIM] Completing getchar with key: {}", key);
         let _ = nvim.input(key).await;
         PENDING.clear();
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         // Fall through to query preedit/mode normally
         // (key was already sent, skip the normal send path)
         let snapshot = query_snapshot(nvim, tx).await?;
@@ -393,8 +392,6 @@ EOF"#,
             .unwrap_or_default();
 
         if result.trim() == "confirmed" {
-            // Give skkeleton time to process the confirmation
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             let snapshot = query_snapshot(nvim, tx).await?;
             *last_mode = snapshot.mode.clone();
         } else {
@@ -413,8 +410,6 @@ EOF"#,
         // Use 'm' flag to allow remapping (needed for <Plug> to work)
         nvim.command("call feedkeys(\"\\<Plug>(skkeleton-toggle)\", 'm')")
             .await?;
-        // Small delay to let skkeleton process
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let result = nvim.command_output("echo skkeleton#is_enabled()").await?;
         eprintln!("[NVIM] skkeleton enabled: {}", result.trim());
         // Clear preedit display
@@ -473,7 +468,6 @@ EOF"#,
             }
             // Normal register paste - paste happened, query preedit
             PENDING.clear();
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             true // Key was sent, continue to query preedit
         } else {
             // Normal mode " - register selected, now waiting for operator
@@ -526,8 +520,6 @@ EOF"#,
         if completes_motion {
             eprintln!("[NVIM] Motion completed, resuming normal queries");
             PENDING.clear();
-            // Give vim time to process the complete command
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             // Fall through to normal query path
         } else {
             let _ = tx.send(FromNeovim::KeyProcessed);
@@ -577,9 +569,7 @@ EOF"#,
             snapshot.mode
         );
         let _ = nvim.input("<C-c>").await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         nvim.command("startinsert").await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         let snapshot = query_snapshot(nvim, tx).await?;
         *last_mode = snapshot.mode.clone();
         return Ok(());
