@@ -314,39 +314,26 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     // Insert mode state changes are pushed via vim.rpcnotify instead of being polled.
     nvim.exec_lua(
         r#"
-        -- Flag to prevent duplicate snapshots when both skkeleton-handled
-        -- and TextChangedI/CursorMovedI fire for the same key.
-        vim.g.ime_snapshot_sent = false
-
         -- skkeleton processing complete (fires after Deno IPC finishes)
         vim.api.nvim_create_autocmd('User', {
             pattern = 'skkeleton-handled',
             callback = function()
-                vim.defer_fn(function()
-                    -- Trigger cmp completion in henkan mode (existing behavior)
-                    local status = vim.fn['skkeleton#vim_status']()
-                    vim.g.ime_skk_status = status
-                    if status == 'henkan' then
-                        local ok, cmp = pcall(require, 'cmp')
-                        if ok and cmp then
-                            cmp.complete()
-                        end
+                -- Trigger cmp completion in henkan mode
+                local status = vim.fn['skkeleton#vim_status']()
+                vim.g.ime_skk_status = status
+                if status == 'henkan' then
+                    local ok, cmp = pcall(require, 'cmp')
+                    if ok and cmp then
+                        cmp.complete()
                     end
-                    -- Push snapshot (includes candidates from cmp.complete() above)
-                    vim.g.ime_snapshot_sent = true
-                    vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
-                end, 5)
+                end
+                vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
             end,
         })
 
         -- Non-skkeleton insert mode changes (direct ASCII, BS, cursor movement)
         vim.api.nvim_create_autocmd({'TextChangedI', 'CursorMovedI'}, {
             callback = function()
-                -- Skip if skkeleton-handled already sent snapshot for this key
-                if vim.g.ime_snapshot_sent then
-                    vim.g.ime_snapshot_sent = false
-                    return
-                end
                 vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
             end,
         })
