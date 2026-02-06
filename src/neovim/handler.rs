@@ -147,6 +147,9 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
 
     nvim.command("set nocompatible").await?;
     nvim.command("set encoding=utf-8").await?;
+    // Disable "-- More --" prompt — in embedded mode nobody can dismiss it,
+    // so any long message (e.g. denops error) would block Neovim forever.
+    nvim.command("set nomore").await?;
 
     // Check if user config was loaded
     let rtp = nvim.command_output("echo &runtimepath").await?;
