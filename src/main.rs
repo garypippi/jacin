@@ -445,12 +445,22 @@ impl State {
     fn update_preedit(&mut self) {
         let cursor_begin = self.ime.cursor_begin as i32;
         let cursor_end = self.ime.cursor_end as i32;
-        self.wayland
-            .set_preedit(&self.ime.preedit, cursor_begin, cursor_end);
-        eprintln!(
-            "[PREEDIT] updated: {:?}, cursor: {}..{}",
-            self.ime.preedit, cursor_begin, cursor_end
-        );
+        // Don't send preedit to compositor when IME is disabled or deactivated
+        if self.wayland.active && self.ime.is_enabled() {
+            self.wayland
+                .set_preedit(&self.ime.preedit, cursor_begin, cursor_end);
+            eprintln!(
+                "[PREEDIT] updated: {:?}, cursor: {}..{}",
+                self.ime.preedit, cursor_begin, cursor_end
+            );
+        } else {
+            eprintln!(
+                "[PREEDIT] skipped (active={}, enabled={}): {:?}",
+                self.wayland.active,
+                self.ime.is_enabled(),
+                self.ime.preedit
+            );
+        }
         // Show preedit window with cursor visualization
         self.show_preedit_window();
     }
