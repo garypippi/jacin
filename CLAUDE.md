@@ -50,6 +50,7 @@ src/
 - **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `ImeState`, `KeypressState`
 - **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
+- **Optimized RPC**: Insert mode uses fire-and-forget (`nvim_input` + push notification via `rpcnotify`); normal mode uses 2-RPC pull (`nvim_input` + `collect_snapshot()`); special keys use single Lua function calls
 - **UI module**: Unified popup window (preedit with cursor, keypress display, candidates with scrollbar)
 
 ## Current State

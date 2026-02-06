@@ -99,8 +99,14 @@ src/
 ### Neovim Communication
 
 - **Bounded channels** (capacity 64) for backpressure
-- **Typed protocol** with serde for JSON parsing
+- **Typed protocol** with serde for message parsing
 - **Separate thread** running Tokio runtime for async Neovim IPC
+- **Optimized RPC** (1-2 round-trips per keystroke):
+  - Insert mode: fire-and-forget `nvim_input` + autocmd push via `vim.rpcnotify`
+  - Normal mode: `nvim_input` + synchronous `collect_snapshot()` (single Lua call)
+  - Special keys (Enter, BS, toggle, commit, etc.): single `exec_lua` Lua function call
+- **Lua-side consolidation**: `collect_snapshot()` replaces 5-7 individual RPC queries; special key handlers (`ime_handle_*`) combine check + action in one call
+- **`set nomore`** in init to prevent "-- More --" prompt from blocking embedded Neovim
 
 ### IME Backend: Neovim + vim-skkeleton
 

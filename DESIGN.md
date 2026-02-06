@@ -88,8 +88,8 @@
 │  │  recv ToNeovim::Key ────┼──┼─┐  │  │  │  Preedit Section   │  │      │
 │  │                         │  │ │  │  │  │  line/block cursor  │  │      │
 │  │  nvim.input(key)        │  │ │  │  │  │  horizontal scroll  │  │      │
-│  │  nvim.get_mode()        │  │ │  │  │  └────────────────────┘  │      │
-│  │  nvim.command_output()  │  │ │  │  │  ┌────────────────────┐  │      │
+│  │  exec_lua(Lua handlers) │  │ │  │  │  └────────────────────┘  │      │
+│  │  exec_lua(snapshot)     │  │ │  │  │  ┌────────────────────┐  │      │
 │  │                         │  │ │  │  │  │  Keypress Section   │  │      │
 │  │  PendingState logic:    │  │ │  │  │  │  "d$", "di", "<C-r>a"│ │      │
 │  │    Getchar / Motion /   │  │ │  │  │  └────────────────────┘  │      │
@@ -97,9 +97,9 @@
 │  │    InsertRegister /     │  │ │  │  │  │  Candidate Section  │  │      │
 │  │    NormalRegister       │  │ │  │  │  │  numbered + sel HL  │  │      │
 │  │                         │  │ │  │  │  │  scrollbar          │  │      │
-│  │  query_and_send_preedit │  │ │  │  │  └────────────────────┘  │      │
-│  │    getline('.') -> text │  │ │  │  └──────────────────────────┘      │
-│  │    col('.') -> cursor   │  │ │  │                                    │
+│  │  query_snapshot (normal) │  │ │  │  │  └────────────────────┘  │      │
+│  │    exec_lua(collect_    │  │ │  │  └──────────────────────────┘      │
+│  │      snapshot())        │  │ │  │                                    │
 │  └────────┬────────────────┘  │ │  │  ┌──────────────────────────┐      │
 │           │                   │ │  │  │  TextRenderer             │      │
 │           │ FromNeovim:       │ │  │  │  fontdue + glyph cache    │      │
@@ -107,6 +107,13 @@
 │           │   Commit(text)    │ │  │  └──────────────────────────┘      │
 │           │   Candidates(..)  │ │  │                                    │
 │           │   DeleteSurround  │ │  └────────────────────────────────────┘
+│           │   KeyProcessed    │ │
+│           │                   │ │
+│  ┌─────────────────────────┐  │ │
+│  │  NvimHandler (push)     │  │ │  (insert mode: push via rpcnotify)
+│  │  handle_notify() ───────┼──┼─┘
+│  │  "ime_snapshot" → tx    │  │
+│  └─────────────────────────┘  │
 │           │                   │ │
 │           ▼                   │ │
 │  (crossbeam bounded ch)       │ │
@@ -125,7 +132,7 @@
 └───────────────────────────────┘
 ```
 
-### Synchronous Flow per Keystroke
+### Insert Mode: Fire-and-Forget with Push Notifications
 
 ```
 Time ->
@@ -136,28 +143,58 @@ Main Thread                Handler Thread              Neovim Process
     |  ToNeovim::Key("a")       |                           |
     |                           |-------------------------->|
     |                           |  nvim.input("a")          |
-    |                           |                           |
-    |                           |  sleep(5ms) for skkeleton |
-    |                           |                           |
-    |                           |-------------------------->|
-    |                           |  nvim.get_mode()          |
     |                           |<--------------------------|
-    |                           |  -> "i" (insert)          |
-    |                           |                           |
-    |                           |-------------------------->|
-    |                           |  getline('.') + col('.')   |
-    |                           |<--------------------------|
-    |                           |  -> text + cursor pos     |
-    |                           |                           |
+    |                           |  Ok(1)                    |
     |<--------------------------|                           |
-    |  FromNeovim::Preedit      |                           |
+    |  FromNeovim::KeyProcessed |  (fire-and-forget)        |
+    |  (ready for next key)     |                           |
+    |                           |                           | skkeleton processes
+    |                           |                           | autocmd fires
+    |                           |                           | vim.rpcnotify(0,
+    |                           |  handle_notify()   <------|   "ime_snapshot", ...)
+    |                           |  tx.send(Preedit)         |
     |                           |                           |
+    |  calloop try_recv()       |                           |
+    |  FromNeovim::Preedit      |                           |
     |--> update ImeState        |                           |
     |--> set_preedit -> compositor                          |
     |--> update popup (UI)      |                           |
-    |                           |                           |
-    |  (ready for next key)     |                           |
 ```
+
+RPC count: 1 (nvim_input) + 1 push notification. No blocking wait.
+
+### Normal Mode: Synchronous 2-RPC Query
+
+```
+Time ->
+Main Thread                Handler Thread              Neovim Process
+    |                           |                           |
+    |  Key event (Wayland)      |                           |
+    |-------------------------->|                           |
+    |  ToNeovim::Key("dw")      |                           |
+    |                           |-------------------------->|
+    |                           |  nvim.input("dw")         |
+    |                           |-------------------------->|
+    |                           |  exec_lua(collect_        |
+    |                           |    snapshot())            |
+    |                           |<--------------------------|
+    |                           |  { preedit, cursor,       |
+    |                           |    mode, candidates }     |
+    |<--------------------------|                           |
+    |  FromNeovim::Preedit      |                           |
+    |--> update ImeState        |                           |
+    |--> set_preedit -> compositor                          |
+    |--> update popup (UI)      |                           |
+```
+
+RPC count: 2 (nvim_input + collect_snapshot). No sleep needed —
+normal mode operations complete synchronously in Neovim.
+
+### Special Keys: Single Lua Function Call
+
+Toggle, Enter, BS, Ctrl+K, Commit, and Clear each use a single
+`exec_lua("return ime_handle_*()")` call that combines the check
+and action into one RPC round-trip.
 
 ## 2. State Transition Diagrams
 
@@ -481,8 +518,10 @@ VimMode:            |         |              |           |           |
 |    <- pure logic                                             |
 |                                                              |
 |  Neovim Handler:                                             |
-|    Key processing, mode detection, preedit retrieval         |
-|    PendingState management                                   |
+|    Insert mode: fire-and-forget + push notifications         |
+|    Normal mode: synchronous 2-RPC (input + snapshot)         |
+|    Special keys: single Lua function calls                   |
+|    PendingState management (atomic, cross-thread)            |
 |    <- depends on Neovim RPC, not on Wayland                  |
 |                                                              |
 |  Config:                                                     |
@@ -575,7 +614,7 @@ Future:  Neovim buffer = N lines ->  preedit = 1 line  ->  popup = v+h-scroll
 
 **Impact scope (modules requiring changes):**
 
-- `handler.rs`: `query_and_send_preedit()` -- multiline retrieval
+- `handler.rs`: `collect_snapshot()` Lua function -- multiline retrieval
 - `protocol.rs`: `PreeditInfo` -- multiline support
 - `ime.rs`: `ImeState` -- multiline preedit storage
 - `coordinator.rs`: `update_preedit()` -- extract current line for compositor
