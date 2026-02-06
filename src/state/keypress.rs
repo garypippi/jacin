@@ -4,23 +4,10 @@
 
 use std::time::{Duration, Instant};
 
+use crate::neovim::PendingState;
+
 /// Duration to show keypress window before auto-hide
 pub const KEYPRESS_DISPLAY_DURATION: Duration = Duration::from_millis(1500);
-
-/// Type of pending operation being tracked
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PendingType {
-    /// No pending operation
-    None,
-    /// Normal mode operator pending (d, c, y, etc.)
-    Motion,
-    /// After i/a in operator pending (waiting for text object char)
-    TextObject,
-    /// Insert mode <C-r> (waiting for register name)
-    InsertRegister,
-    /// Normal mode " prefix (waiting for register name)
-    NormalRegister,
-}
 
 /// State for keypress display window
 #[derive(Debug)]
@@ -30,7 +17,7 @@ pub struct KeypressState {
     /// Whether display is visible
     pub visible: bool,
     /// Pending mode type
-    pub pending_type: PendingType,
+    pub pending_type: PendingState,
     /// Current vim mode string (i, n, v, no, etc.)
     pub vim_mode: String,
     /// Time when keypress display was last shown/updated
@@ -43,7 +30,7 @@ impl KeypressState {
         Self {
             accumulated: String::new(),
             visible: false,
-            pending_type: PendingType::None,
+            pending_type: PendingState::None,
             vim_mode: String::new(),
             last_shown: None,
         }
@@ -60,12 +47,12 @@ impl KeypressState {
     pub fn clear(&mut self) {
         self.accumulated.clear();
         self.visible = false;
-        self.pending_type = PendingType::None;
+        self.pending_type = PendingState::None;
         self.last_shown = None;
     }
 
     /// Set the pending type
-    pub fn set_pending(&mut self, pending_type: PendingType) {
+    pub fn set_pending(&mut self, pending_type: PendingState) {
         self.pending_type = pending_type;
     }
 
@@ -86,7 +73,7 @@ impl KeypressState {
 
     /// Check if in any pending state
     pub fn is_pending(&self) -> bool {
-        self.pending_type != PendingType::None
+        self.pending_type != PendingState::None
     }
 
     /// Check if display has timed out

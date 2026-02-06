@@ -3,7 +3,6 @@
 //! Runs Neovim in embedded mode with vim-skkeleton for Japanese input.
 
 use crossbeam_channel::{Receiver, Sender};
-use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::runtime::Runtime;
 
 use nvim_rs::create::tokio::new_child_cmd;
@@ -11,42 +10,17 @@ use nvim_rs::{Handler, Neovim};
 use tokio::process::Command;
 
 use super::protocol::{
-    CandidateInfo, CmpCandidatesJson, CompleteInfoJson, FromNeovim, PreeditInfo, ToNeovim,
+    AtomicPendingState, CandidateInfo, CmpCandidatesJson, CompleteInfoJson, FromNeovim,
+    PendingState, PreeditInfo, ToNeovim,
 };
 use crate::config::Config;
 
-/// Track pending states for multi-key sequences
-/// 0 = not pending, 1 = waiting for motion, 2 = waiting for text object char (after i/a)
-static PENDING_MOTION: AtomicU8 = AtomicU8::new(0);
-/// 0 = not pending, 1 = waiting for register name (insert mode <C-r>)
-/// 2 = waiting for register name (normal mode ")
-static PENDING_REGISTER: AtomicU8 = AtomicU8::new(0);
-/// 0 = not pending, 1 = Neovim blocked in getchar (after q, f, t, r, m, etc.)
-static PENDING_GETCHAR: AtomicU8 = AtomicU8::new(0);
+/// Single pending state for multi-key sequences (mutually exclusive).
+static PENDING: AtomicPendingState = AtomicPendingState::new();
 
-/// Check if waiting for motion (operator pending mode)
-pub fn is_motion_pending() -> bool {
-    PENDING_MOTION.load(Ordering::SeqCst) > 0
-}
-
-/// Check if waiting for register name
-pub fn is_register_pending() -> bool {
-    PENDING_REGISTER.load(Ordering::SeqCst) > 0
-}
-
-/// Get the pending motion state (0 = none, 1 = motion, 2 = text object)
-pub fn pending_motion_state() -> u8 {
-    PENDING_MOTION.load(Ordering::SeqCst)
-}
-
-/// Get the pending register state (0 = none, 1 = insert <C-r>, 2 = normal ")
-pub fn pending_register_state() -> u8 {
-    PENDING_REGISTER.load(Ordering::SeqCst)
-}
-
-/// Check if Neovim is blocked in getchar (after q, f, t, r, m, etc.)
-pub fn is_getchar_pending() -> bool {
-    PENDING_GETCHAR.load(Ordering::SeqCst) > 0
+/// Get a reference to the global pending state.
+pub fn pending_state() -> &'static AtomicPendingState {
+    &PENDING
 }
 
 /// Empty handler - we don't need to handle notifications for now
@@ -189,10 +163,10 @@ async fn handle_key(
 ) -> anyhow::Result<()> {
     // Handle getchar-pending: Neovim is blocked waiting for a character (after q, f, t, r, m, etc.)
     // Send the key to complete the getchar, then fall through to normal query path
-    if PENDING_GETCHAR.load(Ordering::SeqCst) > 0 {
+    if PENDING.load() == PendingState::Getchar {
         eprintln!("[NVIM] Completing getchar with key: {}", key);
         let _ = nvim.input(key).await;
-        PENDING_GETCHAR.store(0, Ordering::SeqCst);
+        PENDING.clear();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         // Fall through to query preedit/mode normally
         // (key was already sent, skip the normal send path)
@@ -200,7 +174,7 @@ async fn handle_key(
         let (mode, blocking) = parse_get_mode(&mode_result);
         if blocking {
             // Still blocked (unlikely but handle gracefully)
-            PENDING_GETCHAR.store(1, Ordering::SeqCst);
+            PENDING.store(PendingState::Getchar);
             eprintln!("[NVIM] Still blocked in getchar after key: {}", key);
             return Ok(());
         }
@@ -321,50 +295,44 @@ EOF"#,
     }
 
     // Handle Ctrl+R in insert mode - check mode BEFORE sending to avoid hang
-    // IMPORTANT: Also check PENDING_REGISTER - if already waiting for register,
-    // don't query mode (Neovim is blocked waiting for register char and will hang)
-    if key == "<C-r>"
-        && PENDING_MOTION.load(Ordering::SeqCst) == 0
-        && PENDING_REGISTER.load(Ordering::SeqCst) == 0
-    {
+    // IMPORTANT: Also check PENDING - if already waiting for something,
+    // don't query mode (Neovim may be blocked and will hang)
+    if key == "<C-r>" && !PENDING.load().is_pending() {
         let mode_str = nvim.command_output("echo mode(1)").await?;
         let mode = mode_str.trim();
         if mode == "i" {
             // Send <C-r> and set pending register state
             let _ = nvim.input(key).await;
-            PENDING_REGISTER.store(1, Ordering::SeqCst);
+            PENDING.store(PendingState::InsertRegister);
             eprintln!("[NVIM] Sent <C-r>, waiting for register name (insert mode)");
             return Ok(());
         }
     }
 
     // Handle " in normal mode - register prefix for operators like "ay$
-    // Skip if PENDING_REGISTER > 0 (we're waiting for register name after <C-r>)
-    if key == "\""
-        && PENDING_MOTION.load(Ordering::SeqCst) == 0
-        && PENDING_REGISTER.load(Ordering::SeqCst) == 0
-    {
+    // Skip if pending (we may be waiting for register name after <C-r>)
+    if key == "\"" && !PENDING.load().is_pending() {
         let mode_str = nvim.command_output("echo mode(1)").await?;
         let mode = mode_str.trim();
         if mode == "n" {
             // Send " and set pending register state for normal mode
             let _ = nvim.input(key).await;
-            PENDING_REGISTER.store(2, Ordering::SeqCst);
+            PENDING.store(PendingState::NormalRegister);
             eprintln!("[NVIM] Sent \", waiting for register name (normal mode)");
             return Ok(());
         }
     }
 
     // Handle register-pending state
-    let register_pending = PENDING_REGISTER.load(Ordering::SeqCst);
-    let key_already_sent = if register_pending > 0 {
+    let current = PENDING.load();
+    let key_already_sent = if current.is_register() {
         eprintln!(
-            "[NVIM] In register-pending mode (state={}), sending register: {}",
-            register_pending, key
+            "[NVIM] In register-pending mode (state={:?}), sending register: {}",
+            current, key
         );
         let _ = nvim.input(key).await;
 
-        if register_pending == 1 {
+        if current == PendingState::InsertRegister {
             // Insert mode <C-r> handling
             if key == "<C-r>" {
                 // <C-r><C-r> means "insert register literally" - still waiting for register name
@@ -372,12 +340,12 @@ EOF"#,
                 return Ok(());
             }
             // Normal register paste - paste happened, query preedit
-            PENDING_REGISTER.store(0, Ordering::SeqCst);
+            PENDING.clear();
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             true // Key was sent, continue to query preedit
         } else {
             // Normal mode " - register selected, now waiting for operator
-            PENDING_REGISTER.store(0, Ordering::SeqCst);
+            PENDING.clear();
             // Return early - preedit unchanged, next key will be operator
             eprintln!("[NVIM] Register '{}' selected, waiting for operator", key);
             return Ok(());
@@ -386,24 +354,22 @@ EOF"#,
         false
     };
 
-    let pending_state = PENDING_MOTION.load(Ordering::SeqCst);
-
-    if pending_state > 0 {
+    if current.is_motion() {
         eprintln!(
-            "[NVIM] In operator-pending mode (state={}), sending key: {}",
-            pending_state, key
+            "[NVIM] In operator-pending mode (state={:?}), sending key: {}",
+            current, key
         );
         let _ = nvim.input(key).await;
 
         // Check if this key completes the motion
-        let completes_motion = match pending_state {
-            1 => {
+        let completes_motion = match current {
+            PendingState::Motion => {
                 // Waiting for motion - single char motions complete immediately
                 // Text objects (i/a) need one more char
                 match key {
                     "i" | "a" => {
                         // Text object prefix - wait for one more char
-                        PENDING_MOTION.store(2, Ordering::SeqCst);
+                        PENDING.store(PendingState::TextObject);
                         false
                     }
                     // Single char motions that complete operator
@@ -416,7 +382,7 @@ EOF"#,
                     _ => false,
                 }
             }
-            2 => {
+            PendingState::TextObject => {
                 // Waiting for text object char (w, p, ", ', etc.)
                 // Any char completes it
                 true
@@ -426,7 +392,7 @@ EOF"#,
 
         if completes_motion {
             eprintln!("[NVIM] Motion completed, resuming normal queries");
-            PENDING_MOTION.store(0, Ordering::SeqCst);
+            PENDING.clear();
             // Give vim time to process the complete command
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             // Fall through to normal query path
@@ -447,7 +413,7 @@ EOF"#,
 
     if blocking {
         // Neovim is blocked waiting for a character (e.g., after q, f, t, r, m)
-        PENDING_GETCHAR.store(1, Ordering::SeqCst);
+        PENDING.store(PendingState::Getchar);
         eprintln!("[NVIM] Blocked in getchar (mode={}), waiting for next key", mode);
         return Ok(());
     }
@@ -455,7 +421,7 @@ EOF"#,
     if mode.starts_with("no") {
         // Operator-pending mode (no, nov, etc.)
         // Set flag and skip query - vim is waiting for more input
-        PENDING_MOTION.store(1, Ordering::SeqCst);
+        PENDING.store(PendingState::Motion);
         eprintln!("[NVIM] Entered operator-pending mode ({})", mode);
         return Ok(());
     }

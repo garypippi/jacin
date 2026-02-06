@@ -12,5 +12,5 @@ mod wayland;
 
 pub use ime::ImeState;
 pub use keyboard::KeyboardState;
-pub use keypress::{KeypressState, PendingType};
+pub use keypress::KeypressState;
 pub use wayland::WaylandState;

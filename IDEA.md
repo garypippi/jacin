@@ -185,9 +185,9 @@ Single-line yank and paste operations work:
 - `<C-r>a` - paste from named register in insert mode
 - `"ay$` - yank to named register `a`
 
-Register-pending state tracking:
-- `<C-r>` in insert mode sets PENDING_REGISTER=1
-- `"` in normal mode sets PENDING_REGISTER=2
+Register-pending state tracking (via unified `PendingState` enum):
+- `<C-r>` in insert mode sets `PendingState::InsertRegister`
+- `"` in normal mode sets `PendingState::NormalRegister`
 - Next key (register name) is handled appropriately
 
 ---

@@ -18,10 +18,8 @@ use crate::config::Config;
 #[allow(unused_imports)]
 pub use event_source::{NeovimEventSource, NeovimPing};
 
-pub use handler::{
-    is_motion_pending, is_register_pending, pending_motion_state, pending_register_state,
-};
-pub use protocol::{FromNeovim, ToNeovim};
+pub use handler::pending_state;
+pub use protocol::{FromNeovim, PendingState, ToNeovim};
 
 /// Channel capacity for Neovim communication
 /// This provides backpressure if messages accumulate

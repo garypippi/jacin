@@ -2,7 +2,83 @@
 //!
 //! Defines all messages that can be sent to/from the Neovim backend.
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use serde::{Deserialize, Serialize};
+
+/// Pending state for multi-key sequences in the Neovim handler.
+///
+/// These states are mutually exclusive — only one can be active at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PendingState {
+    /// No pending operation
+    None = 0,
+    /// Neovim blocked in getchar (after q, f, t, r, m, etc.)
+    Getchar = 1,
+    /// Operator pending, waiting for motion (after d, c, y, etc.)
+    Motion = 2,
+    /// Operator pending after i/a, waiting for text object char
+    TextObject = 3,
+    /// Insert mode <C-r>, waiting for register name
+    InsertRegister = 4,
+    /// Normal mode " prefix, waiting for register name
+    NormalRegister = 5,
+}
+
+impl PendingState {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::None,
+            1 => Self::Getchar,
+            2 => Self::Motion,
+            3 => Self::TextObject,
+            4 => Self::InsertRegister,
+            5 => Self::NormalRegister,
+            _ => Self::None,
+        }
+    }
+
+    /// Check if any pending state is active
+    pub fn is_pending(self) -> bool {
+        self != Self::None
+    }
+
+    /// Check if in a motion-pending state (Motion or TextObject)
+    pub fn is_motion(self) -> bool {
+        matches!(self, Self::Motion | Self::TextObject)
+    }
+
+    /// Check if in a register-pending state (InsertRegister or NormalRegister)
+    pub fn is_register(self) -> bool {
+        matches!(self, Self::InsertRegister | Self::NormalRegister)
+    }
+}
+
+/// Atomic wrapper around `PendingState` for cross-thread sharing.
+pub struct AtomicPendingState(AtomicU8);
+
+impl AtomicPendingState {
+    /// Create with `PendingState::None`.
+    pub const fn new() -> Self {
+        Self(AtomicU8::new(PendingState::None as u8))
+    }
+
+    /// Load the current pending state.
+    pub fn load(&self) -> PendingState {
+        PendingState::from_u8(self.0.load(Ordering::SeqCst))
+    }
+
+    /// Store a new pending state.
+    pub fn store(&self, state: PendingState) {
+        self.0.store(state as u8, Ordering::SeqCst);
+    }
+
+    /// Clear to `PendingState::None`.
+    pub fn clear(&self) {
+        self.store(PendingState::None);
+    }
+}
 
 /// Messages sent from IME to Neovim
 #[derive(Debug, Clone, Serialize, Deserialize)]

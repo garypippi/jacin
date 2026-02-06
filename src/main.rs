@@ -27,11 +27,8 @@ mod neovim;
 mod state;
 mod ui;
 
-use neovim::{
-    FromNeovim, NeovimHandle, OldFromNeovim, is_motion_pending, is_register_pending,
-    pending_motion_state, pending_register_state,
-};
-use state::{ImeState, KeyboardState, KeypressState, PendingType, WaylandState};
+use neovim::{FromNeovim, NeovimHandle, OldFromNeovim, PendingState, pending_state};
+use state::{ImeState, KeyboardState, KeypressState, WaylandState};
 use ui::{PopupContent, TextRenderer, UnifiedPopup};
 
 // Helper to convert new FromNeovim to old format during transition
@@ -314,17 +311,18 @@ impl State {
         if let Some(ref vim_key) = vim_key {
             // Track state before sending to Neovim
             let was_normal = self.keypress.is_normal_mode();
-            let was_motion_pending = is_motion_pending();
-            let was_register_pending = is_register_pending();
-            let was_insert_register_pending =
-                was_register_pending && pending_register_state() == 1;
+            let before = pending_state().load();
+            let was_motion_pending = before.is_motion();
+            let was_register_pending = before.is_register();
+            let was_insert_register_pending = before == PendingState::InsertRegister;
 
             self.send_to_nvim(vim_key);
             // Wait for Neovim response with timeout
             self.wait_for_nvim_response();
 
             // Check state after Neovim response
-            let now_pending = is_motion_pending() || is_register_pending();
+            let after = pending_state().load();
+            let now_pending = after.is_pending();
             let is_normal = self.keypress.is_normal_mode();
             let is_insert = self.keypress.vim_mode == "i";
 
@@ -421,23 +419,10 @@ impl State {
 
     fn update_keypress_from_pending(&mut self) {
         // Sync keypress state with neovim pending state
-        let motion_state = pending_motion_state();
-        let register_state = pending_register_state();
-
-        if motion_state > 0 {
-            self.keypress.set_pending(match motion_state {
-                1 => PendingType::Motion,
-                2 => PendingType::TextObject,
-                _ => PendingType::None,
-            });
-        } else if register_state > 0 {
-            self.keypress.set_pending(match register_state {
-                1 => PendingType::InsertRegister,
-                2 => PendingType::NormalRegister,
-                _ => PendingType::None,
-            });
+        let state = pending_state().load();
+        if state.is_pending() {
+            self.keypress.set_pending(state);
         } else {
-            // No pending state - hide keypress display
             self.hide_keypress();
         }
     }
