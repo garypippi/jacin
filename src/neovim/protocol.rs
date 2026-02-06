@@ -165,48 +165,24 @@ impl CandidateInfo {
     }
 }
 
-/// Parse candidates from nvim-cmp JSON output
-#[derive(Debug, Deserialize)]
-pub struct CmpCandidatesJson {
-    pub words: Vec<String>,
-    pub selected: i32,
-    #[allow(dead_code)]
-    pub total: usize,
+/// State snapshot from collect_snapshot() Lua function.
+/// Consolidates all state queries into a single RPC call.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Snapshot {
+    /// Current line text (preedit)
+    pub preedit: String,
+    /// Cursor byte position (1-indexed, from col('.'))
+    pub cursor_byte: usize,
+    /// Vim mode string ("i", "n", "no", "v", "c", etc.)
+    pub mode: String,
+    /// Whether Neovim is blocked in getchar
+    pub blocking: bool,
+    /// Character width under cursor (normal/visual mode only, 0 otherwise)
+    #[serde(default)]
+    pub char_width: usize,
+    /// Completion candidates (None when cmp not visible)
+    pub candidates: Option<Vec<String>>,
+    /// Selected candidate index (0-indexed, None when no selection)
+    pub selected: Option<i32>,
 }
 
-impl CmpCandidatesJson {
-    /// Convert to CandidateInfo
-    pub fn into_candidate_info(self) -> CandidateInfo {
-        let selected = if self.selected >= 0 {
-            self.selected as usize
-        } else {
-            0
-        };
-        CandidateInfo::new(self.words, selected)
-    }
-}
-
-/// Parse completion items from complete_info() JSON output
-#[derive(Debug, Deserialize)]
-pub struct CompleteInfoJson {
-    pub items: Vec<CompleteItem>,
-    pub selected: i32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CompleteItem {
-    pub word: String,
-}
-
-impl CompleteInfoJson {
-    /// Convert to CandidateInfo
-    pub fn into_candidate_info(self) -> CandidateInfo {
-        let candidates: Vec<String> = self.items.into_iter().map(|i| i.word).collect();
-        let selected = if self.selected >= 0 {
-            self.selected as usize
-        } else {
-            0
-        };
-        CandidateInfo::new(candidates, selected)
-    }
-}

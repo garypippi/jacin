@@ -10,8 +10,8 @@ use nvim_rs::{Handler, Neovim};
 use tokio::process::Command;
 
 use super::protocol::{
-    AtomicPendingState, CandidateInfo, CmpCandidatesJson, CompleteInfoJson, FromNeovim,
-    PendingState, PreeditInfo, ToNeovim,
+    AtomicPendingState, CandidateInfo, FromNeovim, PendingState, PreeditInfo, Snapshot,
+    ToNeovim,
 };
 use crate::config::Config;
 
@@ -124,6 +124,61 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
         funcs.lines().take(10).collect::<Vec<_>>().join(", ")
     );
 
+    // Register collect_snapshot() Lua function for consolidated state queries.
+    // All calls inside are in-process (vim.fn.* = C function calls, microsecond-level).
+    // This replaces multiple separate RPC calls (getline, col, strlen, cmp) with one.
+    nvim.exec_lua(
+        r#"
+        function _G.collect_snapshot()
+            local mode = vim.api.nvim_get_mode()
+            local line = vim.fn.getline('.')
+            local col = vim.fn.col('.')
+
+            local snapshot = {
+                preedit = line,
+                cursor_byte = col,
+                mode = mode.mode,
+                blocking = mode.blocking,
+                char_width = 0,
+            }
+
+            -- Normal/visual mode: character width under cursor
+            if mode.mode == 'n' or mode.mode:find('^no') or mode.mode:find('^v') then
+                local char = vim.fn.matchstr(line, '\\%' .. col .. 'c.')
+                snapshot.char_width = vim.fn.strlen(char)
+            end
+
+            -- Candidates (only when cmp is visible)
+            local ok, cmp = pcall(require, 'cmp')
+            if ok and cmp.visible() then
+                local entries = cmp.get_entries() or {}
+                local words = {}
+                for _, e in ipairs(entries) do
+                    local w = e:get_word()
+                    if w and w ~= '' then
+                        words[#words + 1] = w
+                    end
+                end
+                snapshot.candidates = words
+
+                local sel_entry = cmp.get_active_entry()
+                if sel_entry then
+                    for i, e in ipairs(entries) do
+                        if e == sel_entry then
+                            snapshot.selected = i - 1
+                            break
+                        end
+                    end
+                end
+            end
+
+            return snapshot
+        end
+        "#,
+        vec![],
+    )
+    .await?;
+
     // Set up autocmd to trigger nvim-cmp completion when skkeleton enters henkan mode
     nvim.command(
         r#"
@@ -170,16 +225,13 @@ async fn handle_key(
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         // Fall through to query preedit/mode normally
         // (key was already sent, skip the normal send path)
-        let mode_result = nvim.get_mode().await?;
-        let (mode, blocking) = parse_get_mode(&mode_result);
-        if blocking {
+        let snapshot = query_snapshot(nvim, tx).await?;
+        if snapshot.blocking {
             // Still blocked (unlikely but handle gracefully)
             PENDING.store(PendingState::Getchar);
             eprintln!("[NVIM] Still blocked in getchar after key: {}", key);
-            return Ok(());
         }
-        // Query preedit with current mode
-        return query_and_send_preedit(nvim, tx, &mode).await;
+        return Ok(());
     }
 
     // Handle Ctrl+C - clear preedit and reset to insert mode
@@ -255,21 +307,7 @@ EOF"#,
         if result.trim() == "confirmed" {
             // Give skkeleton time to process the confirmation
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-            // Get updated preedit and cursor position (insert mode after confirm)
-            let line = nvim.command_output("echo getline('.')").await?;
-            let line = line.trim().to_string();
-            let col_str = nvim.command_output("echo col('.')").await?;
-            let col: usize = col_str.trim().parse().unwrap_or(1);
-            let cursor_pos = col.saturating_sub(1);
-
-            let _ = tx.send(FromNeovim::Preedit(PreeditInfo::new(
-                line,
-                cursor_pos,
-                cursor_pos,
-                "i".to_string(),
-            )));
-            let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
+            let _ = query_snapshot(nvim, tx).await;
         }
         // If no cmp visible, just ignore the key
         return Ok(());
@@ -407,216 +445,145 @@ EOF"#,
     // Small delay to let skkeleton process
     tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
 
-    // Use nvim_get_mode() which works even when Neovim is blocked in getchar
-    let mode_result = nvim.get_mode().await?;
-    let (mode, blocking) = parse_get_mode(&mode_result);
+    // Query full snapshot (includes mode/blocking, preedit, candidates in one RPC)
+    let snapshot = query_snapshot(nvim, tx).await?;
 
-    if blocking {
+    if snapshot.blocking {
         // Neovim is blocked waiting for a character (e.g., after q, f, t, r, m)
         PENDING.store(PendingState::Getchar);
-        eprintln!("[NVIM] Blocked in getchar (mode={}), waiting for next key", mode);
+        eprintln!(
+            "[NVIM] Blocked in getchar (mode={}), waiting for next key",
+            snapshot.mode
+        );
         return Ok(());
     }
 
-    if mode.starts_with("no") {
+    if snapshot.mode.starts_with("no") {
         // Operator-pending mode (no, nov, etc.)
         // Set flag and skip query - vim is waiting for more input
         PENDING.store(PendingState::Motion);
-        eprintln!("[NVIM] Entered operator-pending mode ({})", mode);
+        eprintln!("[NVIM] Entered operator-pending mode ({})", snapshot.mode);
         return Ok(());
     }
 
     // Handle unexpected command-line mode (c, cv, ce, cr, etc.)
     // This can happen when skkeleton internals trigger command-line mode
     // (e.g., nested henkan with capital letters). Escape and restore insert mode.
-    if mode.starts_with('c') {
-        eprintln!("[NVIM] Unexpected command-line mode ({}), escaping", mode);
+    if snapshot.mode.starts_with('c') {
+        eprintln!(
+            "[NVIM] Unexpected command-line mode ({}), escaping",
+            snapshot.mode
+        );
         let _ = nvim.input("<C-c>").await;
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         nvim.command("startinsert").await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-        return query_and_send_preedit(nvim, tx, "i").await;
-    }
-
-    query_and_send_preedit(nvim, tx, &mode).await
-}
-
-/// Parse nvim_get_mode() result into (mode_string, blocking)
-fn parse_get_mode(result: &[(nvim_rs::Value, nvim_rs::Value)]) -> (String, bool) {
-    let mut mode = String::from("n");
-    let mut blocking = false;
-    for (k, v) in result {
-        if let Some(key) = k.as_str() {
-            match key {
-                "mode" => {
-                    if let Some(m) = v.as_str() {
-                        mode = m.to_string();
-                    }
-                }
-                "blocking" => {
-                    blocking = v.as_bool().unwrap_or(false);
-                }
-                _ => {}
-            }
-        }
-    }
-    (mode, blocking)
-}
-
-/// Query preedit state and candidates from Neovim and send to IME
-async fn query_and_send_preedit(
-    nvim: &Neovim<NvimWriter>,
-    tx: &Sender<FromNeovim>,
-    mode: &str,
-) -> anyhow::Result<()> {
-    let line = nvim.command_output("echo getline('.')").await?;
-    let line = line
-        .trim_end_matches('\n')
-        .trim_end_matches('\r')
-        .to_string();
-
-    let col_str = nvim.command_output("echo col('.')").await?;
-    let col: usize = col_str.trim().parse().unwrap_or(1);
-
-    let cursor_begin = col.saturating_sub(1);
-    let cursor_end = if mode == "n" || mode == "v" || mode.starts_with('v') {
-        let char_len_str = nvim
-            .command_output(&format!(
-                "echo strlen(matchstr(getline('.'), '.', {}))",
-                col - 1
-            ))
-            .await
-            .unwrap_or_default();
-        let char_len: usize = char_len_str.trim().parse().unwrap_or(1);
-        cursor_begin + char_len.max(1)
-    } else {
-        cursor_begin
-    };
-
-    eprintln!(
-        "[NVIM] preedit: {:?}, col: {}, cursor: {}..{}, mode: {}",
-        line, col, cursor_begin, cursor_end, mode
-    );
-    let _ = tx.send(FromNeovim::Preedit(PreeditInfo::new(
-        line.clone(),
-        cursor_begin,
-        cursor_end,
-        mode.to_string(),
-    )));
-
-    if let Ok(candidates) = get_skkeleton_candidates(nvim, &line).await
-        && !candidates.is_empty()
-    {
-        let _ = tx.send(FromNeovim::Candidates(candidates));
+        let _ = query_snapshot(nvim, tx).await;
         return Ok(());
-    }
-
-    if let Ok(candidates) = get_completion_candidates(nvim).await {
-        if !candidates.is_empty() {
-            let _ = tx.send(FromNeovim::Candidates(candidates));
-        } else {
-            let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
-        }
-    } else {
-        let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
     }
 
     Ok(())
 }
 
-/// Query nvim-cmp for completion candidates using its Lua API
-async fn get_skkeleton_candidates(
+
+/// Query full state snapshot from Neovim via collect_snapshot() Lua function.
+/// Replaces separate getline/col/strlen/cmp queries with a single RPC call.
+async fn query_snapshot(
     nvim: &Neovim<NvimWriter>,
-    _preedit: &str,
-) -> anyhow::Result<CandidateInfo> {
-    // Use nvim-cmp's Lua API directly
-    let result = nvim
-        .command_output(
-            r#"lua << EOF
-            local ok, cmp = pcall(require, 'cmp')
-            if not ok then
-                print('{"words":[],"selected":-1,"total":0}')
-                return
-            end
+    tx: &Sender<FromNeovim>,
+) -> anyhow::Result<Snapshot> {
+    let result = nvim.exec_lua("return collect_snapshot()", vec![]).await?;
+    let snapshot = parse_snapshot(&result)?;
 
-            -- Check if cmp is visible
-            if not cmp.visible() then
-                print('{"words":[],"selected":-1,"total":0}')
-                return
-            end
+    let cursor_begin = snapshot.cursor_byte.saturating_sub(1);
+    let cursor_end = if snapshot.char_width > 0 {
+        cursor_begin + snapshot.char_width
+    } else {
+        cursor_begin
+    };
 
-            local all_entries = cmp.get_entries() or {}
-            if #all_entries == 0 then
-                print('{"words":[],"selected":-1,"total":0}')
-                return
-            end
+    eprintln!(
+        "[NVIM] snapshot: preedit={:?}, cursor={}..{}, mode={}, blocking={}",
+        snapshot.preedit, cursor_begin, cursor_end, snapshot.mode, snapshot.blocking
+    );
 
-            -- Get selected index
-            local selected_idx = -1
-            local selected_entry = cmp.get_active_entry()
-            if selected_entry then
-                for i, entry in ipairs(all_entries) do
-                    if entry == selected_entry then
-                        selected_idx = i - 1
-                        break
-                    end
-                end
-            end
+    let _ = tx.send(FromNeovim::Preedit(PreeditInfo::new(
+        snapshot.preedit.clone(),
+        cursor_begin,
+        cursor_end,
+        snapshot.mode.clone(),
+    )));
 
-            -- Extract words
-            local words = {}
-            for _, entry in ipairs(all_entries) do
-                local word = entry:get_word()
-                if word and word ~= '' then
-                    table.insert(words, word)
-                end
-            end
-
-            print(vim.json.encode({words = words, selected = selected_idx, total = #all_entries}))
-EOF"#,
-        )
-        .await
-        .unwrap_or_default();
-
-    let result = result.trim();
-
-    if result.starts_with('{')
-        && let Ok(parsed) = serde_json::from_str::<CmpCandidatesJson>(result)
-    {
-        let mut info = parsed.into_candidate_info();
-        // Clamp selection to valid range
-        if !info.candidates.is_empty() {
+    if let Some(ref candidates) = snapshot.candidates {
+        if candidates.is_empty() {
+            let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
+        } else {
+            let selected = snapshot
+                .selected
+                .unwrap_or(-1)
+                .max(0) as usize;
+            let mut info = CandidateInfo::new(candidates.clone(), selected);
             info.selected = info.selected.min(info.candidates.len().saturating_sub(1));
+            let _ = tx.send(FromNeovim::Candidates(info));
         }
-        return Ok(info);
+    } else {
+        let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
     }
 
-    Ok(CandidateInfo::empty())
+    Ok(snapshot)
 }
 
-/// Query nvim-cmp for completion candidates (fallback using pumvisible)
-async fn get_completion_candidates(nvim: &Neovim<NvimWriter>) -> anyhow::Result<CandidateInfo> {
-    // Check if completion menu is visible
-    let pum_visible = nvim.command_output("echo pumvisible()").await?;
-    if pum_visible.trim() != "1" {
-        return Ok(CandidateInfo::empty());
+/// Parse a msgpack Value (Lua table) into a Snapshot struct.
+fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
+    let map = value
+        .as_map()
+        .ok_or_else(|| anyhow::anyhow!("snapshot: expected map"))?;
+
+    let mut snapshot = Snapshot {
+        preedit: String::new(),
+        cursor_byte: 1,
+        mode: "n".to_string(),
+        blocking: false,
+        char_width: 0,
+        candidates: None,
+        selected: None,
+    };
+
+    for (k, v) in map {
+        let Some(key) = k.as_str() else { continue };
+        match key {
+            "preedit" => {
+                snapshot.preedit = v.as_str().unwrap_or("").to_string();
+            }
+            "cursor_byte" => {
+                snapshot.cursor_byte = v.as_u64().unwrap_or(1) as usize;
+            }
+            "mode" => {
+                snapshot.mode = v.as_str().unwrap_or("n").to_string();
+            }
+            "blocking" => {
+                snapshot.blocking = v.as_bool().unwrap_or(false);
+            }
+            "char_width" => {
+                snapshot.char_width = v.as_u64().unwrap_or(0) as usize;
+            }
+            "candidates" => {
+                if let Some(arr) = v.as_array() {
+                    let words: Vec<String> = arr
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect();
+                    snapshot.candidates = Some(words);
+                }
+            }
+            "selected" => {
+                if let Some(n) = v.as_i64() {
+                    snapshot.selected = Some(n as i32);
+                }
+            }
+            _ => {}
+        }
     }
 
-    // Get completion info using complete_info()
-    let info = nvim
-        .command_output("echo json_encode(complete_info(['items', 'selected']))")
-        .await?;
-
-    // Parse JSON using serde
-    if let Ok(parsed) = serde_json::from_str::<CompleteInfoJson>(&info) {
-        let candidates = parsed.into_candidate_info();
-        eprintln!(
-            "[NVIM] Found {} candidates, selected={}",
-            candidates.candidates.len(),
-            candidates.selected
-        );
-        return Ok(candidates);
-    }
-
-    Ok(CandidateInfo::empty())
+    Ok(snapshot)
 }
