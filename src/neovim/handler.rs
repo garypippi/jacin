@@ -276,6 +276,8 @@ EOF"#,
     // Handle toggle key - trigger the <Plug>(skkeleton-toggle) mapping
     if key == config.keybinds.toggle {
         eprintln!("[NVIM] Toggling skkeleton via <Plug> mapping...");
+        // Ensure we're in insert mode (skkeleton toggle is an insert-mode mapping)
+        nvim.command("startinsert").await?;
         // Clear any existing text using Ctrl+U (works in insert mode)
         nvim.command("call feedkeys(\"\\<C-u>\", 'n')").await?;
         // Use 'm' flag to allow remapping (needed for <Plug> to work)

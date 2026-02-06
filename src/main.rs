@@ -775,36 +775,38 @@ impl Dispatch<zwp_input_method_manager_v2::ZwpInputMethodManagerV2, ()> for Stat
 impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
     fn event(
         state: &mut Self,
-        input_method: &zwp_input_method_v2::ZwpInputMethodV2,
+        _input_method: &zwp_input_method_v2::ZwpInputMethodV2,
         event: zwp_input_method_v2::Event,
         _data: &(),
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
     ) {
         match event {
             zwp_input_method_v2::Event::Activate => {
                 state.wayland.active = true;
                 eprintln!("IME activated!");
 
-                // Only grab keyboard if IME is enabled (user pressed Alt+`)
-                // This enables passthrough mode by default
+                // Re-grab keyboard if IME was enabled before deactivation
                 if state.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
-                    let grab = input_method.grab_keyboard(qh, ());
-                    state.wayland.keyboard_grab = Some(grab);
-                    eprintln!("Keyboard grabbed (IME enabled)");
+                    eprintln!("[IME] Re-grabbing keyboard after activation");
+                    state.wayland.grab_keyboard();
+                    state.keyboard.pending_keymap = true;
+                    // false = don't toggle skkeleton (already enabled), just restore insert mode
+                    state.ime.start_enabling(false);
                 }
             }
             zwp_input_method_v2::Event::Deactivate => {
                 eprintln!("IME deactivated");
                 state.wayland.active = false;
-                // Clear preedit and hide popup when deactivated
-                // This prevents stale preedit from being committed when switching windows
+                // Release keyboard grab to stop receiving key events while deactivated
+                state.wayland.release_keyboard();
+                // Clear local state (don't send Wayland protocol requests while deactivated,
+                // the compositor automatically clears preedit on deactivate)
                 state.ime.clear_preedit();
                 state.ime.clear_candidates();
                 state.keypress.clear();
-                state.wayland.clear_preedit();
                 state.hide_popup();
-                // Also clear Neovim buffer to reset state
+                // Clear Neovim buffer to reset state for next activation
                 if let Some(ref nvim) = state.nvim {
                     nvim.send_key("<Esc>ggdG");
                 }
@@ -819,7 +821,9 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 // Content type info available if needed
             }
             zwp_input_method_v2::Event::Done => {
-                // Don't print this every time, it's noisy
+                // Serial must equal the number of Done events received
+                // (required by the commit request protocol)
+                state.wayland.serial += 1;
             }
             zwp_input_method_v2::Event::Unavailable => {
                 eprintln!("IME unavailable - another IME may be running");
@@ -864,6 +868,14 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                 if let Some(ref nvim) = state.nvim {
                                     eprintln!("[IME] Sending skkeleton toggle");
                                     nvim.send_key(&state.config.keybinds.toggle);
+                                }
+                            } else if state.ime.is_fully_enabled() {
+                                // Re-activation after deactivate/activate cycle:
+                                // Neovim is in normal mode from <Esc>ggdG, restore insert mode
+                                state.keyboard.mark_ready();
+                                if let Some(ref nvim) = state.nvim {
+                                    eprintln!("[IME] Restoring insert mode after re-activation");
+                                    nvim.send_key("<Esc>i");
                                 }
                             }
                         } else {
