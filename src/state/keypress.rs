@@ -71,11 +71,6 @@ impl KeypressState {
         self.visible && !self.accumulated.is_empty()
     }
 
-    /// Check if in any pending state
-    pub fn is_pending(&self) -> bool {
-        self.pending_type != PendingState::None
-    }
-
     /// Check if display has timed out
     pub fn is_timed_out(&self) -> bool {
         if let Some(last_shown) = self.last_shown {
@@ -85,17 +80,6 @@ impl KeypressState {
         }
     }
 
-    /// Check remaining time before timeout (for calloop timer)
-    pub fn time_until_timeout(&self) -> Option<Duration> {
-        self.last_shown.map(|t| {
-            let elapsed = t.elapsed();
-            if elapsed >= KEYPRESS_DISPLAY_DURATION {
-                Duration::ZERO
-            } else {
-                KEYPRESS_DISPLAY_DURATION - elapsed
-            }
-        })
-    }
 }
 
 impl Default for KeypressState {

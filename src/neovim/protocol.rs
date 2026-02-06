@@ -160,11 +160,6 @@ impl CandidateInfo {
     pub fn empty() -> Self {
         Self::default()
     }
-
-    /// Check if has candidates
-    pub fn is_empty(&self) -> bool {
-        self.candidates.is_empty()
-    }
 }
 
 /// State snapshot from collect_snapshot() Lua function.
