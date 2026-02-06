@@ -133,16 +133,18 @@ SKK is a Japanese input method where:
 
 ## Implemented Features
 
-### IME Toggle via Alt+`
+### IME Toggle via Configurable Key ✓
 
-- **Alt+`** triggers SIGUSR1 signal to toggle IME (configured in Hyprland keybind)
+- Default **Alt+`** triggers SIGUSR1 signal to toggle IME (configured in Hyprland keybind)
+- Toggle key is configurable via `~/.config/custom-ime/config.toml` (`keybinds.toggle`)
+- General Alt key support: all Alt combinations produce `<A-...>` Vim notation (e.g., `<A-;>`, `<A-a>`)
 - Avoids Ctrl+J conflict with browser shortcuts
 - Passthrough mode by default - keyboard only grabbed when IME is enabled
 
 ### Separate Confirm vs Commit ✓
 
 - **Enter** = confirm skkeleton conversion (stay in preedit when ▽/▼ markers present)
-- **Ctrl+Enter** = commit preedit text to application
+- Commit key configurable via `keybinds.commit` (default **Ctrl+Enter**) = commit preedit text to application
 
 This allows composing longer text with multiple conversions:
 ```

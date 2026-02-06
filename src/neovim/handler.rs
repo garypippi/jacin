@@ -13,6 +13,7 @@ use tokio::process::Command;
 use super::protocol::{
     CandidateInfo, CmpCandidatesJson, CompleteInfoJson, FromNeovim, PreeditInfo, ToNeovim,
 };
+use crate::config::Config;
 
 /// Track pending states for multi-key sequences
 /// 0 = not pending, 1 = waiting for motion, 2 = waiting for text object char (after i/a)
@@ -52,16 +53,16 @@ impl Handler for NvimHandler {
 type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
 
 /// Run the Neovim event loop in a blocking manner
-pub fn run_blocking(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>) {
+pub fn run_blocking(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: Config) {
     let rt = Runtime::new().expect("Failed to create tokio runtime");
     rt.block_on(async move {
-        if let Err(e) = run_neovim(rx, tx).await {
+        if let Err(e) = run_neovim(rx, tx, &config).await {
             eprintln!("[NVIM] Error: {}", e);
         }
     });
 }
 
-async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>) -> anyhow::Result<()> {
+async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Config) -> anyhow::Result<()> {
     eprintln!("[NVIM] Starting Neovim...");
 
     // Start Neovim in embedded mode
@@ -83,7 +84,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>) -> anyhow::R
         match rx.recv() {
             Ok(ToNeovim::Key(key)) => {
                 eprintln!("[NVIM] Received key: {:?}", key);
-                if let Err(e) = handle_key(&nvim, &key, &tx).await {
+                if let Err(e) = handle_key(&nvim, &key, &tx, config).await {
                     eprintln!("[NVIM] Key handling error: {}", e);
                 }
             }
@@ -177,6 +178,7 @@ async fn handle_key(
     nvim: &Neovim<NvimWriter>,
     key: &str,
     tx: &Sender<FromNeovim>,
+    config: &Config,
 ) -> anyhow::Result<()> {
     // Handle Ctrl+C - clear preedit and reset to insert mode
     if key == "<C-c>" {
@@ -187,8 +189,8 @@ async fn handle_key(
         return Ok(());
     }
 
-    // Handle Ctrl+Enter - commit preedit to application
-    if key == "<C-CR>" {
+    // Handle commit key (default: Ctrl+Enter) - commit preedit to application
+    if key == config.keybinds.commit {
         let line = nvim.command_output("echo getline('.')").await?;
         let line = line.trim().to_string();
 
@@ -271,8 +273,8 @@ EOF"#,
         return Ok(());
     }
 
-    // Handle Alt+` - trigger the <Plug>(skkeleton-toggle) mapping
-    if key == "<A-`>" {
+    // Handle toggle key - trigger the <Plug>(skkeleton-toggle) mapping
+    if key == config.keybinds.toggle {
         eprintln!("[NVIM] Toggling skkeleton via <Plug> mapping...");
         // Clear any existing text using Ctrl+U (works in insert mode)
         nvim.command("call feedkeys(\"\\<C-u>\", 'n')").await?;

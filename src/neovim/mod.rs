@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 
+use crate::config::Config;
+
 // Re-export event source types (for future calloop integration)
 #[allow(unused_imports)]
 pub use event_source::{NeovimEventSource, NeovimPing};
@@ -60,13 +62,13 @@ impl NeovimHandle {
 }
 
 /// Spawn Neovim backend in a separate thread
-pub fn spawn_neovim() -> anyhow::Result<NeovimHandle> {
+pub fn spawn_neovim(config: Config) -> anyhow::Result<NeovimHandle> {
     // Use bounded channels for backpressure
     let (to_nvim_tx, to_nvim_rx) = bounded::<ToNeovim>(CHANNEL_CAPACITY);
     let (from_nvim_tx, from_nvim_rx) = bounded::<FromNeovim>(CHANNEL_CAPACITY);
 
     thread::spawn(move || {
-        handler::run_blocking(to_nvim_rx, from_nvim_tx);
+        handler::run_blocking(to_nvim_rx, from_nvim_tx, config);
     });
 
     Ok(NeovimHandle {

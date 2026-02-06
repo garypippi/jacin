@@ -23,6 +23,7 @@ cargo fmt            # Format
 ```
 src/
   main.rs                    # Entry point, Wayland dispatch, coordination
+  config.rs                  # Config file loading (TOML), keybind defaults
   state/
     mod.rs                   # Re-exports
     wayland.rs               # WaylandState (protocol handles, serial)
@@ -42,6 +43,7 @@ src/
 
 ## Key Components
 
+- **Config module**: TOML config at `~/.config/custom-ime/config.toml` with configurable keybinds (toggle, commit)
 - **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `ImeState`, `KeypressState`
 - **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
@@ -51,12 +53,13 @@ src/
 
 Working:
 - Basic Japanese input via skkeleton
-- Alt+` to toggle IME (via SIGUSR1 signal, triggered by Hyprland keybind)
+- Configurable toggle key (default Alt+`) to toggle IME (via SIGUSR1 signal, triggered by Hyprland keybind)
+- General Alt key support (Alt+any key produces `<A-...>` Vim notation)
 - Passthrough mode by default (keyboard only grabbed when IME enabled)
 - Candidate window follows cursor (via zwp_input_popup_surface_v2)
 - nvim-cmp integration for candidate selection (Ctrl+N/P, Ctrl+K to confirm)
 - Enter confirms skkeleton conversion (stays in preedit when ▽/▼ markers present)
-- Ctrl+Enter commits preedit text to application
+- Configurable commit key (default Ctrl+Enter) commits preedit text to application
 - Escape switches to normal mode in neovim
 - Cursor position display: line cursor in insert mode, block cursor in normal mode
 - Vim text object motions (diw, ciw, daw, etc.)

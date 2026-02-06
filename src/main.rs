@@ -22,6 +22,7 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 };
 use xkbcommon::xkb;
 
+mod config;
 mod neovim;
 mod state;
 mod ui;
@@ -39,6 +40,9 @@ fn convert_nvim_msg(msg: FromNeovim) -> OldFromNeovim {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Load configuration
+    let config = config::Config::load();
+
     // Connect to Wayland display
     let conn = Connection::connect_to_env()?;
     eprintln!("Connected to Wayland display");
@@ -69,7 +73,7 @@ fn main() -> anyhow::Result<()> {
     eprintln!("Created zwp_input_method_v2");
 
     // Spawn Neovim backend
-    let nvim = match neovim::spawn_neovim() {
+    let nvim = match neovim::spawn_neovim(config.clone()) {
         Ok(handle) => {
             eprintln!("Neovim backend spawned");
             Some(handle)
@@ -114,6 +118,7 @@ fn main() -> anyhow::Result<()> {
         toggle_flag: Arc::new(AtomicBool::new(false)),
         nvim,
         popup,
+        config,
     };
 
     // Set up calloop event loop
@@ -229,6 +234,8 @@ pub struct State {
     nvim: Option<NeovimHandle>,
     // Unified popup window (preedit, keypress, candidates)
     popup: Option<UnifiedPopup>,
+    // Configuration
+    config: config::Config,
 }
 
 impl State {
@@ -250,7 +257,7 @@ impl State {
             self.wayland.release_keyboard();
             // Send toggle to Neovim to disable skkeleton
             if let Some(ref nvim) = self.nvim {
-                nvim.send_key("<A-`>");
+                nvim.send_key(&self.config.keybinds.toggle);
             }
             // Clear preedit and keypress display
             self.ime.clear_preedit();
@@ -536,11 +543,12 @@ impl State {
 
         // Handle Alt combinations
         if self.keyboard.alt_pressed {
-            // Alt+` (grave) for IME toggle
-            if keysym == Keysym::grave {
-                return Some("<A-`>".to_string());
+            if let Some(key) = base_key {
+                return Some(format!("<A-{}>", key));
             }
-            // Other Alt combinations - pass through for now
+            if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
+                return Some(format!("<A-{}>", utf8));
+            }
             return None;
         }
 
@@ -855,7 +863,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
                                     eprintln!("[IME] Sending skkeleton toggle");
-                                    nvim.send_key("<A-`>");
+                                    nvim.send_key(&state.config.keybinds.toggle);
                                 }
                             }
                         } else {
