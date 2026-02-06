@@ -442,8 +442,12 @@ impl State {
     fn update_preedit(&mut self) {
         let cursor_begin = self.ime.cursor_begin as i32;
         let cursor_end = self.ime.cursor_end as i32;
-        // Don't send preedit to compositor when IME is disabled or deactivated
-        if self.wayland.active && self.ime.is_enabled() {
+        // Don't send preedit to compositor when IME is disabled or deactivated.
+        // Also skip empty preedit during re-activation (reactivation_count > 0) to avoid
+        // sending commit(serial) that triggers compositor to cycle Deactivate/Activate again.
+        if self.wayland.active && self.ime.is_enabled()
+            && !(self.ime.preedit.is_empty() && self.reactivation_count > 0)
+        {
             self.wayland
                 .set_preedit(&self.ime.preedit, cursor_begin, cursor_end);
             eprintln!(
