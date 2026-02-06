@@ -357,20 +357,20 @@ async fn handle_key(
     last_mode: &mut String,
 ) -> anyhow::Result<()> {
     // Handle getchar-pending: Neovim is blocked waiting for a character (after q, f, t, r, m, etc.)
-    // Send the key to complete the getchar, then fall through to normal query path
+    // Send the key to complete the getchar, then check blocking before querying snapshot.
     if PENDING.load() == PendingState::Getchar {
         eprintln!("[NVIM] Completing getchar with key: {}", key);
         let _ = nvim.input(key).await;
         PENDING.clear();
-        // Fall through to query preedit/mode normally
-        // (key was already sent, skip the normal send path)
-        let snapshot = query_snapshot(nvim, tx).await?;
-        *last_mode = snapshot.mode.clone();
-        if snapshot.blocking {
-            // Still blocked (unlikely but handle gracefully)
+        // nvim_get_mode() is "fast" (works during getchar); exec_lua is NOT and would deadlock.
+        if is_blocked(nvim).await? {
             PENDING.store(PendingState::Getchar);
             eprintln!("[NVIM] Still blocked in getchar after key: {}", key);
+            let _ = tx.send(FromNeovim::KeyProcessed);
+            return Ok(());
         }
+        let snapshot = query_snapshot(nvim, tx).await?;
+        *last_mode = snapshot.mode.clone();
         return Ok(());
     }
 
@@ -560,20 +560,17 @@ async fn handle_key(
         return Ok(());
     }
 
-    // Normal mode or mode-changing keys: query snapshot synchronously.
-    // No sleep needed — normal mode operations complete synchronously in Neovim.
-    let snapshot = query_snapshot(nvim, tx).await?;
-    *last_mode = snapshot.mode.clone();
-
-    if snapshot.blocking {
-        // Neovim is blocked waiting for a character (e.g., after q, f, t, r, m)
+    // Normal mode or mode-changing keys: check blocking before querying snapshot.
+    // nvim_get_mode() is "fast" (works during getchar); exec_lua would deadlock.
+    if is_blocked(nvim).await? {
         PENDING.store(PendingState::Getchar);
-        eprintln!(
-            "[NVIM] Blocked in getchar (mode={}), waiting for next key",
-            snapshot.mode
-        );
+        eprintln!("[NVIM] Blocked in getchar, waiting for next key");
+        let _ = tx.send(FromNeovim::KeyProcessed);
         return Ok(());
     }
+
+    let snapshot = query_snapshot(nvim, tx).await?;
+    *last_mode = snapshot.mode.clone();
 
     if snapshot.mode.starts_with("no") {
         // Operator-pending mode (no, nov, etc.)
@@ -601,6 +598,16 @@ async fn handle_key(
     Ok(())
 }
 
+
+/// Check if Neovim is blocked in getchar() via nvim_get_mode().
+/// This is a "fast" API call that works even when Neovim is blocked — unlike
+/// exec_lua which would deadlock.
+async fn is_blocked(nvim: &Neovim<NvimWriter>) -> anyhow::Result<bool> {
+    let mode_info = nvim.get_mode().await?;
+    Ok(mode_info
+        .iter()
+        .any(|(k, v)| k.as_str() == Some("blocking") && v.as_bool() == Some(true)))
+}
 
 /// Query full state snapshot from Neovim via collect_snapshot() Lua function.
 /// Replaces separate getline/col/strlen/cmp queries with a single RPC call.
