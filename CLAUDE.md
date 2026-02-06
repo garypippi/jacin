@@ -66,6 +66,7 @@ Working:
 - Cursor position display: line cursor in insert mode, block cursor in normal mode
 - Vim text object motions (diw, ciw, daw, etc.)
 - Getchar-blocking keys (q, f, t, r, m, etc.) handled via nvim_get_mode() blocking detection
+- Auto-recovery from command-line mode (skkeleton nested henkan can trigger it)
 - Yank & paste: y$, yw, yiw, <C-r>" (insert mode), "ay$ (named registers)
 - Unified popup window: shows preedit with cursor (block/line), keypress sequences, and candidates
 - Preedit has max width with cursor-centered scrolling for long text

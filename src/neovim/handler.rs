@@ -426,6 +426,18 @@ EOF"#,
         return Ok(());
     }
 
+    // Handle unexpected command-line mode (c, cv, ce, cr, etc.)
+    // This can happen when skkeleton internals trigger command-line mode
+    // (e.g., nested henkan with capital letters). Escape and restore insert mode.
+    if mode.starts_with('c') {
+        eprintln!("[NVIM] Unexpected command-line mode ({}), escaping", mode);
+        let _ = nvim.input("<C-c>").await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        nvim.command("startinsert").await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        return query_and_send_preedit(nvim, tx, "i").await;
+    }
+
     query_and_send_preedit(nvim, tx, &mode).await
 }
 
