@@ -2,6 +2,7 @@
 //!
 //! Runs Neovim in embedded mode with vim-skkeleton for Japanese input.
 
+use async_trait::async_trait;
 use crossbeam_channel::{Receiver, Sender};
 use tokio::runtime::Runtime;
 
@@ -23,15 +24,72 @@ pub fn pending_state() -> &'static AtomicPendingState {
     &PENDING
 }
 
-/// Empty handler - we don't need to handle notifications for now
-#[derive(Clone)]
-pub struct NvimHandler;
+type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
 
-impl Handler for NvimHandler {
-    type Writer = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
+/// Handler for Neovim RPC notifications.
+/// Receives push notifications (e.g., ime_snapshot from autocmds) and
+/// forwards them to the main thread via the tx channel.
+#[derive(Clone)]
+pub struct NvimHandler {
+    tx: Sender<FromNeovim>,
 }
 
-type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
+#[async_trait]
+impl Handler for NvimHandler {
+    type Writer = NvimWriter;
+
+    async fn handle_notify(
+        &self,
+        name: String,
+        args: Vec<nvim_rs::Value>,
+        _neovim: Neovim<NvimWriter>,
+    ) {
+        if name == "ime_snapshot"
+            && let Some(value) = args.first()
+        {
+            match parse_snapshot(value) {
+                Ok(snapshot) => {
+                    eprintln!(
+                        "[NVIM] Push snapshot: mode={}, preedit={:?}",
+                        snapshot.mode, snapshot.preedit
+                    );
+
+                    let cursor_begin = snapshot.cursor_byte.saturating_sub(1);
+                    let cursor_end = if snapshot.char_width > 0 {
+                        cursor_begin + snapshot.char_width
+                    } else {
+                        cursor_begin
+                    };
+
+                    let _ = self.tx.send(FromNeovim::Preedit(PreeditInfo::new(
+                        snapshot.preedit,
+                        cursor_begin,
+                        cursor_end,
+                        snapshot.mode,
+                    )));
+
+                    if let Some(candidates) = snapshot.candidates {
+                        if candidates.is_empty() {
+                            let _ =
+                                self.tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
+                        } else {
+                            let selected = snapshot.selected.unwrap_or(-1).max(0) as usize;
+                            let mut info = CandidateInfo::new(candidates, selected);
+                            info.selected =
+                                info.selected.min(info.candidates.len().saturating_sub(1));
+                            let _ = self.tx.send(FromNeovim::Candidates(info));
+                        }
+                    } else {
+                        let _ = self.tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[NVIM] Failed to parse push snapshot: {}", e);
+                }
+            }
+        }
+    }
+}
 
 /// Run the Neovim event loop in a blocking manner
 pub fn run_blocking(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: Config) {
@@ -50,7 +108,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     let mut cmd = Command::new("nvim");
     cmd.args(["--embed", "--headless"]);
 
-    let handler = NvimHandler;
+    let handler = NvimHandler { tx: tx.clone() };
     let (nvim, _io_handler, _child) = new_child_cmd(&mut cmd, handler).await?;
 
     eprintln!("[NVIM] Connected to Neovim");

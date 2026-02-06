@@ -32,6 +32,7 @@ libc = "0.2"
 
 # Neovim backend
 nvim-rs = { version = "0.9", features = ["use_tokio"] }
+async-trait = "0.1"
 tokio = { version = "1", features = ["rt", "process", "io-util", "sync", "time"] }
 
 # Rendering

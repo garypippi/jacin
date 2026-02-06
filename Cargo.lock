@@ -175,6 +175,7 @@ name = "custom-ime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "calloop",
  "calloop-wayland-source",
  "crossbeam-channel",
