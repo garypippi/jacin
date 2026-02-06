@@ -41,7 +41,8 @@
                    ▼  ▼    ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                     IME Core (State + Coordination)                      │
-│                     main.rs::State -- main thread                        │
+│                     State -- main thread                                 │
+│                     (coordinator.rs, input.rs)                           │
 │                                                                          │
 │  ┌─────────────────────────┐     ┌────────────────────────────────┐     │
 │  │  ImeState               │     │  KeypressState                 │     │
@@ -507,9 +508,8 @@ VimMode:            |         |              |           |           |
 
 **Areas for improvement:**
 
-1. **`main.rs::State` is a large God Object (~970 lines)**
-   - Wayland dispatch, key processing, Neovim response handling, UI updates, and toggle logic are all methods on `State`
-   - Potential split: `Coordinator` (event routing) and `InputProcessor` (key -> Neovim -> preedit pipeline)
+1. **~~`main.rs::State` is a large God Object (~970 lines)~~** (resolved)
+   - Split into: `main.rs` (State struct + event loop), `dispatch.rs` (Wayland dispatch), `input.rs` (key processing), `coordinator.rs` (Neovim responses + toggle + preedit coordination)
 
 2. **`UnifiedPopup` directly owns the wl_surface**
    - Rendering logic (`calculate_layout`, `render_*`) and Wayland surface operations are interleaved
@@ -578,6 +578,6 @@ Future:  Neovim buffer = N lines ->  preedit = 1 line  ->  popup = v+h-scroll
 - `handler.rs`: `query_and_send_preedit()` -- multiline retrieval
 - `protocol.rs`: `PreeditInfo` -- multiline support
 - `ime.rs`: `ImeState` -- multiline preedit storage
-- `main.rs`: `update_preedit()` -- extract current line for compositor
+- `coordinator.rs`: `update_preedit()` -- extract current line for compositor
 - `unified_window.rs`: `render_preedit_section()` -- multiline rendering
 - `wayland.rs`: no changes needed (interface preserved)

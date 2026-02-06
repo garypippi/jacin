@@ -88,7 +88,7 @@ but does not advance the main input loop.
   NvimHandler::handle_notify() ←──────  Push notification
     → tx.send(FromNeovim::Snapshot)
          ↓
-  main.rs event loop: try_recv()
+  event loop: try_recv()
     → update preedit / candidates / mode
 ```
 
@@ -353,7 +353,7 @@ async fn handle_key(nvim, key, tx, config, last_mode: &str) {
 }
 ```
 
-### 4. main.rs: Handle Snapshot Messages
+### 4. coordinator.rs: Handle Snapshot Messages
 
 ```rust
 fn handle_nvim_message(&mut self, msg: FromNeovim) {
@@ -390,7 +390,7 @@ fn handle_nvim_message(&mut self, msg: FromNeovim) {
 }
 ```
 
-### 5. main.rs: Remove Blocking Wait for Insert Mode
+### 5. input.rs: Remove Blocking Wait for Insert Mode
 
 ```rust
 fn handle_key(&mut self, key: u32, key_state: wl_keyboard::KeyState) {
@@ -439,14 +439,14 @@ Incremental migration. Each phase independently verifiable.
 - Give `NvimHandler` a `tx: Sender<FromNeovim>` field
 - Implement `handle_notify` for `ime_snapshot` notifications
 - Add `FromNeovim::Snapshot(Snapshot)` to protocol.rs
-- Add `Snapshot` handling to main.rs `handle_nvim_message`
+- Add `Snapshot` handling to coordinator.rs `handle_nvim_message`
 - **Push not yet active** (infrastructure only)
 
 ### Phase 3: Enable Push Notifications (Insert Mode)
 
 - Set up autocmds (skkeleton-handled, TextChangedI, CursorMovedI)
 - handler.rs: insert mode keys → `nvim_input` then return (remove sleep + query)
-- main.rs: skip `wait_for_nvim_response()` for insert mode keys
+- input.rs: skip `wait_for_nvim_response()` for insert mode keys
 - **The 5ms fixed sleep is eliminated**
 - Verify: Japanese input (skkeleton), ASCII input, BS, cursor movement in insert mode
 

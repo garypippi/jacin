@@ -75,37 +75,3 @@ pub fn spawn_neovim(config: Config) -> anyhow::Result<NeovimHandle> {
     })
 }
 
-// Re-export for backwards compatibility during transition
-// These will be removed in a future cleanup
-impl From<FromNeovim> for OldFromNeovim {
-    fn from(msg: FromNeovim) -> Self {
-        match msg {
-            FromNeovim::Ready => OldFromNeovim::Ready,
-            FromNeovim::Preedit(info) => {
-                OldFromNeovim::Preedit(info.text, info.cursor_begin, info.cursor_end, info.mode)
-            }
-            FromNeovim::Commit(text) => OldFromNeovim::Commit(text),
-            FromNeovim::DeleteSurrounding { before, after } => {
-                OldFromNeovim::DeleteSurrounding(before, after)
-            }
-            FromNeovim::Candidates(info) => {
-                OldFromNeovim::Candidates(info.candidates, info.selected)
-            }
-        }
-    }
-}
-
-/// Old message format for backwards compatibility
-#[derive(Debug, Clone)]
-pub enum OldFromNeovim {
-    /// Preedit text changed (text, cursor_begin, cursor_end, mode)
-    Preedit(String, usize, usize, String),
-    /// Text should be committed
-    Commit(String),
-    /// Delete surrounding text (before_length, after_length)
-    DeleteSurrounding(u32, u32),
-    /// Completion candidates from nvim-cmp (candidates, selected_index)
-    Candidates(Vec<String>, usize),
-    /// Neovim is ready
-    Ready,
-}

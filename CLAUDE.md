@@ -22,7 +22,10 @@ cargo fmt            # Format
 
 ```
 src/
-  main.rs                    # Entry point, Wayland dispatch, coordination
+  main.rs                    # Entry point, State struct, event loop setup
+  dispatch.rs                # Wayland Dispatch impls, memmap_keymap
+  input.rs                   # keysym_to_vim, key processing, keypress display
+  coordinator.rs             # Neovim response handling, IME toggle, preedit/popup coordination
   config.rs                  # Config file loading (TOML), keybind defaults
   state/
     mod.rs                   # Re-exports

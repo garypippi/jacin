@@ -62,18 +62,23 @@ Applications (via zwp_text_input_v3)
 
 ```
 src/
-  main.rs                    # Entry point, Wayland dispatch, coordination
+  main.rs                    # Entry point, State struct, event loop setup
+  dispatch.rs                # Wayland Dispatch impls, memmap_keymap
+  input.rs                   # keysym_to_vim, key processing, keypress display
+  coordinator.rs             # Neovim response handling, IME toggle, preedit/popup coordination
+  config.rs                  # Config file loading (TOML), keybind defaults
   state/
     wayland.rs               # WaylandState (protocol handles, serial)
     keyboard.rs              # KeyboardState (XKB, modifiers, debouncing)
     ime.rs                   # ImeState, ImeMode state machine, VimMode
+    keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
   neovim/
     mod.rs                   # NeovimHandle (public API)
     protocol.rs              # ToNeovim, FromNeovim typed messages
     handler.rs               # Tokio-side message handling
     event_source.rs          # Calloop event source (infrastructure)
   ui/
-    candidate_window.rs      # Candidate popup UI
+    unified_window.rs        # Unified popup (preedit, keypress, candidates)
     text_render.rs           # Font rendering with fontdue
 ```
 
