@@ -118,12 +118,16 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
 
     let _ = tx.send(FromNeovim::Ready);
 
+    // Track last known vim mode for insert-mode fire-and-forget optimization.
+    // Starts as "i" because init_neovim() ends with startinsert.
+    let mut last_mode = String::from("i");
+
     // Main loop - process messages from IME
     loop {
         match rx.recv() {
             Ok(ToNeovim::Key(key)) => {
                 eprintln!("[NVIM] Received key: {:?}", key);
-                if let Err(e) = handle_key(&nvim, &key, &tx, config).await {
+                if let Err(e) = handle_key(&nvim, &key, &tx, config, &mut last_mode).await {
                     eprintln!("[NVIM] Key handling error: {}", e);
                 }
             }
@@ -237,29 +241,50 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Set up autocmd to trigger nvim-cmp completion when skkeleton enters henkan mode
-    nvim.command(
+    // Set up autocmds for push notifications.
+    // Insert mode state changes are pushed via vim.rpcnotify instead of being polled.
+    nvim.exec_lua(
         r#"
-        augroup IMESkkeletonCandidates
-            autocmd!
-            autocmd User skkeleton-handled lua << EOF
+        -- Flag to prevent duplicate snapshots when both skkeleton-handled
+        -- and TextChangedI/CursorMovedI fire for the same key.
+        vim.g.ime_snapshot_sent = false
+
+        -- skkeleton processing complete (fires after Deno IPC finishes)
+        vim.api.nvim_create_autocmd('User', {
+            pattern = 'skkeleton-handled',
+            callback = function()
                 vim.defer_fn(function()
+                    -- Trigger cmp completion in henkan mode (existing behavior)
                     local status = vim.fn['skkeleton#vim_status']()
                     vim.g.ime_skk_status = status
                     if status == 'henkan' then
-                        -- Trigger nvim-cmp completion
                         local ok, cmp = pcall(require, 'cmp')
                         if ok and cmp then
                             cmp.complete()
                         end
                     end
+                    -- Push snapshot (includes candidates from cmp.complete() above)
+                    vim.g.ime_snapshot_sent = true
+                    vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
                 end, 5)
-EOF
-        augroup END
-    "#,
+            end,
+        })
+
+        -- Non-skkeleton insert mode changes (direct ASCII, BS, cursor movement)
+        vim.api.nvim_create_autocmd({'TextChangedI', 'CursorMovedI'}, {
+            callback = function()
+                -- Skip if skkeleton-handled already sent snapshot for this key
+                if vim.g.ime_snapshot_sent then
+                    vim.g.ime_snapshot_sent = false
+                    return
+                end
+                vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+            end,
+        })
+        "#,
+        vec![],
     )
-    .await
-    .ok();
+    .await?;
 
     // Start in insert mode
     nvim.command("startinsert").await?;
@@ -273,6 +298,7 @@ async fn handle_key(
     key: &str,
     tx: &Sender<FromNeovim>,
     config: &Config,
+    last_mode: &mut String,
 ) -> anyhow::Result<()> {
     // Handle getchar-pending: Neovim is blocked waiting for a character (after q, f, t, r, m, etc.)
     // Send the key to complete the getchar, then fall through to normal query path
@@ -284,6 +310,7 @@ async fn handle_key(
         // Fall through to query preedit/mode normally
         // (key was already sent, skip the normal send path)
         let snapshot = query_snapshot(nvim, tx).await?;
+        *last_mode = snapshot.mode.clone();
         if snapshot.blocking {
             // Still blocked (unlikely but handle gracefully)
             PENDING.store(PendingState::Getchar);
@@ -296,6 +323,7 @@ async fn handle_key(
     if key == "<C-c>" {
         nvim.command("normal! 0D").await?;
         nvim.command("startinsert").await?;
+        *last_mode = String::from("i");
         let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
         let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
         return Ok(());
@@ -313,6 +341,7 @@ async fn handle_key(
             nvim.command("startinsert").await?;
             let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
         }
+        *last_mode = String::from("i");
         return Ok(());
     }
 
@@ -324,6 +353,7 @@ async fn handle_key(
         // Only pass Enter to neovim if in conversion mode (has markers)
         if !line.contains('▼') && !line.contains('▽') {
             // No markers - ignore Enter (don't create newlines)
+            let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
         // Fall through to normal key handling
@@ -365,9 +395,11 @@ EOF"#,
         if result.trim() == "confirmed" {
             // Give skkeleton time to process the confirmation
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-            let _ = query_snapshot(nvim, tx).await;
+            let snapshot = query_snapshot(nvim, tx).await?;
+            *last_mode = snapshot.mode.clone();
+        } else {
+            let _ = tx.send(FromNeovim::KeyProcessed);
         }
-        // If no cmp visible, just ignore the key
         return Ok(());
     }
 
@@ -386,6 +418,7 @@ EOF"#,
         let result = nvim.command_output("echo skkeleton#is_enabled()").await?;
         eprintln!("[NVIM] skkeleton enabled: {}", result.trim());
         // Clear preedit display
+        *last_mode = String::from("i");
         let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
         return Ok(());
     }
@@ -401,6 +434,7 @@ EOF"#,
             let _ = nvim.input(key).await;
             PENDING.store(PendingState::InsertRegister);
             eprintln!("[NVIM] Sent <C-r>, waiting for register name (insert mode)");
+            let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
     }
@@ -415,6 +449,7 @@ EOF"#,
             let _ = nvim.input(key).await;
             PENDING.store(PendingState::NormalRegister);
             eprintln!("[NVIM] Sent \", waiting for register name (normal mode)");
+            let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
     }
@@ -433,6 +468,7 @@ EOF"#,
             if key == "<C-r>" {
                 // <C-r><C-r> means "insert register literally" - still waiting for register name
                 eprintln!("[NVIM] Literal register insert mode, still waiting for register name");
+                let _ = tx.send(FromNeovim::KeyProcessed);
                 return Ok(());
             }
             // Normal register paste - paste happened, query preedit
@@ -444,6 +480,7 @@ EOF"#,
             PENDING.clear();
             // Return early - preedit unchanged, next key will be operator
             eprintln!("[NVIM] Register '{}' selected, waiting for operator", key);
+            let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
     } else {
@@ -493,6 +530,7 @@ EOF"#,
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             // Fall through to normal query path
         } else {
+            let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
     } else if !key_already_sent {
@@ -500,11 +538,17 @@ EOF"#,
         let _ = nvim.input(key).await;
     }
 
-    // Small delay to let skkeleton process
-    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    // Insert mode fire-and-forget: autocmd will push snapshot via rpcnotify.
+    // Exception: Escape changes mode but no insert-mode autocmd fires after it.
+    if last_mode.as_str() == "i" && key != "<Esc>" {
+        let _ = tx.send(FromNeovim::KeyProcessed);
+        return Ok(());
+    }
 
-    // Query full snapshot (includes mode/blocking, preedit, candidates in one RPC)
+    // Normal mode or mode-changing keys: query snapshot synchronously.
+    // No sleep needed — normal mode operations complete synchronously in Neovim.
     let snapshot = query_snapshot(nvim, tx).await?;
+    *last_mode = snapshot.mode.clone();
 
     if snapshot.blocking {
         // Neovim is blocked waiting for a character (e.g., after q, f, t, r, m)
@@ -536,7 +580,8 @@ EOF"#,
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         nvim.command("startinsert").await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-        let _ = query_snapshot(nvim, tx).await;
+        let snapshot = query_snapshot(nvim, tx).await?;
+        *last_mode = snapshot.mode.clone();
         return Ok(());
     }
 

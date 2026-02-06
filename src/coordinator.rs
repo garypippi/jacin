@@ -91,6 +91,9 @@ impl State {
                     self.show_candidates();
                 }
             }
+            FromNeovim::KeyProcessed => {
+                // Acknowledgment only — unblocks wait_for_nvim_response
+            }
         }
     }
 

@@ -102,6 +102,8 @@ pub enum FromNeovim {
     DeleteSurrounding { before: u32, after: u32 },
     /// Completion candidates from nvim-cmp
     Candidates(CandidateInfo),
+    /// Key was processed (acknowledgment for paths that send no data)
+    KeyProcessed,
 }
 
 /// Preedit information
