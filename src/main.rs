@@ -113,6 +113,7 @@ fn main() -> anyhow::Result<()> {
         keypress: KeypressState::new(),
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
+        reactivation_count: 0,
         nvim,
         popup,
         config,
@@ -227,6 +228,9 @@ pub struct State {
     // Exit and toggle flags
     pending_exit: bool,
     toggle_flag: Arc<AtomicBool>,
+    // Counter for consecutive Deactivate/Activate re-grabs without user key input.
+    // Prevents infinite loop when compositor keeps cycling.
+    reactivation_count: u32,
     // Neovim backend
     nvim: Option<NeovimHandle>,
     // Unified popup window (preedit, keypress, candidates)
@@ -239,6 +243,7 @@ impl State {
     fn handle_ime_toggle(&mut self) {
         let was_enabled = self.ime.is_enabled();
         eprintln!("[IME] Toggle: was_enabled = {}", was_enabled);
+        self.reactivation_count = 0;
 
         if !was_enabled {
             // Enable IME - grab keyboard, skkeleton toggle will be sent after keymap loads
@@ -249,16 +254,23 @@ impl State {
                 self.ime.start_enabling(true); // Will enable skkeleton after keymap
             }
         } else {
-            // Disable IME - release keyboard and disable skkeleton
+            // Disable IME - commit preedit text, release keyboard, disable skkeleton
             eprintln!("[IME] Releasing keyboard");
+            // Commit any pending preedit text BEFORE releasing keyboard
+            // (must match Commit handler order: commit first, then release)
+            if !self.ime.preedit.is_empty() {
+                self.wayland.commit_string(&self.ime.preedit);
+            }
             self.wayland.release_keyboard();
-            // Send toggle to Neovim to disable skkeleton
+            // Send toggle to Neovim to disable skkeleton, then clear buffer.
+            // Must clear here rather than relying on Deactivate handler,
+            // because rapid re-enable can happen before Deactivate fires.
             if let Some(ref nvim) = self.nvim {
                 nvim.send_key(&self.config.keybinds.toggle);
+                nvim.send_key("<Esc>ggdG");
             }
             // Clear preedit and keypress display
             self.ime.clear_preedit();
-            self.wayland.clear_preedit();
             self.keypress.clear();
             self.hide_popup();
             self.ime.disable();
@@ -475,6 +487,9 @@ impl State {
                 self.wayland.release_keyboard();
                 self.keypress.clear();
                 self.ime.disable();
+                // Consume any pending toggle (e.g., Alt in commit key <A-;> also
+                // triggers SIGUSR1 toggle — don't let it re-enable after commit)
+                self.toggle_flag.store(false, Ordering::SeqCst);
                 // Reset Neovim buffer for next input session
                 if let Some(ref nvim) = self.nvim {
                     nvim.send_key("<Esc>ggdG");
@@ -781,13 +796,22 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 state.wayland.active = true;
                 eprintln!("IME activated!");
 
-                // Re-grab keyboard if IME was enabled before deactivation
+                // Re-grab keyboard if IME was enabled before deactivation.
+                // Limit consecutive re-grabs to prevent infinite Deactivate/Activate
+                // loops (the grab itself can trigger compositor re-evaluation).
                 if state.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
-                    eprintln!("[IME] Re-grabbing keyboard after activation");
-                    state.wayland.grab_keyboard();
-                    state.keyboard.pending_keymap = true;
-                    // false = don't toggle skkeleton (already enabled), just restore insert mode
-                    state.ime.start_enabling(false);
+                    if state.reactivation_count < 2 {
+                        state.reactivation_count += 1;
+                        eprintln!("[IME] Re-grabbing keyboard after activation (count={})", state.reactivation_count);
+                        state.wayland.grab_keyboard();
+                        state.keyboard.pending_keymap = true;
+                        // false = don't toggle skkeleton (already enabled), just restore insert mode
+                        state.ime.start_enabling(false);
+                    } else {
+                        eprintln!("[IME] Skipping re-grab (too many consecutive reactivations), disabling");
+                        state.ime.disable();
+                        state.reactivation_count = 0;
+                    }
                 }
             }
             zwp_input_method_v2::Event::Deactivate => {
@@ -886,6 +910,8 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                 state: key_state,
             } => {
                 eprintln!("[GRAB] Key event: key={}, state={:?}", key, key_state);
+                // User interaction: reset reactivation counter
+                state.reactivation_count = 0;
                 if let WEnum::Value(ks) = key_state {
                     state.handle_key(key, ks);
                 }

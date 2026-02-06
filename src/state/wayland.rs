@@ -76,9 +76,4 @@ impl WaylandState {
         self.input_method.commit(self.serial);
     }
 
-    /// Clear preedit without committing text
-    pub fn clear_preedit(&mut self) {
-        self.input_method.set_preedit_string(String::new(), -1, -1);
-        self.input_method.commit(self.serial);
-    }
 }

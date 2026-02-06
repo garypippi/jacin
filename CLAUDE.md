@@ -56,7 +56,8 @@ Working:
 - Configurable toggle key (default Alt+`) to toggle IME (via SIGUSR1 signal, triggered by Hyprland keybind)
 - General Alt key support (Alt+any key produces `<A-...>` Vim notation)
 - Passthrough mode by default (keyboard only grabbed when IME enabled)
-- Survives Activate/Deactivate cycles (e.g., switching cells in spreadsheets) without leaking stale preedit
+- Toggle-off commits pending preedit text to application before disabling
+- Survives Activate/Deactivate cycles (e.g., switching cells in spreadsheets) with re-grab loop protection
 - Candidate window follows cursor (via zwp_input_popup_surface_v2)
 - nvim-cmp integration for candidate selection (Ctrl+N/P, Ctrl+K to confirm)
 - Enter confirms skkeleton conversion (stays in preedit when ▽/▼ markers present)
