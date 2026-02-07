@@ -4,6 +4,13 @@ use xkbcommon::xkb;
 use crate::neovim::{PendingState, pending_state};
 use crate::State;
 
+/// Distinguishes physical key presses from repeat events
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOrigin {
+    Physical,
+    Repeat,
+}
+
 /// Convert an XKB keysym + modifiers to Vim notation.
 ///
 /// Returns `None` if the key has no Vim representation (e.g. bare modifier keys).
@@ -71,7 +78,7 @@ pub fn keysym_to_vim(ctrl: bool, alt: bool, keysym: xkb::Keysym, utf8: &str) -> 
 }
 
 impl State {
-    pub(crate) fn handle_key(&mut self, key: u32, key_state: wl_keyboard::KeyState) {
+    pub(crate) fn handle_key(&mut self, key: u32, key_state: wl_keyboard::KeyState, _origin: KeyOrigin) {
         let state_str = match key_state {
             wl_keyboard::KeyState::Pressed => "pressed",
             wl_keyboard::KeyState::Released => "released",

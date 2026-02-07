@@ -13,6 +13,7 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 };
 
 use crate::State;
+use crate::input::KeyOrigin;
 
 // Dispatch for registry (required by registry_queue_init)
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
@@ -210,6 +211,8 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 // Only do cleanup when IME is enabled — avoids flooding Neovim
                 // during rapid compositor activate/deactivate cycles (window switching)
                 if state.ime.is_enabled() {
+                    // Cancel any active key repeat
+                    state.repeat.cancel();
                     // Release keyboard grab to stop receiving key events while deactivated
                     state.wayland.release_keyboard();
                     // Clear local state (don't send Wayland protocol requests while deactivated,
@@ -307,7 +310,14 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                 // User interaction: reset reactivation counter
                 state.reactivation_count = 0;
                 if let WEnum::Value(ks) = key_state {
-                    state.handle_key(key, ks);
+                    if ks == wl_keyboard::KeyState::Pressed {
+                        if state.keyboard.key_repeats(key) {
+                            state.repeat.start(key);
+                        }
+                    } else {
+                        state.repeat.stop(key);
+                    }
+                    state.handle_key(key, ks, KeyOrigin::Physical);
                 }
             }
             zwp_input_method_keyboard_grab_v2::Event::Modifiers {
@@ -321,6 +331,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
             }
             zwp_input_method_keyboard_grab_v2::Event::RepeatInfo { rate, delay } => {
                 eprintln!("Repeat info: rate={}/s, delay={}ms", rate, delay);
+                state.keyboard.set_repeat_info(rate, delay);
             }
             _ => {}
         }

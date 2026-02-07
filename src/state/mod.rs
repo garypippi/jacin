@@ -8,9 +8,11 @@
 mod ime;
 mod keyboard;
 mod keypress;
+mod repeat;
 mod wayland;
 
 pub use ime::ImeState;
 pub use keyboard::KeyboardState;
 pub use keypress::KeypressState;
+pub use repeat::KeyRepeatState;
 pub use wayland::WaylandState;

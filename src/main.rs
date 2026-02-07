@@ -11,7 +11,7 @@ use calloop_wayland_source::WaylandSource;
 use wayland_client::{
     Connection,
     globals::registry_queue_init,
-    protocol::{wl_compositor, wl_shm},
+    protocol::{wl_compositor, wl_keyboard, wl_shm},
 };
 use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manager_v2;
 
@@ -24,7 +24,7 @@ mod state;
 mod ui;
 
 use neovim::NeovimHandle;
-use state::{ImeState, KeyboardState, KeypressState, WaylandState};
+use state::{ImeState, KeyRepeatState, KeyboardState, KeypressState, WaylandState};
 use ui::{TextRenderer, UnifiedPopup};
 
 fn main() -> anyhow::Result<()> {
@@ -100,6 +100,7 @@ fn main() -> anyhow::Result<()> {
         loop_signal: None,
         wayland: WaylandState::new(qh.clone(), input_method),
         keyboard: KeyboardState::new(),
+        repeat: KeyRepeatState::new(),
         ime: ImeState::new(),
         keypress: KeypressState::new(),
         pending_exit: false,
@@ -162,6 +163,27 @@ fn main() -> anyhow::Result<()> {
         })
         .expect("Failed to insert timer source");
 
+    // Add timer for key repeat (~5ms polling interval)
+    let repeat_timer = Timer::from_duration(std::time::Duration::from_millis(5));
+    event_loop
+        .handle()
+        .insert_source(repeat_timer, |_, _, state| {
+            if state.ime.is_fully_enabled()
+                && let Some(key) = state.repeat.should_fire(
+                    state.keyboard.repeat_rate,
+                    state.keyboard.repeat_delay,
+                )
+            {
+                state.handle_key(
+                    key,
+                    wl_keyboard::KeyState::Pressed,
+                    input::KeyOrigin::Repeat,
+                );
+            }
+            TimeoutAction::ToDuration(std::time::Duration::from_millis(5))
+        })
+        .expect("Failed to insert repeat timer source");
+
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -214,6 +236,7 @@ pub struct State {
     // Component state structs
     pub(crate) wayland: WaylandState,
     pub(crate) keyboard: KeyboardState,
+    pub(crate) repeat: KeyRepeatState,
     pub(crate) ime: ImeState,
     pub(crate) keypress: KeypressState,
     // Exit and toggle flags

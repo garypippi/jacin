@@ -21,6 +21,8 @@ impl State {
         } else {
             // Disable IME - commit preedit text, release keyboard, disable skkeleton
             eprintln!("[IME] Releasing keyboard");
+            // Cancel any active key repeat
+            self.repeat.cancel();
             // Commit any pending preedit text BEFORE releasing keyboard
             // (must match Commit handler order: commit first, then release)
             if !self.ime.preedit.is_empty() {

@@ -30,7 +30,8 @@ src/
   state/
     mod.rs                   # Re-exports
     wayland.rs               # WaylandState (protocol handles, serial)
-    keyboard.rs              # KeyboardState (XKB, modifiers, debouncing)
+    keyboard.rs              # KeyboardState (XKB, modifiers, debouncing, repeat params)
+    repeat.rs                # KeyRepeatState (key repeat timing/tracking)
     ime.rs                   # ImeState, ImeMode state machine, VimMode
     keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
   neovim/
@@ -47,7 +48,7 @@ src/
 ## Key Components
 
 - **Config module**: TOML config at `~/.config/custom-ime/config.toml` with configurable keybinds (toggle, commit)
-- **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `ImeState`, `KeypressState`
+- **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `KeyRepeatState`, `ImeState`, `KeypressState`
 - **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
 - **Optimized RPC**: Insert mode uses fire-and-forget (`nvim_input` + push notification via `rpcnotify`); normal mode uses 2-RPC pull (`nvim_input` + `collect_snapshot()`); special keys use single Lua function calls
@@ -75,6 +76,7 @@ Working:
 - Unified popup window: shows preedit with cursor (block/line), keypress sequences, and candidates
 - Preedit has max width with cursor-centered scrolling for long text
 - Keypress display: shows insert mode entry keys (i, a, A, o), register paste sequences (<C-r>a), and completed operator sequences (d$, "ay$) for 1.5s
+- Key repeat: held keys repeat using compositor's rate/delay, respects XKB per-key repeat flags (modifiers don't repeat)
 
 Known Issues:
 - Multiline operations (yy, dd, cc, p, P) not yet supported (single-line preedit only)

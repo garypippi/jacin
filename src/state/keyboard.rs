@@ -22,6 +22,10 @@ pub struct KeyboardState {
     pub ready_time: Option<Instant>,
     /// Whether we're waiting for a keymap after grab
     pub pending_keymap: bool,
+    /// Key repeat rate (events/sec, 0 = disabled)
+    pub repeat_rate: i32,
+    /// Key repeat initial delay (ms)
+    pub repeat_delay: i32,
 }
 
 impl KeyboardState {
@@ -35,6 +39,8 @@ impl KeyboardState {
             ignored_keys: HashSet::new(),
             ready_time: None,
             pending_keymap: false,
+            repeat_rate: 0,
+            repeat_delay: 0,
         }
     }
 
@@ -115,6 +121,20 @@ impl KeyboardState {
         let keysym = xkb_state.key_get_one_sym(keycode);
         let utf8 = xkb_state.key_get_utf8(keycode);
         Some((keysym, utf8))
+    }
+
+    /// Store compositor repeat info
+    pub fn set_repeat_info(&mut self, rate: i32, delay: i32) {
+        self.repeat_rate = rate;
+        self.repeat_delay = delay;
+    }
+
+    /// Check if a key should repeat according to XKB keymap
+    pub fn key_repeats(&self, key: u32) -> bool {
+        self.xkb_state.as_ref().is_some_and(|state| {
+            let keycode = xkb::Keycode::new(key + 8);
+            state.get_keymap().key_repeats(keycode)
+        })
     }
 }
 

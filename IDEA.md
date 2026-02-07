@@ -69,7 +69,8 @@ src/
   config.rs                  # Config file loading (TOML), keybind defaults
   state/
     wayland.rs               # WaylandState (protocol handles, serial)
-    keyboard.rs              # KeyboardState (XKB, modifiers, debouncing)
+    keyboard.rs              # KeyboardState (XKB, modifiers, debouncing, repeat params)
+    repeat.rs                # KeyRepeatState (key repeat timing/tracking)
     ime.rs                   # ImeState, ImeMode state machine, VimMode
     keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
   neovim/
