@@ -77,6 +77,7 @@ Working:
 - Preedit has max width with cursor-centered scrolling for long text
 - Keypress display: shows insert mode entry keys (i, a, A, o), register paste sequences (<C-r>a), and completed operator sequences (d$, "ay$) for 1.5s
 - Key repeat: held keys repeat using compositor's rate/delay, respects XKB per-key repeat flags (modifiers don't repeat)
+- Visual mode (character-wise): `v` enters visual, `h`/`l`/`w`/`b` extend selection with highlight, `d`/`c`/`y`/`x` operate on selection, `"ay` yanks to named register
 
 Known Issues:
 - Multiline operations (yy, dd, cc, p, P) not yet supported (single-line preedit only)

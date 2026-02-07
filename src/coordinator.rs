@@ -93,6 +93,11 @@ impl State {
                     self.show_candidates();
                 }
             }
+            FromNeovim::VisualRange(selection) => {
+                eprintln!("[NVIM] VisualRange: {:?}", selection);
+                self.visual_display = selection;
+                self.update_popup();
+            }
             FromNeovim::KeyProcessed => {
                 // Acknowledgment only — unblocks wait_for_nvim_response
             }
@@ -140,6 +145,7 @@ impl State {
             },
             candidates: self.ime.candidates.clone(),
             selected: self.ime.selected_candidate,
+            visual_selection: self.visual_display.clone(),
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();

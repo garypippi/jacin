@@ -12,6 +12,7 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 };
 
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
+use crate::neovim::VisualSelection;
 use crate::State;
 
 // Colors (matching existing windows)
@@ -20,6 +21,7 @@ const TEXT_COLOR: (u8, u8, u8, u8) = (220, 223, 228, 255);
 const BORDER_COLOR: (u8, u8, u8, u8) = (80, 84, 92, 255);
 const SELECTED_BG: (u8, u8, u8, u8) = (61, 89, 161, 255);
 const CURSOR_BG: (u8, u8, u8, u8) = (97, 175, 239, 255);
+const VISUAL_BG: (u8, u8, u8, u8) = (61, 89, 161, 200);
 const NUMBER_COLOR: (u8, u8, u8, u8) = (152, 195, 121, 255);
 const SCROLLBAR_BG: (u8, u8, u8, u8) = (60, 64, 72, 255);
 const SCROLLBAR_THUMB: (u8, u8, u8, u8) = (100, 104, 112, 255);
@@ -44,6 +46,7 @@ pub struct PopupContent {
     pub keypress: String,
     pub candidates: Vec<String>,
     pub selected: usize,
+    pub visual_selection: Option<VisualSelection>,
 }
 
 impl PopupContent {
@@ -389,7 +392,31 @@ impl UnifiedPopup {
         };
 
         if is_normal_mode && cursor_char_begin < chars.len() {
-            // Block cursor
+            // Convert visual selection byte offsets to char positions
+            let visual_char_range = match &content.visual_selection {
+                Some(VisualSelection::Charwise { begin, end }) => {
+                    let vbegin = byte_to_char.get(*begin).copied().unwrap_or(0);
+                    let vend = byte_to_char.get(*end).copied().unwrap_or(chars.len());
+                    Some((vbegin, vend))
+                }
+                None => None,
+            };
+
+            // Draw visual selection background (behind cursor)
+            if let Some((vbegin, vend)) = visual_char_range {
+                let visual_bg = Color::from_rgba8(VISUAL_BG.0, VISUAL_BG.1, VISUAL_BG.2, VISUAL_BG.3);
+                let vx_start = char_x_positions[vbegin] - scroll_offset;
+                let vx_end = char_x_positions[vend.min(chars.len())] - scroll_offset;
+                if let Some(rect) =
+                    Rect::from_xywh(vx_start, layout.preedit_y, vx_end - vx_start, line_height)
+                {
+                    let mut paint = Paint::default();
+                    paint.set_color(visual_bg);
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            }
+
+            // Block cursor (drawn on top of visual selection)
             let x_start = char_x_positions[cursor_char_begin] - scroll_offset;
             let x_end = char_x_positions[cursor_char_end.min(chars.len())] - scroll_offset;
             let cursor_width = (x_end - x_start).max(self.renderer.measure_text(" "));
@@ -402,7 +429,7 @@ impl UnifiedPopup {
                 pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
 
-            // Draw text - cursor character in dark color, skip chars outside visible area
+            // Draw text - cursor chars dark, visual chars light on VISUAL_BG, others normal
             let cursor_text_color = Color::from_rgba8(40, 44, 52, 255);
             for (i, c) in chars.iter().enumerate() {
                 let char_x = char_x_positions[i] - scroll_offset;

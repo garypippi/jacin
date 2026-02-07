@@ -66,6 +66,11 @@ impl KeypressState {
         self.vim_mode == "n" || self.vim_mode.starts_with("no")
     }
 
+    /// Check if in visual mode
+    pub fn is_visual_mode(&self) -> bool {
+        self.vim_mode == "v" || self.vim_mode.starts_with('v')
+    }
+
     /// Check if we should show the keypress display
     pub fn should_show(&self) -> bool {
         self.visible && !self.accumulated.is_empty()

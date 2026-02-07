@@ -129,6 +129,7 @@ impl State {
         if let Some(ref vim_key) = vim_key {
             // Track state before sending to Neovim
             let was_normal = self.keypress.is_normal_mode();
+            let was_visual = self.keypress.is_visual_mode();
             let before = pending_state().load();
             let was_motion_pending = before.is_motion();
             let was_register_pending = before.is_register();
@@ -142,6 +143,7 @@ impl State {
             let after = pending_state().load();
             let now_pending = after.is_pending();
             let is_normal = self.keypress.is_normal_mode();
+            let is_visual = self.keypress.is_visual_mode();
             let is_insert = self.keypress.vim_mode == "i";
 
             if now_pending {
@@ -153,9 +155,18 @@ impl State {
                 // Just completed <C-r> + register in insert mode - show full sequence
                 self.keypress.push_key(vim_key);
                 self.show_keypress();
-            } else if was_normal && is_insert {
-                // Just entered insert mode from normal - show the entry key (i, a, A, o, etc.)
+            } else if (was_normal || was_visual) && is_insert {
+                // Just entered insert mode from normal/visual - show entry key (i, a, A, c, etc.)
                 self.keypress.clear();
+                self.keypress.push_key(vim_key);
+                self.show_keypress();
+            } else if was_normal && is_visual {
+                // Entered visual mode from normal - show 'v'
+                self.keypress.clear();
+                self.keypress.push_key(vim_key);
+                self.show_keypress();
+            } else if is_normal && was_visual {
+                // Visual operator completed (d, y, x from visual) - show key
                 self.keypress.push_key(vim_key);
                 self.show_keypress();
             } else if is_normal {
@@ -166,6 +177,8 @@ impl State {
                     self.show_keypress();
                 }
                 // Don't show standalone normal mode keys (h, j, k, l, etc.)
+            } else if is_visual {
+                // Visual mode movement - don't hide existing display
             } else {
                 // In insert mode typing - hide keypress display
                 self.hide_keypress();

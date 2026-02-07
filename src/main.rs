@@ -23,7 +23,7 @@ mod neovim;
 mod state;
 mod ui;
 
-use neovim::NeovimHandle;
+use neovim::{NeovimHandle, VisualSelection};
 use state::{ImeState, KeyRepeatState, KeyboardState, KeypressState, WaylandState};
 use ui::{TextRenderer, UnifiedPopup};
 
@@ -107,6 +107,7 @@ fn main() -> anyhow::Result<()> {
         toggle_flag: Arc::new(AtomicBool::new(false)),
         reactivation_count: 0,
         nvim,
+        visual_display: None,
         popup,
         config,
     };
@@ -247,6 +248,8 @@ pub struct State {
     pub(crate) reactivation_count: u32,
     // Neovim backend
     pub(crate) nvim: Option<NeovimHandle>,
+    // Transient visual selection display state (observed from Neovim, not IME-owned)
+    pub(crate) visual_display: Option<VisualSelection>,
     // Unified popup window (preedit, keypress, candidates)
     pub(crate) popup: Option<UnifiedPopup>,
     // Configuration

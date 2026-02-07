@@ -202,6 +202,17 @@ Register-pending state tracking (via unified `PendingState` enum):
 - `"` in normal mode sets `PendingState::NormalRegister`
 - Next key (register name) is handled appropriately
 
+### Visual Mode (Character-wise) ✓
+
+Character-wise visual selection (`v`) with highlighting and operators:
+- `v` enters visual mode, selection highlighted in blue
+- Movement keys (`h`, `l`, `w`, `b`, `$`, `0`, etc.) extend selection
+- Operators: `d` (delete), `c` (change), `y` (yank), `x` (delete)
+- Named registers: `"ay` yanks selection to register `a`
+- `o` swaps cursor to other end of selection
+
+**Design**: Visual selection is a display observation — the IME observes Neovim's visual range via `getpos('v')` and renders it. `State.visual_display` is transient display state, not part of `ImeState` or `PreeditInfo`. `VisualRange` messages flow on a parallel path from preedit (same channel, separate message type).
+
 ---
 
 ## Known Issues / TODO

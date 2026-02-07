@@ -89,6 +89,13 @@ pub enum ToNeovim {
     Shutdown,
 }
 
+/// Visual selection range from Neovim
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VisualSelection {
+    /// Character-wise visual selection with 0-indexed byte offsets (exclusive end)
+    Charwise { begin: usize, end: usize },
+}
+
 /// Messages sent from Neovim to IME
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FromNeovim {
@@ -102,6 +109,8 @@ pub enum FromNeovim {
     DeleteSurrounding { before: u32, after: u32 },
     /// Completion candidates from nvim-cmp
     Candidates(CandidateInfo),
+    /// Visual selection range (None = no visual selection)
+    VisualRange(Option<VisualSelection>),
     /// Key was processed (acknowledgment for paths that send no data)
     KeyProcessed,
 }
@@ -181,5 +190,11 @@ pub struct Snapshot {
     pub candidates: Option<Vec<String>>,
     /// Selected candidate index (0-indexed, None when no selection)
     pub selected: Option<i32>,
+    /// Visual selection start column (1-indexed byte offset, from Lua)
+    #[serde(default)]
+    pub visual_begin: Option<usize>,
+    /// Visual selection end column (1-indexed byte offset, from Lua, exclusive)
+    #[serde(default)]
+    pub visual_end: Option<usize>,
 }
 

@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 use super::protocol::{
     AtomicPendingState, CandidateInfo, FromNeovim, PendingState, PreeditInfo, Snapshot,
-    ToNeovim,
+    ToNeovim, VisualSelection,
 };
 use crate::config::Config;
 
@@ -61,6 +61,8 @@ impl Handler for NvimHandler {
                         cursor_begin
                     };
 
+                    let visual = snapshot_to_visual_selection(&snapshot);
+
                     let _ = self.tx.send(FromNeovim::Preedit(PreeditInfo::new(
                         snapshot.preedit,
                         cursor_begin,
@@ -82,6 +84,8 @@ impl Handler for NvimHandler {
                     } else {
                         let _ = self.tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
                     }
+
+                    let _ = self.tx.send(FromNeovim::VisualRange(visual));
                 }
                 Err(e) => {
                     eprintln!("[NVIM] Failed to parse push snapshot: {}", e);
@@ -211,6 +215,16 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
             if mode.mode == 'n' or mode.mode:find('^no') or mode.mode:find('^v') then
                 local char = vim.fn.matchstr(line, '\\%' .. col .. 'c.')
                 snapshot.char_width = vim.fn.strlen(char)
+            end
+
+            -- Visual mode: selection range
+            if mode.mode:find('^v') or mode.mode == 'V' or mode.mode == '\22' then
+                local v_col = vim.fn.getpos('v')[3]
+                local sel_start = math.min(v_col, col)
+                local sel_end_col = math.max(v_col, col)
+                local end_char = vim.fn.matchstr(line, '\\%' .. sel_end_col .. 'c.')
+                snapshot.visual_begin = sel_start
+                snapshot.visual_end = sel_end_col + vim.fn.strlen(end_char)
             end
 
             -- Candidates (only when cmp is visible)
@@ -462,11 +476,11 @@ async fn handle_key(
     if key == "\"" && !PENDING.load().is_pending() {
         let mode_str = nvim.command_output("echo mode(1)").await?;
         let mode = mode_str.trim();
-        if mode == "n" {
-            // Send " and set pending register state for normal mode
+        if mode == "n" || mode.starts_with('v') {
+            // Send " and set pending register state for normal/visual mode
             let _ = nvim.input(key).await;
             PENDING.store(PendingState::NormalRegister);
-            eprintln!("[NVIM] Sent \", waiting for register name (normal mode)");
+            eprintln!("[NVIM] Sent \", waiting for register name ({} mode)", mode);
             let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
@@ -626,8 +640,9 @@ async fn query_snapshot(
     };
 
     eprintln!(
-        "[NVIM] snapshot: preedit={:?}, cursor={}..{}, mode={}, blocking={}",
-        snapshot.preedit, cursor_begin, cursor_end, snapshot.mode, snapshot.blocking
+        "[NVIM] snapshot: preedit={:?}, cursor={}..{}, mode={}, blocking={}, visual={:?}..{:?}",
+        snapshot.preedit, cursor_begin, cursor_end, snapshot.mode, snapshot.blocking,
+        snapshot.visual_begin, snapshot.visual_end
     );
 
     let _ = tx.send(FromNeovim::Preedit(PreeditInfo::new(
@@ -653,6 +668,9 @@ async fn query_snapshot(
         let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
     }
 
+    let visual = snapshot_to_visual_selection(&snapshot);
+    let _ = tx.send(FromNeovim::VisualRange(visual));
+
     Ok(snapshot)
 }
 
@@ -670,6 +688,8 @@ fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
         char_width: 0,
         candidates: None,
         selected: None,
+        visual_begin: None,
+        visual_end: None,
     };
 
     for (k, v) in map {
@@ -704,6 +724,16 @@ fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
                     snapshot.selected = Some(n as i32);
                 }
             }
+            "visual_begin" => {
+                if let Some(n) = v.as_u64() {
+                    snapshot.visual_begin = Some(n as usize);
+                }
+            }
+            "visual_end" => {
+                if let Some(n) = v.as_u64() {
+                    snapshot.visual_end = Some(n as usize);
+                }
+            }
             _ => {}
         }
     }
@@ -718,4 +748,15 @@ fn get_map_str<'a>(value: &'a nvim_rs::Value, field: &str) -> Option<&'a str> {
         .iter()
         .find(|(k, _)| k.as_str() == Some(field))
         .and_then(|(_, v)| v.as_str())
+}
+
+/// Convert snapshot visual fields to VisualSelection (1-indexed Lua → 0-indexed byte offsets).
+fn snapshot_to_visual_selection(snapshot: &Snapshot) -> Option<VisualSelection> {
+    match (snapshot.visual_begin, snapshot.visual_end) {
+        (Some(begin), Some(end)) => Some(VisualSelection::Charwise {
+            begin: begin.saturating_sub(1),
+            end: end.saturating_sub(1),
+        }),
+        _ => None,
+    }
 }
