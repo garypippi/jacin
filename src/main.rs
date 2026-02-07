@@ -14,6 +14,7 @@ use wayland_client::{
     protocol::{wl_compositor, wl_keyboard, wl_shm},
 };
 use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manager_v2;
+use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1;
 
 mod config;
 mod coordinator;
@@ -60,6 +61,21 @@ fn main() -> anyhow::Result<()> {
     let input_method = input_method_manager.get_input_method(&seat, &qh, ());
     eprintln!("Created zwp_input_method_v2");
 
+    // Create virtual keyboard for clearing stuck modifier state
+    let virtual_keyboard = match globals
+        .bind::<zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1, _, _>(&qh, 1..=1, ())
+    {
+        Ok(manager) => {
+            let vk = manager.create_virtual_keyboard(&seat, &qh, ());
+            eprintln!("Created zwp_virtual_keyboard_v1");
+            Some(vk)
+        }
+        Err(e) => {
+            eprintln!("zwp_virtual_keyboard_manager_v1 not available: {} (modifier clearing disabled)", e);
+            None
+        }
+    };
+
     // Spawn Neovim backend
     let nvim = match neovim::spawn_neovim(config.clone()) {
         Ok(handle) => {
@@ -98,7 +114,11 @@ fn main() -> anyhow::Result<()> {
     // Create application state
     let mut state = State {
         loop_signal: None,
-        wayland: WaylandState::new(qh.clone(), input_method),
+        wayland: {
+            let mut ws = WaylandState::new(qh.clone(), input_method);
+            ws.virtual_keyboard = virtual_keyboard;
+            ws
+        },
         keyboard: KeyboardState::new(),
         repeat: KeyRepeatState::new(),
         ime: ImeState::new(),

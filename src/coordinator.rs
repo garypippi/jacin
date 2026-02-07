@@ -29,6 +29,7 @@ impl State {
                 self.wayland.commit_string(&self.ime.preedit);
             }
             self.wayland.release_keyboard();
+            self.keyboard.reset_modifiers();
             // Send toggle to Neovim to disable skkeleton, then clear buffer.
             // Must clear here rather than relying on Deactivate handler,
             // because rapid re-enable can happen before Deactivate fires.
@@ -67,6 +68,7 @@ impl State {
                 self.hide_popup();
                 // Release keyboard grab and go back to passthrough mode
                 self.wayland.release_keyboard();
+                self.keyboard.reset_modifiers();
                 self.keypress.clear();
                 self.ime.disable();
                 // Consume any pending toggle (e.g., Alt in commit key <A-;> also
@@ -135,6 +137,7 @@ impl State {
                         self.keypress.clear();
                         self.hide_popup();
                         self.wayland.release_keyboard();
+                        self.keyboard.reset_modifiers();
                         self.ime.disable();
                         // Toggle skkeleton off and clear buffer
                         if let Some(ref nvim) = self.nvim {
@@ -151,6 +154,7 @@ impl State {
                         self.keypress.clear();
                         self.hide_popup();
                         self.wayland.release_keyboard();
+                        self.keyboard.reset_modifiers();
                         self.ime.disable();
                         // Toggle skkeleton off and clear buffer
                         if let Some(ref nvim) = self.nvim {

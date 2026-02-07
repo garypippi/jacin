@@ -6,7 +6,7 @@ A custom Input Method Editor for Linux Wayland (Hyprland/wlroots), with Neovim a
 
 - **Language:** Rust
 - **Wayland:** wayland-client, smithay-client-toolkit
-- **Protocols:** zwp_input_method_v2, zwp_input_popup_surface_v2
+- **Protocols:** zwp_input_method_v2, zwp_input_popup_surface_v2, zwp_virtual_keyboard_v1
 - **Backend:** Neovim (headless) via nvim-rs + skkeleton + nvim-cmp
 
 ## Commands
@@ -29,7 +29,7 @@ src/
   config.rs                  # Config file loading (TOML), keybind defaults
   state/
     mod.rs                   # Re-exports
-    wayland.rs               # WaylandState (protocol handles, serial)
+    wayland.rs               # WaylandState (protocol handles, serial, virtual keyboard)
     keyboard.rs              # KeyboardState (XKB, modifiers, debouncing, repeat params)
     repeat.rs                # KeyRepeatState (key repeat timing/tracking)
     ime.rs                   # ImeState, ImeMode state machine, VimMode
@@ -79,6 +79,8 @@ Working:
 - Key repeat: held keys repeat using compositor's rate/delay, respects XKB per-key repeat flags (modifiers don't repeat)
 - Visual mode (character-wise): `v` enters visual, `h`/`l`/`w`/`b` extend selection with highlight, `d`/`c`/`y`/`x` operate on selection, `"ay` yanks to named register
 - Command mode: `:w` commits preedit (keep enabled), `:wq`/`:x` commit+disable, `:q`/`:q!` discard+disable, other commands pass through to Neovim
+
+- Modifier clearing: uses zwp_virtual_keyboard_v1 to clear stuck modifiers (e.g., Alt from toggle keybind) on grab start and release
 
 Known Issues:
 - Multiline operations (yy, dd, cc, p, P) not yet supported (single-line preedit only)

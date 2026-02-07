@@ -123,6 +123,12 @@ impl KeyboardState {
         Some((keysym, utf8))
     }
 
+    /// Reset modifier state (call when releasing keyboard grab)
+    pub fn reset_modifiers(&mut self) {
+        self.ctrl_pressed = false;
+        self.alt_pressed = false;
+    }
+
     /// Store compositor repeat info
     pub fn set_repeat_info(&mut self, rate: i32, delay: i32) {
         self.repeat_rate = rate;

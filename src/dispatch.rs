@@ -11,6 +11,9 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2, zwp_input_method_manager_v2, zwp_input_method_v2,
     zwp_input_popup_surface_v2,
 };
+use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
+    zwp_virtual_keyboard_manager_v1, zwp_virtual_keyboard_v1,
+};
 
 use crate::State;
 use crate::input::KeyOrigin;
@@ -215,6 +218,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                     state.repeat.cancel();
                     // Release keyboard grab to stop receiving key events while deactivated
                     state.wayland.release_keyboard();
+                    state.keyboard.reset_modifiers();
                     // Clear local state (don't send Wayland protocol requests while deactivated,
                     // the compositor automatically clears preedit on deactivate)
                     state.ime.clear_preedit();
@@ -276,6 +280,12 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         if state.keyboard.load_keymap(&data) {
                             eprintln!("Keymap loaded successfully");
 
+                            // Set same keymap on virtual keyboard (needed for modifier clearing)
+                            state.wayland.set_virtual_keymap(&data);
+                            // Clear any stuck modifiers from the toggle keybind
+                            // (e.g., Alt leaked to the app before the grab started)
+                            state.wayland.clear_modifiers();
+
                             // Complete enabling if transitioning
                             let should_toggle = state.ime.complete_enabling();
                             if should_toggle {
@@ -335,6 +345,32 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
             }
             _ => {}
         }
+    }
+}
+
+// Dispatch for virtual keyboard manager (no events)
+impl Dispatch<zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _manager: &zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
+        _event: zwp_virtual_keyboard_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+// Dispatch for virtual keyboard (no events)
+impl Dispatch<zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _vk: &zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
+        _event: zwp_virtual_keyboard_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }
 

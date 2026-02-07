@@ -2,11 +2,14 @@
 //!
 //! Manages Wayland protocol handles, serial numbers, and activation state.
 
+use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+
 use wayland_client::QueueHandle;
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2,
     zwp_input_method_v2::ZwpInputMethodV2,
 };
+use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
 
 use crate::State;
 
@@ -22,6 +25,10 @@ pub struct WaylandState {
     pub serial: u32,
     /// Whether IME is active (text field focused)
     pub active: bool,
+    /// Virtual keyboard for clearing stuck modifier state after grab release
+    pub virtual_keyboard: Option<ZwpVirtualKeyboardV1>,
+    /// Whether the virtual keyboard has a keymap set (required before sending events)
+    pub virtual_keyboard_ready: bool,
 }
 
 impl WaylandState {
@@ -33,6 +40,8 @@ impl WaylandState {
             keyboard_grab: None,
             serial: 0,
             active: false,
+            virtual_keyboard: None,
+            virtual_keyboard_ready: false,
         }
     }
 
@@ -50,9 +59,34 @@ impl WaylandState {
     pub fn release_keyboard(&mut self) -> bool {
         if let Some(grab) = self.keyboard_grab.take() {
             grab.release();
+            self.clear_modifiers();
             true
         } else {
             false
+        }
+    }
+
+    /// Set the keymap on the virtual keyboard (must be called before clear_modifiers)
+    pub fn set_virtual_keymap(&mut self, keymap_str: &str) {
+        if let Some(ref vk) = self.virtual_keyboard
+            && let Some(fd) = create_keymap_memfd(keymap_str)
+        {
+            let size = (keymap_str.len() + 1) as u32; // +1 for null terminator
+            vk.keymap(1, fd.as_fd(), size); // 1 = XKB_V1 format
+            self.virtual_keyboard_ready = true;
+            eprintln!("[VK] Keymap set on virtual keyboard (size={})", size);
+        }
+    }
+
+    /// Clear all modifier state via virtual keyboard.
+    /// This fixes stuck modifiers (e.g., Alt from toggle keybind leaking to the app
+    /// before the keyboard grab starts, then the release being consumed by the grab).
+    pub fn clear_modifiers(&self) {
+        if self.virtual_keyboard_ready
+            && let Some(ref vk) = self.virtual_keyboard
+        {
+            vk.modifiers(0, 0, 0, 0);
+            eprintln!("[VK] Cleared modifiers via virtual keyboard");
         }
     }
 
@@ -75,5 +109,20 @@ impl WaylandState {
         self.input_method.delete_surrounding_text(before, after);
         self.input_method.commit(self.serial);
     }
+}
 
+/// Create a memfd containing the keymap string (with null terminator) for the virtual keyboard
+fn create_keymap_memfd(keymap_str: &str) -> Option<OwnedFd> {
+    use std::io::{Seek, Write};
+
+    let fd = unsafe { libc::memfd_create(c"vk-keymap".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        eprintln!("[VK] memfd_create failed");
+        return None;
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.write_all(keymap_str.as_bytes()).ok()?;
+    file.write_all(&[0]).ok()?; // null terminator
+    file.seek(std::io::SeekFrom::Start(0)).ok()?;
+    Some(OwnedFd::from(file))
 }
