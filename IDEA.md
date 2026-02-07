@@ -148,7 +148,7 @@ SKK is a Japanese input method where:
 ### IME Toggle via Configurable Key ✓
 
 - Default **Alt+`** triggers SIGUSR1 signal to toggle IME (configured in Hyprland keybind)
-- Toggle key is configurable via `~/.config/custom-ime/config.toml` (`keybinds.toggle`)
+- Toggle key is configurable via `~/.config/jacin/config.toml` (`keybinds.toggle`)
 - General Alt key support: all Alt combinations produce `<A-...>` Vim notation (e.g., `<A-;>`, `<A-a>`)
 - Avoids Ctrl+J conflict with browser shortcuts
 - Passthrough mode by default - keyboard only grabbed when IME is enabled

@@ -153,7 +153,7 @@ fn main() -> anyhow::Result<()> {
             }
         })?;
 
-    // Set up SIGUSR1 for IME toggle (triggered by: pkill -SIGUSR1 custom-ime)
+    // Set up SIGUSR1 for IME toggle (triggered by: pkill -SIGUSR1 jacin)
     // Use a ping to wake up the event loop when signal arrives
     let (ping, ping_source) = make_ping()?;
     let toggle_flag_clone = state.toggle_flag.clone();

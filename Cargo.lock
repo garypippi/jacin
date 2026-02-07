@@ -236,34 +236,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
-name = "custom-ime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "calloop",
- "calloop-wayland-source",
- "crossbeam-channel",
- "env_logger",
- "fontdb",
- "fontdue",
- "libc",
- "log",
- "memmap2",
- "nvim-rs",
- "serde",
- "serde_json",
- "signal-hook",
- "tiny-skia",
- "tokio",
- "toml",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-misc",
- "xkbcommon",
-]
-
-[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -522,6 +494,34 @@ name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
+
+[[package]]
+name = "jacin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "calloop",
+ "calloop-wayland-source",
+ "crossbeam-channel",
+ "env_logger",
+ "fontdb",
+ "fontdue",
+ "libc",
+ "log",
+ "memmap2",
+ "nvim-rs",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "tiny-skia",
+ "tokio",
+ "toml",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-misc",
+ "xkbcommon",
+]
 
 [[package]]
 name = "jiff"

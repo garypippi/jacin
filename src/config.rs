@@ -55,10 +55,10 @@ impl Config {
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
             && !xdg.is_empty()
         {
-            return Some(PathBuf::from(xdg).join("custom-ime/config.toml"));
+            return Some(PathBuf::from(xdg).join("jacin/config.toml"));
         }
         if let Ok(home) = std::env::var("HOME") {
-            return Some(PathBuf::from(home).join(".config/custom-ime/config.toml"));
+            return Some(PathBuf::from(home).join(".config/jacin/config.toml"));
         }
         None
     }

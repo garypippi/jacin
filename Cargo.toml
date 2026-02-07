@@ -1,5 +1,5 @@
 [package]
-name = "custom-ime"
+name = "jacin"
 version = "0.1.0"
 edition = "2024"
 description = "A custom Input Method Editor for Linux Wayland with Neovim backend"

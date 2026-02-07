@@ -47,7 +47,7 @@ src/
 
 ## Key Components
 
-- **Config module**: TOML config at `~/.config/custom-ime/config.toml` with configurable keybinds (toggle, commit)
+- **Config module**: TOML config at `~/.config/jacin/config.toml` with configurable keybinds (toggle, commit)
 - **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `KeyRepeatState`, `ImeState`, `KeypressState`
 - **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels

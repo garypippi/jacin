@@ -1,4 +1,4 @@
-# custom-ime
+# jacin
 
 Neovim をバックエンドとした、Linux Wayland 向けカスタム IME。
 
@@ -10,7 +10,7 @@ Neovim をバックエンドとした、Linux Wayland 向けカスタム IME。
 ## 仕組み
 
 ```
-キーボード → Hyprland → custom-ime → Neovim (headless)
+キーボード → Hyprland → jacin → Neovim (headless)
                             ↓
                       アプリケーション (zwp_input_method_v2 経由)
 ```
@@ -47,17 +47,17 @@ cargo build --release
 
 1. IME を起動（Wayland コンポジタに接続します）:
    ```sh
-   ./target/release/custom-ime
+   ./target/release/jacin
    ```
 
 2. SIGUSR1 を送って IME のオン/オフを切り替え:
    ```sh
-   pkill -SIGUSR1 custom-ime
+   pkill -SIGUSR1 jacin
    ```
 
    コンポジタの設定でキーにバインドしてください。Hyprland の場合:
    ```
-   bind = ALT, grave, exec, pkill -SIGUSR1 custom-ime
+   bind = ALT, grave, exec, pkill -SIGUSR1 jacin
    ```
 
 3. テキスト入力フィールドにフォーカスすると、IME が自動的にアクティブになります。
@@ -66,7 +66,7 @@ cargo build --release
 
 ## 設定
 
-設定ファイル: `~/.config/custom-ime/config.toml`
+設定ファイル: `~/.config/jacin/config.toml`
 
 ```toml
 [keybinds]
@@ -79,9 +79,9 @@ commit = "<C-CR>"   # 確定キー（Vim 記法）
 `env_logger` を使用。`RUST_LOG` 環境変数で出力レベルを制御できます:
 
 ```sh
-RUST_LOG=info ./target/release/custom-ime    # ライフサイクルイベント
-RUST_LOG=debug ./target/release/custom-ime   # 詳細な動作ログ
-RUST_LOG=custom_ime=debug ./target/release/custom-ime  # このクレートのみ
+RUST_LOG=info ./target/release/jacin    # ライフサイクルイベント
+RUST_LOG=debug ./target/release/jacin   # 詳細な動作ログ
+RUST_LOG=jacin=debug ./target/release/jacin  # このクレートのみ
 ```
 
 ## アーキテクチャ
