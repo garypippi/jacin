@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::neovim::FromNeovim;
+use crate::neovim::{CmdlineAction, FromNeovim};
 use crate::ui::PopupContent;
 use crate::State;
 
@@ -100,6 +100,73 @@ impl State {
             }
             FromNeovim::KeyProcessed => {
                 // Acknowledgment only — unblocks wait_for_nvim_response
+            }
+            FromNeovim::CmdlineUpdate(text) => {
+                eprintln!("[NVIM] CmdlineUpdate: {:?}", text);
+                self.keypress.accumulated = text;
+                self.keypress.visible = true;
+                self.keypress.set_vim_mode("c");
+                self.update_popup();
+            }
+            FromNeovim::CmdlineCommand(action) => {
+                eprintln!("[NVIM] CmdlineCommand: {:?}", action);
+                match action {
+                    CmdlineAction::Write => {
+                        // Commit preedit, keep enabled
+                        if !self.ime.preedit.is_empty() {
+                            self.wayland.commit_string(&self.ime.preedit);
+                        }
+                        self.ime.clear_preedit();
+                        self.ime.clear_candidates();
+                        self.keypress.clear();
+                        self.hide_popup();
+                        // Clear buffer and back to insert mode
+                        if let Some(ref nvim) = self.nvim {
+                            nvim.send_key("<Esc>ggdGi");
+                        }
+                    }
+                    CmdlineAction::WriteQuit => {
+                        // Commit preedit + disable
+                        if !self.ime.preedit.is_empty() {
+                            self.wayland.commit_string(&self.ime.preedit);
+                        }
+                        self.ime.clear_preedit();
+                        self.ime.clear_candidates();
+                        self.keypress.clear();
+                        self.hide_popup();
+                        self.wayland.release_keyboard();
+                        self.ime.disable();
+                        // Toggle skkeleton off and clear buffer
+                        if let Some(ref nvim) = self.nvim {
+                            nvim.send_key(&self.config.keybinds.toggle);
+                            nvim.send_key("<Esc>ggdG");
+                        }
+                    }
+                    CmdlineAction::Quit => {
+                        // Discard preedit + disable
+                        self.ime.clear_preedit();
+                        self.ime.clear_candidates();
+                        self.keypress.clear();
+                        self.hide_popup();
+                        self.wayland.release_keyboard();
+                        self.ime.disable();
+                        // Toggle skkeleton off and clear buffer
+                        if let Some(ref nvim) = self.nvim {
+                            nvim.send_key(&self.config.keybinds.toggle);
+                            nvim.send_key("<Esc>ggdG");
+                        }
+                    }
+                    CmdlineAction::PassThrough => {
+                        // Neovim executed the command; Lua defers startinsert + snapshot
+                        self.keypress.clear();
+                        self.update_popup();
+                    }
+                }
+            }
+            FromNeovim::CmdlineCancelled => {
+                eprintln!("[NVIM] CmdlineCancelled");
+                self.keypress.clear();
+                self.update_popup();
             }
         }
     }

@@ -146,6 +146,11 @@ impl State {
             let is_visual = self.keypress.is_visual_mode();
             let is_insert = self.keypress.vim_mode == "i";
 
+            // Command-line mode: display updates come via CmdlineUpdate messages
+            if after == PendingState::CommandLine {
+                return;
+            }
+
             if now_pending {
                 // In pending state (operator or register) - accumulate key and show
                 self.keypress.push_key(vim_key);

@@ -11,8 +11,8 @@ use nvim_rs::{Handler, Neovim};
 use tokio::process::Command;
 
 use super::protocol::{
-    AtomicPendingState, CandidateInfo, FromNeovim, PendingState, PreeditInfo, Snapshot,
-    ToNeovim, VisualSelection,
+    AtomicPendingState, CandidateInfo, CmdlineAction, FromNeovim, PendingState, PreeditInfo,
+    Snapshot, ToNeovim, VisualSelection,
 };
 use crate::config::Config;
 
@@ -89,6 +89,47 @@ impl Handler for NvimHandler {
                 }
                 Err(e) => {
                     eprintln!("[NVIM] Failed to parse push snapshot: {}", e);
+                }
+            }
+        } else if name == "ime_cmdline"
+            && let Some(value) = args.first()
+            && let Some(map) = value.as_map()
+        {
+            let get_str = |field: &str| -> Option<String> {
+                map.iter()
+                    .find(|(k, _)| k.as_str() == Some(field))
+                    .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
+            };
+
+            match get_str("type").as_deref() {
+                Some("update") => {
+                    if let Some(text) = get_str("text") {
+                        eprintln!("[NVIM] Cmdline update: {:?}", text);
+                        let _ = self.tx.send(FromNeovim::CmdlineUpdate(text));
+                    }
+                }
+                Some("command") => {
+                    PENDING.clear();
+                    let action = match get_str("action").as_deref() {
+                        Some("write") => CmdlineAction::Write,
+                        Some("write_quit") => CmdlineAction::WriteQuit,
+                        Some("quit") => CmdlineAction::Quit,
+                        Some("passthrough") => CmdlineAction::PassThrough,
+                        other => {
+                            eprintln!("[NVIM] Unknown cmdline action: {:?}", other);
+                            return;
+                        }
+                    };
+                    eprintln!("[NVIM] Cmdline command: {:?}", action);
+                    let _ = self.tx.send(FromNeovim::CmdlineCommand(action));
+                }
+                Some("cancelled") => {
+                    PENDING.clear();
+                    eprintln!("[NVIM] Cmdline cancelled");
+                    let _ = self.tx.send(FromNeovim::CmdlineCancelled);
+                }
+                other => {
+                    eprintln!("[NVIM] Unknown cmdline type: {:?}", other);
                 }
             }
         }
@@ -351,6 +392,62 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
                 vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
             end,
         })
+
+        -- Command-line display updates
+        vim.api.nvim_create_autocmd('CmdlineChanged', {
+            callback = function()
+                if vim.fn.getcmdtype() == ':' then
+                    vim.rpcnotify(0, 'ime_cmdline', {
+                        type = 'update',
+                        text = ':' .. vim.fn.getcmdline()
+                    })
+                end
+            end,
+        })
+
+        -- Track command action for CmdlineLeave
+        vim.g.ime_cmdline_action = nil
+
+        -- Intercept <CR> in command mode
+        vim.keymap.set('c', '<CR>', function()
+            if vim.fn.getcmdtype() ~= ':' then
+                return vim.api.nvim_replace_termcodes('<CR>', true, false, true)
+            end
+            local cmd = vim.trim(vim.fn.getcmdline())
+            if cmd == 'w' then
+                vim.g.ime_cmdline_action = 'write'
+                return vim.api.nvim_replace_termcodes('<C-c>', true, false, true)
+            elseif cmd == 'wq' or cmd == 'x' then
+                vim.g.ime_cmdline_action = 'write_quit'
+                return vim.api.nvim_replace_termcodes('<C-c>', true, false, true)
+            elseif cmd == 'q' or cmd == 'q!' then
+                vim.g.ime_cmdline_action = 'quit'
+                return vim.api.nvim_replace_termcodes('<C-c>', true, false, true)
+            else
+                vim.g.ime_cmdline_action = 'passthrough'
+                return vim.api.nvim_replace_termcodes('<CR>', true, false, true)
+            end
+        end, { expr = true })
+
+        -- Post-command handling
+        vim.api.nvim_create_autocmd('CmdlineLeave', {
+            callback = function()
+                if vim.fn.getcmdtype() ~= ':' then return end
+                local action = vim.g.ime_cmdline_action
+                vim.g.ime_cmdline_action = nil
+                if action then
+                    vim.rpcnotify(0, 'ime_cmdline', { type = 'command', action = action })
+                    if action == 'passthrough' then
+                        vim.schedule(function()
+                            vim.cmd('startinsert')
+                            vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+                        end)
+                    end
+                else
+                    vim.rpcnotify(0, 'ime_cmdline', { type = 'cancelled' })
+                end
+            end,
+        })
         "#,
         vec![],
     )
@@ -370,6 +467,14 @@ async fn handle_key(
     config: &Config,
     last_mode: &mut String,
 ) -> anyhow::Result<()> {
+    // Handle command-line mode: just forward keys, display comes via CmdlineChanged autocmd.
+    if PENDING.load() == PendingState::CommandLine {
+        eprintln!("[NVIM] CommandLine mode, forwarding key: {}", key);
+        let _ = nvim.input(key).await;
+        let _ = tx.send(FromNeovim::KeyProcessed);
+        return Ok(());
+    }
+
     // Handle getchar-pending: Neovim is blocked waiting for a character (after q, f, t, r, m, etc.)
     // Send the key to complete the getchar, then check blocking before querying snapshot.
     if PENDING.load() == PendingState::Getchar {
@@ -574,6 +679,16 @@ async fn handle_key(
         return Ok(());
     }
 
+    // Detect ":" in normal mode — enters command-line mode.
+    // Set PENDING to CommandLine and return immediately to avoid query_snapshot
+    // which would trigger c-mode recovery.
+    if key == ":" && last_mode.as_str() == "n" {
+        PENDING.store(PendingState::CommandLine);
+        eprintln!("[NVIM] Entered command-line mode");
+        let _ = tx.send(FromNeovim::CmdlineUpdate(":".to_string()));
+        return Ok(());
+    }
+
     // Normal mode or mode-changing keys: check blocking before querying snapshot.
     // nvim_get_mode() is "fast" (works during getchar); exec_lua would deadlock.
     if is_blocked(nvim).await? {
@@ -597,7 +712,8 @@ async fn handle_key(
     // Handle unexpected command-line mode (c, cv, ce, cr, etc.)
     // This can happen when skkeleton internals trigger command-line mode
     // (e.g., nested henkan with capital letters). Escape and restore insert mode.
-    if snapshot.mode.starts_with('c') {
+    // Skip if we intentionally entered command mode (PENDING == CommandLine).
+    if snapshot.mode.starts_with('c') && PENDING.load() != PendingState::CommandLine {
         eprintln!(
             "[NVIM] Unexpected command-line mode ({}), escaping",
             snapshot.mode

@@ -24,6 +24,8 @@ pub enum PendingState {
     InsertRegister = 4,
     /// Normal mode " prefix, waiting for register name
     NormalRegister = 5,
+    /// In command-line mode (after typing :)
+    CommandLine = 6,
 }
 
 impl PendingState {
@@ -35,6 +37,7 @@ impl PendingState {
             3 => Self::TextObject,
             4 => Self::InsertRegister,
             5 => Self::NormalRegister,
+            6 => Self::CommandLine,
             _ => Self::None,
         }
     }
@@ -96,6 +99,19 @@ pub enum VisualSelection {
     Charwise { begin: usize, end: usize },
 }
 
+/// Action from command-line mode execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CmdlineAction {
+    /// :w — commit preedit, keep enabled
+    Write,
+    /// :wq, :x — commit preedit + disable
+    WriteQuit,
+    /// :q, :q! — discard preedit + disable
+    Quit,
+    /// Other command — Neovim executed it
+    PassThrough,
+}
+
 /// Messages sent from Neovim to IME
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FromNeovim {
@@ -113,6 +129,12 @@ pub enum FromNeovim {
     VisualRange(Option<VisualSelection>),
     /// Key was processed (acknowledgment for paths that send no data)
     KeyProcessed,
+    /// Command-line text update (display in keypress area)
+    CmdlineUpdate(String),
+    /// Command-line command executed
+    CmdlineCommand(CmdlineAction),
+    /// Command-line cancelled (Esc/C-c)
+    CmdlineCancelled,
 }
 
 /// Preedit information

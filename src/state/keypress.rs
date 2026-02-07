@@ -78,6 +78,10 @@ impl KeypressState {
 
     /// Check if display has timed out
     pub fn is_timed_out(&self) -> bool {
+        // Command-line mode should not auto-hide
+        if self.vim_mode == "c" {
+            return false;
+        }
         if let Some(last_shown) = self.last_shown {
             last_shown.elapsed() >= KEYPRESS_DISPLAY_DURATION
         } else {
