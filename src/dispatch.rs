@@ -71,7 +71,7 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
         _qh: &QueueHandle<Self>,
     ) {
         if let wl_shm::Event::Format { format } = event {
-            eprintln!("[SHM] Format available: {:?}", format);
+            log::debug!("[SHM] Format available: {:?}", format);
         }
     }
 }
@@ -102,10 +102,10 @@ impl Dispatch<wl_surface::WlSurface, ()> for State {
     ) {
         match event {
             wl_surface::Event::Enter { .. } => {
-                eprintln!("[SURFACE] Entered output");
+                log::debug!("[SURFACE] Entered output");
             }
             wl_surface::Event::Leave { .. } => {
-                eprintln!("[SURFACE] Left output");
+                log::debug!("[SURFACE] Left output");
             }
             _ => {}
         }
@@ -124,7 +124,7 @@ impl Dispatch<wl_buffer::WlBuffer, usize> for State {
         _qh: &QueueHandle<Self>,
     ) {
         if let wl_buffer::Event::Release = event {
-            eprintln!("[BUFFER] Released: {}", data);
+            log::debug!("[BUFFER] Released: {}", data);
             if *data < 2
                 && let Some(ref mut popup) = state.popup
             {
@@ -153,7 +153,7 @@ impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for State 
         {
             // The compositor tells us where the text cursor is
             // This is informational - positioning is handled by the compositor
-            eprintln!(
+            log::debug!(
                 "[POPUP] Text input rectangle: x={}, y={}, {}x{}",
                 x, y, width, height
             );
@@ -188,7 +188,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
         match event {
             zwp_input_method_v2::Event::Activate => {
                 state.wayland.active = true;
-                eprintln!("IME activated!");
+                log::info!("IME activated!");
 
                 // Re-grab keyboard if IME was enabled before deactivation.
                 // Limit consecutive re-grabs to prevent infinite Deactivate/Activate
@@ -196,20 +196,20 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 if state.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
                     if state.reactivation_count < 2 {
                         state.reactivation_count += 1;
-                        eprintln!("[IME] Re-grabbing keyboard after activation (count={})", state.reactivation_count);
+                        log::debug!("[IME] Re-grabbing keyboard after activation (count={})", state.reactivation_count);
                         state.wayland.grab_keyboard();
                         state.keyboard.pending_keymap = true;
                         // false = don't toggle skkeleton (already enabled), just restore insert mode
                         state.ime.start_enabling(false);
                     } else {
-                        eprintln!("[IME] Skipping re-grab (too many consecutive reactivations), disabling");
+                        log::warn!("[IME] Skipping re-grab (too many consecutive reactivations), disabling");
                         state.ime.disable();
                         state.reactivation_count = 0;
                     }
                 }
             }
             zwp_input_method_v2::Event::Deactivate => {
-                eprintln!("IME deactivated");
+                log::info!("IME deactivated");
                 state.wayland.active = false;
                 // Only do cleanup when IME is enabled — avoids flooding Neovim
                 // during rapid compositor activate/deactivate cycles (window switching)
@@ -246,7 +246,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 state.wayland.serial += 1;
             }
             zwp_input_method_v2::Event::Unavailable => {
-                eprintln!("IME unavailable - another IME may be running");
+                log::warn!("IME unavailable - another IME may be running");
                 if let Some(signal) = &state.loop_signal {
                     signal.stop();
                 }
@@ -268,7 +268,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
     ) {
         match event {
             zwp_input_method_keyboard_grab_v2::Event::Keymap { format, fd, size } => {
-                eprintln!("Keymap received: format={:?}, size={}", format, size);
+                log::debug!("Keymap received: format={:?}, size={}", format, size);
 
                 if let WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) = format {
                     // Memory-map the keymap (fd is borrowed, we don't own it)
@@ -278,7 +278,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                     if let Some(data) = keymap_data {
                         // Parse the keymap using KeyboardState
                         if state.keyboard.load_keymap(&data) {
-                            eprintln!("Keymap loaded successfully");
+                            log::info!("Keymap loaded successfully");
 
                             // Set same keymap on virtual keyboard (needed for modifier clearing)
                             state.wayland.set_virtual_keymap(&data);
@@ -292,7 +292,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                 // Set ready_time for debouncing
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
-                                    eprintln!("[IME] Sending skkeleton toggle");
+                                    log::debug!("[IME] Sending skkeleton toggle");
                                     nvim.send_key(&state.config.keybinds.toggle);
                                 }
                             } else if state.ime.is_fully_enabled() {
@@ -300,12 +300,12 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                 // Neovim is in normal mode from <Esc>ggdG, restore insert mode
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
-                                    eprintln!("[IME] Restoring insert mode after re-activation");
+                                    log::debug!("[IME] Restoring insert mode after re-activation");
                                     nvim.send_key("<Esc>i");
                                 }
                             }
                         } else {
-                            eprintln!("Failed to parse keymap");
+                            log::error!("Failed to parse keymap");
                         }
                     }
                 }
@@ -316,7 +316,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                 key,
                 state: key_state,
             } => {
-                eprintln!("[GRAB] Key event: key={}, state={:?}", key, key_state);
+                log::debug!("[GRAB] Key event: key={}, state={:?}", key, key_state);
                 // User interaction: reset reactivation counter
                 state.reactivation_count = 0;
                 if let WEnum::Value(ks) = key_state {
@@ -340,7 +340,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                 state.update_modifiers(mods_depressed, mods_latched, mods_locked, group);
             }
             zwp_input_method_keyboard_grab_v2::Event::RepeatInfo { rate, delay } => {
-                eprintln!("Repeat info: rate={}/s, delay={}ms", rate, delay);
+                log::debug!("Repeat info: rate={}/s, delay={}ms", rate, delay);
                 state.keyboard.set_repeat_info(rate, delay);
             }
             _ => {}

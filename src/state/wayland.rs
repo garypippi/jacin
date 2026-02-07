@@ -74,7 +74,7 @@ impl WaylandState {
             let size = (keymap_str.len() + 1) as u32; // +1 for null terminator
             vk.keymap(1, fd.as_fd(), size); // 1 = XKB_V1 format
             self.virtual_keyboard_ready = true;
-            eprintln!("[VK] Keymap set on virtual keyboard (size={})", size);
+            log::debug!("[VK] Keymap set on virtual keyboard (size={})", size);
         }
     }
 
@@ -86,7 +86,7 @@ impl WaylandState {
             && let Some(ref vk) = self.virtual_keyboard
         {
             vk.modifiers(0, 0, 0, 0);
-            eprintln!("[VK] Cleared modifiers via virtual keyboard");
+            log::debug!("[VK] Cleared modifiers via virtual keyboard");
         }
     }
 
@@ -117,7 +117,7 @@ fn create_keymap_memfd(keymap_str: &str) -> Option<OwnedFd> {
 
     let fd = unsafe { libc::memfd_create(c"vk-keymap".as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
-        eprintln!("[VK] memfd_create failed");
+        log::error!("[VK] memfd_create failed");
         return None;
     }
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };

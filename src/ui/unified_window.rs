@@ -250,8 +250,8 @@ impl UnifiedPopup {
     fn render(&mut self, content: &PopupContent, layout: &Layout, qh: &QueueHandle<State>) {
         let buffer_size = (self.width * self.height * 4) as usize;
         if buffer_size * 2 > POOL_SIZE {
-            eprintln!(
-                "[POPUP] Warning: buffer too large ({}x{}), skipping render",
+            log::warn!(
+                "[POPUP] Buffer too large ({}x{}), skipping render",
                 self.width, self.height
             );
             return;

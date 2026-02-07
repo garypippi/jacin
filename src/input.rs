@@ -84,7 +84,7 @@ impl State {
             wl_keyboard::KeyState::Released => "released",
             _ => "unknown",
         };
-        eprintln!(
+        log::debug!(
             "[KEY] code={}, state={}, ctrl={}",
             key, state_str, self.keyboard.ctrl_pressed
         );
@@ -97,21 +97,21 @@ impl State {
 
         // Check if key should be ignored
         if self.keyboard.should_ignore_key(key) {
-            eprintln!("[KEY] Ignoring key {}", key);
+            log::debug!("[KEY] Ignoring key {}", key);
             return;
         }
 
         // Get keysym and UTF-8
         let Some((keysym, utf8)) = self.keyboard.get_key_info(key) else {
-            eprintln!("No xkb state, cannot process key");
+            log::warn!("No xkb state, cannot process key");
             return;
         };
-        eprintln!("[KEY] keysym={:?}, utf8={:?}", keysym, utf8);
+        log::debug!("[KEY] keysym={:?}, utf8={:?}", keysym, utf8);
 
         // Handle Ctrl+C to exit
         use xkbcommon::xkb::Keysym;
         if self.keyboard.ctrl_pressed && keysym == Keysym::c {
-            eprintln!("\nCtrl+C pressed, releasing keyboard and exiting...");
+            log::info!("Ctrl+C pressed, releasing keyboard and exiting...");
             self.wayland.release_keyboard();
             self.pending_exit = true;
             return;
@@ -124,7 +124,7 @@ impl State {
             keysym,
             &utf8,
         );
-        eprintln!("[KEY] vim_key={:?}", vim_key);
+        log::debug!("[KEY] vim_key={:?}", vim_key);
 
         if let Some(ref vim_key) = vim_key {
             // Track state before sending to Neovim
@@ -192,11 +192,11 @@ impl State {
             // Fallback: if no Neovim or no vim key, use local preedit
             if self.nvim.is_none() {
                 self.ime.preedit.push_str(&utf8);
-                eprintln!("[PREEDIT] buffer={:?}", self.ime.preedit);
+                log::debug!("[PREEDIT] buffer={:?}", self.ime.preedit);
                 self.update_preedit();
             }
         } else {
-            eprintln!(
+            log::debug!(
                 "[SKIP] no printable char, ctrl={}",
                 self.keyboard.ctrl_pressed
             );
@@ -232,13 +232,13 @@ impl State {
             .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
 
         if old_ctrl != self.keyboard.ctrl_pressed {
-            eprintln!(
+            log::debug!(
                 "[MOD] ctrl changed: {} -> {}",
                 old_ctrl, self.keyboard.ctrl_pressed
             );
         }
         if old_alt != self.keyboard.alt_pressed {
-            eprintln!(
+            log::debug!(
                 "[MOD] alt changed: {} -> {}",
                 old_alt, self.keyboard.alt_pressed
             );

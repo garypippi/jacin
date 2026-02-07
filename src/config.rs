@@ -33,7 +33,7 @@ impl Config {
             Ok(s) => s,
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("[CONFIG] Failed to read {}: {}", path.display(), e);
+                    log::warn!("[CONFIG] Failed to read {}: {}", path.display(), e);
                 }
                 return Self::default();
             }
@@ -41,11 +41,11 @@ impl Config {
 
         match toml::from_str(&contents) {
             Ok(config) => {
-                eprintln!("[CONFIG] Loaded from {}", path.display());
+                log::info!("[CONFIG] Loaded from {}", path.display());
                 config
             }
             Err(e) => {
-                eprintln!("[CONFIG] Parse error in {}: {} (using defaults)", path.display(), e);
+                log::warn!("[CONFIG] Parse error in {}: {} (using defaults)", path.display(), e);
                 Self::default()
             }
         }

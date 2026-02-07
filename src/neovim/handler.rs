@@ -49,7 +49,7 @@ impl Handler for NvimHandler {
         {
             match parse_snapshot(value) {
                 Ok(snapshot) => {
-                    eprintln!(
+                    log::debug!(
                         "[NVIM] Push snapshot: mode={}, preedit={:?}",
                         snapshot.mode, snapshot.preedit
                     );
@@ -88,7 +88,7 @@ impl Handler for NvimHandler {
                     let _ = self.tx.send(FromNeovim::VisualRange(visual));
                 }
                 Err(e) => {
-                    eprintln!("[NVIM] Failed to parse push snapshot: {}", e);
+                    log::error!("[NVIM] Failed to parse push snapshot: {}", e);
                 }
             }
         } else if name == "ime_cmdline"
@@ -104,7 +104,7 @@ impl Handler for NvimHandler {
             match get_str("type").as_deref() {
                 Some("update") => {
                     if let Some(text) = get_str("text") {
-                        eprintln!("[NVIM] Cmdline update: {:?}", text);
+                        log::debug!("[NVIM] Cmdline update: {:?}", text);
                         let _ = self.tx.send(FromNeovim::CmdlineUpdate(text));
                     }
                 }
@@ -116,20 +116,20 @@ impl Handler for NvimHandler {
                         Some("quit") => CmdlineAction::Quit,
                         Some("passthrough") => CmdlineAction::PassThrough,
                         other => {
-                            eprintln!("[NVIM] Unknown cmdline action: {:?}", other);
+                            log::warn!("[NVIM] Unknown cmdline action: {:?}", other);
                             return;
                         }
                     };
-                    eprintln!("[NVIM] Cmdline command: {:?}", action);
+                    log::debug!("[NVIM] Cmdline command: {:?}", action);
                     let _ = self.tx.send(FromNeovim::CmdlineCommand(action));
                 }
                 Some("cancelled") => {
                     PENDING.clear();
-                    eprintln!("[NVIM] Cmdline cancelled");
+                    log::debug!("[NVIM] Cmdline cancelled");
                     let _ = self.tx.send(FromNeovim::CmdlineCancelled);
                 }
                 other => {
-                    eprintln!("[NVIM] Unknown cmdline type: {:?}", other);
+                    log::warn!("[NVIM] Unknown cmdline type: {:?}", other);
                 }
             }
         }
@@ -141,13 +141,13 @@ pub fn run_blocking(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: Conf
     let rt = Runtime::new().expect("Failed to create tokio runtime");
     rt.block_on(async move {
         if let Err(e) = run_neovim(rx, tx, &config).await {
-            eprintln!("[NVIM] Error: {}", e);
+            log::error!("[NVIM] Error: {}", e);
         }
     });
 }
 
 async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Config) -> anyhow::Result<()> {
-    eprintln!("[NVIM] Starting Neovim...");
+    log::info!("[NVIM] Starting Neovim...");
 
     // Start Neovim in embedded mode
     let mut cmd = Command::new("nvim");
@@ -156,7 +156,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     let handler = NvimHandler { tx: tx.clone() };
     let (nvim, _io_handler, _child) = new_child_cmd(&mut cmd, handler).await?;
 
-    eprintln!("[NVIM] Connected to Neovim");
+    log::info!("[NVIM] Connected to Neovim");
 
     // Initialize
     init_neovim(&nvim).await?;
@@ -171,13 +171,13 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     loop {
         match rx.recv() {
             Ok(ToNeovim::Key(key)) => {
-                eprintln!("[NVIM] Received key: {:?}", key);
+                log::debug!("[NVIM] Received key: {:?}", key);
                 if let Err(e) = handle_key(&nvim, &key, &tx, config, &mut last_mode).await {
-                    eprintln!("[NVIM] Key handling error: {}", e);
+                    log::error!("[NVIM] Key handling error: {}", e);
                 }
             }
             Ok(ToNeovim::Shutdown) | Err(_) => {
-                eprintln!("[NVIM] Shutting down...");
+                log::info!("[NVIM] Shutting down...");
                 let _ = nvim.command("qa!").await;
                 break;
             }
@@ -188,7 +188,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
 }
 
 async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
-    eprintln!("[NVIM] Initializing...");
+    log::info!("[NVIM] Initializing...");
 
     nvim.command("set nocompatible").await?;
     nvim.command("set encoding=utf-8").await?;
@@ -198,7 +198,7 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
 
     // Check if user config was loaded
     let rtp = nvim.command_output("echo &runtimepath").await?;
-    eprintln!(
+    log::debug!(
         "[NVIM] runtimepath: {}",
         rtp.trim().chars().take(100).collect::<String>()
     );
@@ -207,19 +207,19 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     let result = nvim
         .command_output("echo exists('*skkeleton#is_enabled')")
         .await?;
-    eprintln!("[NVIM] skkeleton#is_enabled exists: {}", result.trim());
+    log::debug!("[NVIM] skkeleton#is_enabled exists: {}", result.trim());
 
     // List loaded scripts to see what's loaded
     let scripts = nvim.command_output("scriptnames").await?;
     let script_count = scripts.lines().count();
-    eprintln!("[NVIM] Loaded scripts: {} files", script_count);
+    log::debug!("[NVIM] Loaded scripts: {} files", script_count);
 
     // Verify <Plug>(skkeleton-toggle) mapping exists
     let mapping = nvim
         .command_output("imap <Plug>(skkeleton-toggle)")
         .await
         .unwrap_or_default();
-    eprintln!(
+    log::debug!(
         "[NVIM] skkeleton-toggle mapping: {}",
         mapping.trim().chars().take(60).collect::<String>()
     );
@@ -229,7 +229,7 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
         .command_output("filter /skkeleton/ function")
         .await
         .unwrap_or_default();
-    eprintln!(
+    log::debug!(
         "[NVIM] skkeleton functions: {}",
         funcs.lines().take(10).collect::<Vec<_>>().join(", ")
     );
@@ -456,7 +456,7 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     // Start in insert mode
     nvim.command("startinsert").await?;
 
-    eprintln!("[NVIM] Initialization complete");
+    log::info!("[NVIM] Initialization complete");
     Ok(())
 }
 
@@ -469,7 +469,7 @@ async fn handle_key(
 ) -> anyhow::Result<()> {
     // Handle command-line mode: just forward keys, display comes via CmdlineChanged autocmd.
     if PENDING.load() == PendingState::CommandLine {
-        eprintln!("[NVIM] CommandLine mode, forwarding key: {}", key);
+        log::debug!("[NVIM] CommandLine mode, forwarding key: {}", key);
         let _ = nvim.input(key).await;
         let _ = tx.send(FromNeovim::KeyProcessed);
         return Ok(());
@@ -478,13 +478,13 @@ async fn handle_key(
     // Handle getchar-pending: Neovim is blocked waiting for a character (after q, f, t, r, m, etc.)
     // Send the key to complete the getchar, then check blocking before querying snapshot.
     if PENDING.load() == PendingState::Getchar {
-        eprintln!("[NVIM] Completing getchar with key: {}", key);
+        log::debug!("[NVIM] Completing getchar with key: {}", key);
         let _ = nvim.input(key).await;
         PENDING.clear();
         // nvim_get_mode() is "fast" (works during getchar); exec_lua is NOT and would deadlock.
         if is_blocked(nvim).await? {
             PENDING.store(PendingState::Getchar);
-            eprintln!("[NVIM] Still blocked in getchar after key: {}", key);
+            log::debug!("[NVIM] Still blocked in getchar after key: {}", key);
             let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
@@ -552,7 +552,7 @@ async fn handle_key(
 
     // Handle toggle key - trigger the <Plug>(skkeleton-toggle) mapping (1 RPC)
     if key == config.keybinds.toggle {
-        eprintln!("[NVIM] Toggling skkeleton via Lua handler...");
+        log::debug!("[NVIM] Toggling skkeleton via Lua handler...");
         let _ = nvim.exec_lua("return ime_handle_toggle()", vec![]).await?;
         // feedkeys queued in Lua; skkeleton-handled autocmd will push snapshot.
         *last_mode = String::from("i");
@@ -570,7 +570,7 @@ async fn handle_key(
             // Send <C-r> and set pending register state
             let _ = nvim.input(key).await;
             PENDING.store(PendingState::InsertRegister);
-            eprintln!("[NVIM] Sent <C-r>, waiting for register name (insert mode)");
+            log::debug!("[NVIM] Sent <C-r>, waiting for register name (insert mode)");
             let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
@@ -585,7 +585,7 @@ async fn handle_key(
             // Send " and set pending register state for normal/visual mode
             let _ = nvim.input(key).await;
             PENDING.store(PendingState::NormalRegister);
-            eprintln!("[NVIM] Sent \", waiting for register name ({} mode)", mode);
+            log::debug!("[NVIM] Sent \", waiting for register name ({} mode)", mode);
             let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
@@ -594,7 +594,7 @@ async fn handle_key(
     // Handle register-pending state
     let current = PENDING.load();
     let key_already_sent = if current.is_register() {
-        eprintln!(
+        log::debug!(
             "[NVIM] In register-pending mode (state={:?}), sending register: {}",
             current, key
         );
@@ -604,7 +604,7 @@ async fn handle_key(
             // Insert mode <C-r> handling
             if key == "<C-r>" {
                 // <C-r><C-r> means "insert register literally" - still waiting for register name
-                eprintln!("[NVIM] Literal register insert mode, still waiting for register name");
+                log::debug!("[NVIM] Literal register insert mode, still waiting for register name");
                 let _ = tx.send(FromNeovim::KeyProcessed);
                 return Ok(());
             }
@@ -615,7 +615,7 @@ async fn handle_key(
             // Normal mode " - register selected, now waiting for operator
             PENDING.clear();
             // Return early - preedit unchanged, next key will be operator
-            eprintln!("[NVIM] Register '{}' selected, waiting for operator", key);
+            log::debug!("[NVIM] Register '{}' selected, waiting for operator", key);
             let _ = tx.send(FromNeovim::KeyProcessed);
             return Ok(());
         }
@@ -624,7 +624,7 @@ async fn handle_key(
     };
 
     if current.is_motion() {
-        eprintln!(
+        log::debug!(
             "[NVIM] In operator-pending mode (state={:?}), sending key: {}",
             current, key
         );
@@ -660,7 +660,7 @@ async fn handle_key(
         };
 
         if completes_motion {
-            eprintln!("[NVIM] Motion completed, resuming normal queries");
+            log::debug!("[NVIM] Motion completed, resuming normal queries");
             PENDING.clear();
             // Fall through to normal query path
         } else {
@@ -684,7 +684,7 @@ async fn handle_key(
     // which would trigger c-mode recovery.
     if key == ":" && last_mode.as_str() == "n" {
         PENDING.store(PendingState::CommandLine);
-        eprintln!("[NVIM] Entered command-line mode");
+        log::debug!("[NVIM] Entered command-line mode");
         let _ = tx.send(FromNeovim::CmdlineUpdate(":".to_string()));
         return Ok(());
     }
@@ -693,7 +693,7 @@ async fn handle_key(
     // nvim_get_mode() is "fast" (works during getchar); exec_lua would deadlock.
     if is_blocked(nvim).await? {
         PENDING.store(PendingState::Getchar);
-        eprintln!("[NVIM] Blocked in getchar, waiting for next key");
+        log::debug!("[NVIM] Blocked in getchar, waiting for next key");
         let _ = tx.send(FromNeovim::KeyProcessed);
         return Ok(());
     }
@@ -705,7 +705,7 @@ async fn handle_key(
         // Operator-pending mode (no, nov, etc.)
         // Set flag and skip query - vim is waiting for more input
         PENDING.store(PendingState::Motion);
-        eprintln!("[NVIM] Entered operator-pending mode ({})", snapshot.mode);
+        log::debug!("[NVIM] Entered operator-pending mode ({})", snapshot.mode);
         return Ok(());
     }
 
@@ -714,7 +714,7 @@ async fn handle_key(
     // (e.g., nested henkan with capital letters). Escape and restore insert mode.
     // Skip if we intentionally entered command mode (PENDING == CommandLine).
     if snapshot.mode.starts_with('c') && PENDING.load() != PendingState::CommandLine {
-        eprintln!(
+        log::warn!(
             "[NVIM] Unexpected command-line mode ({}), escaping",
             snapshot.mode
         );
@@ -755,7 +755,7 @@ async fn query_snapshot(
         cursor_begin
     };
 
-    eprintln!(
+    log::debug!(
         "[NVIM] snapshot: preedit={:?}, cursor={}..{}, mode={}, blocking={}, visual={:?}..{:?}",
         snapshot.preedit, cursor_begin, cursor_end, snapshot.mode, snapshot.blocking,
         snapshot.visual_begin, snapshot.visual_end

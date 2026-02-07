@@ -145,7 +145,7 @@ pub fn create_shm_pool(
     };
 
     if fd < 0 {
-        eprintln!("[SHM] Failed to create memfd for {}", name);
+        log::error!("[SHM] Failed to create memfd for {}", name);
         return None;
     }
 
@@ -153,7 +153,7 @@ pub fn create_shm_pool(
 
     // Set file size
     if file.set_len(size as u64).is_err() {
-        eprintln!("[SHM] Failed to set memfd size for {}", name);
+        log::error!("[SHM] Failed to set memfd size for {}", name);
         return None;
     }
 
@@ -229,7 +229,7 @@ fn load_japanese_font() -> Option<Font> {
         }
     }
 
-    eprintln!("[FONT] Loaded {} font faces", db.faces().count());
+    log::info!("[FONT] Loaded {} font faces", db.faces().count());
 
     // Preferred fonts for Japanese text
     let preferred_families = [
@@ -257,7 +257,7 @@ fn load_japanese_font() -> Option<Font> {
         if let Some(id) = db.query(&query)
             && let Some(face) = db.face(id)
         {
-            eprintln!("[FONT] Found font: {} ({})", family, face.post_script_name);
+            log::debug!("[FONT] Found font: {} ({})", family, face.post_script_name);
 
             // Load the font data
             if let Some(font_data) = db.face_source(id) {
@@ -266,21 +266,21 @@ fn load_japanese_font() -> Option<Font> {
                         if let Ok(data) = std::fs::read(path)
                             && let Ok(font) = Font::from_bytes(data, FontSettings::default())
                         {
-                            eprintln!("[FONT] Loaded: {}", path.display());
+                            log::debug!("[FONT] Loaded: {}", path.display());
                             return Some(font);
                         }
                     }
                     fontdb::Source::Binary(data) => {
                         let bytes: Vec<u8> = data.as_ref().as_ref().to_vec();
                         if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
-                            eprintln!("[FONT] Loaded from memory");
+                            log::debug!("[FONT] Loaded from memory");
                             return Some(font);
                         }
                     }
                     fontdb::Source::SharedFile(_, data) => {
                         let bytes: Vec<u8> = data.as_ref().as_ref().to_vec();
                         if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
-                            eprintln!("[FONT] Loaded from memory");
+                            log::debug!("[FONT] Loaded from memory");
                             return Some(font);
                         }
                     }
@@ -289,6 +289,6 @@ fn load_japanese_font() -> Option<Font> {
         }
     }
 
-    eprintln!("[FONT] Warning: No Japanese font found, candidate window disabled");
+    log::warn!("[FONT] No Japanese font found, candidate window disabled");
     None
 }

@@ -29,12 +29,14 @@ use state::{ImeState, KeyRepeatState, KeyboardState, KeypressState, WaylandState
 use ui::{TextRenderer, UnifiedPopup};
 
 fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     // Load configuration
     let config = config::Config::load();
 
     // Connect to Wayland display
     let conn = Connection::connect_to_env()?;
-    eprintln!("Connected to Wayland display");
+    log::info!("Connected to Wayland display");
 
     // Initialize registry and get globals
     let (globals, event_queue) = registry_queue_init::<State>(&conn)?;
@@ -44,7 +46,7 @@ fn main() -> anyhow::Result<()> {
     let input_method_manager: zwp_input_method_manager_v2::ZwpInputMethodManagerV2 = globals
         .bind(&qh, 1..=1, ())
         .expect("zwp_input_method_manager_v2 not available - is this a wlroots compositor?");
-    eprintln!("Bound zwp_input_method_manager_v2");
+    log::info!("Bound zwp_input_method_manager_v2");
 
     // Get the seat (assuming single seat)
     let seat: wayland_client::protocol::wl_seat::WlSeat =
@@ -59,7 +61,7 @@ fn main() -> anyhow::Result<()> {
 
     // Create input method for this seat
     let input_method = input_method_manager.get_input_method(&seat, &qh, ());
-    eprintln!("Created zwp_input_method_v2");
+    log::info!("Created zwp_input_method_v2");
 
     // Create virtual keyboard for clearing stuck modifier state
     let virtual_keyboard = match globals
@@ -67,11 +69,11 @@ fn main() -> anyhow::Result<()> {
     {
         Ok(manager) => {
             let vk = manager.create_virtual_keyboard(&seat, &qh, ());
-            eprintln!("Created zwp_virtual_keyboard_v1");
+            log::info!("Created zwp_virtual_keyboard_v1");
             Some(vk)
         }
         Err(e) => {
-            eprintln!("zwp_virtual_keyboard_manager_v1 not available: {} (modifier clearing disabled)", e);
+            log::warn!("zwp_virtual_keyboard_manager_v1 not available: {} (modifier clearing disabled)", e);
             None
         }
     };
@@ -79,11 +81,11 @@ fn main() -> anyhow::Result<()> {
     // Spawn Neovim backend
     let nvim = match neovim::spawn_neovim(config.clone()) {
         Ok(handle) => {
-            eprintln!("Neovim backend spawned");
+            log::info!("Neovim backend spawned");
             Some(handle)
         }
         Err(e) => {
-            eprintln!("Failed to spawn Neovim: {} (continuing without backend)", e);
+            log::warn!("Failed to spawn Neovim: {} (continuing without backend)", e);
             None
         }
     };
@@ -91,7 +93,7 @@ fn main() -> anyhow::Result<()> {
     // Try to create text renderer for unified popup window
     let text_renderer = TextRenderer::new(16.0);
     if text_renderer.is_none() {
-        eprintln!("Warning: Font not available, popup window disabled");
+        log::warn!("Font not available, popup window disabled");
     }
 
     // Create unified popup window using input method popup surface
@@ -99,11 +101,11 @@ fn main() -> anyhow::Result<()> {
     let popup = if let Some(renderer) = text_renderer {
         match UnifiedPopup::new(&compositor, &input_method, &shm, &qh, renderer) {
             Some(win) => {
-                eprintln!("Unified popup window created (using input popup surface)");
+                log::info!("Unified popup window created (using input popup surface)");
                 Some(win)
             }
             None => {
-                eprintln!("Failed to create unified popup window");
+                log::warn!("Failed to create unified popup window");
                 None
             }
         }
@@ -145,7 +147,7 @@ fn main() -> anyhow::Result<()> {
     event_loop
         .handle()
         .insert_source(exit_signals, move |_, _, _| {
-            eprintln!("\nReceived signal, exiting...");
+            log::info!("Received signal, exiting...");
             if let Some(ref signal) = loop_signal {
                 signal.stop();
             }
@@ -208,8 +210,8 @@ fn main() -> anyhow::Result<()> {
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    eprintln!("Entering event loop... (Ctrl+C to exit)");
-    eprintln!("Focus a text input field to activate the IME");
+    log::info!("Entering event loop... (Ctrl+C to exit)");
+    log::info!("Focus a text input field to activate the IME");
 
     // Run the event loop
     event_loop.run(None, &mut state, |state| {
@@ -246,7 +248,7 @@ fn main() -> anyhow::Result<()> {
         window.destroy();
     }
 
-    eprintln!("Goodbye!");
+    log::info!("Goodbye!");
 
     // Force clean exit to avoid any stuck keyboard state
     std::process::exit(0);

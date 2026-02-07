@@ -2,6 +2,11 @@
 name = "custom-ime"
 version = "0.1.0"
 edition = "2024"
+description = "A custom Input Method Editor for Linux Wayland with Neovim backend"
+license = "MIT"
+readme = "README.md"
+keywords = ["wayland", "ime", "input-method", "neovim", "japanese"]
+categories = ["text-editors"]
 
 [dependencies]
 # Wayland core
@@ -45,3 +50,7 @@ memmap2 = "0.9"
 
 # Signal handling
 signal-hook = "0.3"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"

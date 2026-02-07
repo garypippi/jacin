@@ -7,20 +7,20 @@ use crate::State;
 impl State {
     pub(crate) fn handle_ime_toggle(&mut self) {
         let was_enabled = self.ime.is_enabled();
-        eprintln!("[IME] Toggle: was_enabled = {}", was_enabled);
+        log::info!("[IME] Toggle: was_enabled = {}", was_enabled);
         self.reactivation_count = 0;
 
         if !was_enabled {
             // Enable IME - grab keyboard, skkeleton toggle will be sent after keymap loads
             if self.wayland.active && self.wayland.keyboard_grab.is_none() {
-                eprintln!("[IME] Grabbing keyboard");
+                log::debug!("[IME] Grabbing keyboard");
                 self.wayland.grab_keyboard();
                 self.keyboard.pending_keymap = true;
                 self.ime.start_enabling(true); // Will enable skkeleton after keymap
             }
         } else {
             // Disable IME - commit preedit text, release keyboard, disable skkeleton
-            eprintln!("[IME] Releasing keyboard");
+            log::debug!("[IME] Releasing keyboard");
             // Cancel any active key repeat
             self.repeat.cancel();
             // Commit any pending preedit text BEFORE releasing keyboard
@@ -48,10 +48,10 @@ impl State {
     pub(crate) fn handle_nvim_message(&mut self, msg: FromNeovim) {
         match msg {
             FromNeovim::Ready => {
-                eprintln!("[NVIM] Backend ready!");
+                log::info!("[NVIM] Backend ready!");
             }
             FromNeovim::Preedit(info) => {
-                eprintln!(
+                log::debug!(
                     "[NVIM] Preedit: {:?}, cursor: {}..{}, mode: {}",
                     info.text, info.cursor_begin, info.cursor_end, info.mode
                 );
@@ -60,7 +60,7 @@ impl State {
                 self.update_preedit();
             }
             FromNeovim::Commit(text) => {
-                eprintln!("[NVIM] Commit: {:?}", text);
+                log::debug!("[NVIM] Commit: {:?}", text);
                 self.ime.clear_preedit();
                 self.ime.clear_candidates();
                 self.wayland.commit_string(&text);
@@ -80,14 +80,14 @@ impl State {
                 }
             }
             FromNeovim::DeleteSurrounding { before, after } => {
-                eprintln!(
+                log::debug!(
                     "[NVIM] DeleteSurrounding: before={}, after={}",
                     before, after
                 );
                 self.wayland.delete_surrounding(before, after);
             }
             FromNeovim::Candidates(info) => {
-                eprintln!("[NVIM] Candidates: {:?}, selected={}", info.candidates, info.selected);
+                log::debug!("[NVIM] Candidates: {:?}, selected={}", info.candidates, info.selected);
                 if info.candidates.is_empty() {
                     self.hide_candidates();
                 } else {
@@ -96,7 +96,7 @@ impl State {
                 }
             }
             FromNeovim::VisualRange(selection) => {
-                eprintln!("[NVIM] VisualRange: {:?}", selection);
+                log::debug!("[NVIM] VisualRange: {:?}", selection);
                 self.visual_display = selection;
                 self.update_popup();
             }
@@ -104,14 +104,14 @@ impl State {
                 // Acknowledgment only — unblocks wait_for_nvim_response
             }
             FromNeovim::CmdlineUpdate(text) => {
-                eprintln!("[NVIM] CmdlineUpdate: {:?}", text);
+                log::debug!("[NVIM] CmdlineUpdate: {:?}", text);
                 self.keypress.accumulated = text;
                 self.keypress.visible = true;
                 self.keypress.set_vim_mode("c");
                 self.update_popup();
             }
             FromNeovim::CmdlineCommand(action) => {
-                eprintln!("[NVIM] CmdlineCommand: {:?}", action);
+                log::debug!("[NVIM] CmdlineCommand: {:?}", action);
                 match action {
                     CmdlineAction::Write => {
                         // Commit preedit, keep enabled
@@ -170,7 +170,7 @@ impl State {
                 }
             }
             FromNeovim::CmdlineCancelled => {
-                eprintln!("[NVIM] CmdlineCancelled");
+                log::debug!("[NVIM] CmdlineCancelled");
                 self.keypress.clear();
                 self.update_popup();
             }
@@ -188,12 +188,12 @@ impl State {
         {
             self.wayland
                 .set_preedit(&self.ime.preedit, cursor_begin, cursor_end);
-            eprintln!(
+            log::debug!(
                 "[PREEDIT] updated: {:?}, cursor: {}..{}",
                 self.ime.preedit, cursor_begin, cursor_end
             );
         } else {
-            eprintln!(
+            log::debug!(
                 "[PREEDIT] skipped (active={}, enabled={}): {:?}",
                 self.wayland.active,
                 self.ime.is_enabled(),
