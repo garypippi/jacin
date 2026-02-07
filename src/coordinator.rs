@@ -144,6 +144,8 @@ impl State {
                     }
                     CmdlineAction::Quit => {
                         // Discard preedit + disable
+                        // Clear compositor preedit (discard without committing to app)
+                        self.wayland.set_preedit("", 0, 0);
                         self.ime.clear_preedit();
                         self.ime.clear_candidates();
                         self.keypress.clear();
