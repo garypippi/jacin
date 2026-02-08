@@ -61,6 +61,9 @@ pkill -SIGUSR1 jacin
 ```sh
 RUST_LOG=debug ./target/release/jacin
 ```
+## Limitations
+
+Preedit is single-line only. Multiline operations (`yy`, `dd`, `cc`, `p`, `P`) are not supported.
 
 ## Security Warning
 
