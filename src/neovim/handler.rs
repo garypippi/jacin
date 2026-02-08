@@ -138,6 +138,12 @@ impl Handler for NvimHandler {
                     log::debug!("[NVIM] Cmdline left ({})", get_str("type").unwrap_or_default());
                     let _ = self.tx.send(FromNeovim::CmdlineCancelled);
                 }
+                Some("message") => {
+                    if let Some(text) = get_str("text") {
+                        log::debug!("[NVIM] Cmdline message: {:?}", text);
+                        let _ = self.tx.send(FromNeovim::CmdlineMessage(text));
+                    }
+                }
                 other => {
                     log::warn!("[NVIM] Unknown cmdline type: {:?}", other);
                 }
@@ -390,13 +396,23 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
                 if vim.v.event.abort then
                     vim.rpcnotify(0, 'ime_cmdline', { type = 'cancelled' })
                 else
+                    -- Snapshot last message before command executes
+                    local old_msg = vim.fn.execute('1messages')
                     vim.rpcnotify(0, 'ime_cmdline', { type = 'executed' })
-                    if vim.g.ime_auto_startinsert then
-                        vim.schedule(function()
+                    vim.schedule(function()
+                        -- Check if command produced a new message
+                        local new_msg = vim.fn.execute('1messages')
+                        if new_msg ~= old_msg and new_msg ~= '' then
+                            local text = vim.trim(new_msg)
+                            if text ~= '' then
+                                vim.rpcnotify(0, 'ime_cmdline', { type = 'message', text = text })
+                            end
+                        end
+                        if vim.g.ime_auto_startinsert then
                             vim.cmd('startinsert')
                             vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
-                        end)
-                    end
+                        end
+                    end)
                 end
             end,
         })

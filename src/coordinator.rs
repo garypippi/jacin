@@ -123,6 +123,13 @@ impl State {
                 self.keypress.clear();
                 self.update_popup();
             }
+            FromNeovim::CmdlineMessage(text) => {
+                log::debug!("[NVIM] CmdlineMessage: {:?}", text);
+                self.keypress.accumulated = text;
+                self.keypress.visible = true;
+                self.keypress.last_shown = Some(std::time::Instant::now());
+                self.update_popup();
+            }
             FromNeovim::AutoCommit(text) => {
                 log::debug!("[NVIM] AutoCommit: {:?}", text);
                 self.wayland.commit_string(&text);

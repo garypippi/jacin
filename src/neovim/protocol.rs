@@ -122,6 +122,8 @@ pub enum FromNeovim {
     CmdlineCancelled,
     /// Text auto-committed due to line addition (context break)
     AutoCommit(String),
+    /// Command output message (e.g., from :s/foo/bar/g)
+    CmdlineMessage(String),
     /// Neovim process exited (e.g., :q)
     NvimExited,
 }
