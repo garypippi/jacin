@@ -37,14 +37,12 @@ impl Default for Completion {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Keybinds {
-    pub toggle: String,
     pub commit: String,
 }
 
 impl Default for Keybinds {
     fn default() -> Self {
         Self {
-            toggle: "<A-`>".to_string(),
             commit: "<C-CR>".to_string(),
         }
     }
