@@ -141,6 +141,8 @@ pub struct PreeditInfo {
     pub cursor_end: usize,
     /// Current vim mode (i, n, v, no, etc.)
     pub mode: String,
+    /// Currently recording macro register ("" when not recording)
+    pub recording: String,
 }
 
 /// Candidate information
@@ -154,12 +156,13 @@ pub struct CandidateInfo {
 
 impl PreeditInfo {
     /// Create new preedit info
-    pub fn new(text: String, cursor_begin: usize, cursor_end: usize, mode: String) -> Self {
+    pub fn new(text: String, cursor_begin: usize, cursor_end: usize, mode: String, recording: String) -> Self {
         Self {
             text,
             cursor_begin,
             cursor_end,
             mode,
+            recording,
         }
     }
 
@@ -205,5 +208,8 @@ pub struct Snapshot {
     /// Visual selection end column (1-indexed byte offset, from Lua, exclusive)
     #[serde(default)]
     pub visual_end: Option<usize>,
+    /// Currently recording macro register ("" when not recording)
+    #[serde(default)]
+    pub recording: String,
 }
 

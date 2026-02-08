@@ -52,6 +52,7 @@ impl State {
             // Clear preedit and keypress display
             self.ime.clear_preedit();
             self.keypress.clear();
+            self.keypress.recording.clear();
             self.hide_popup();
             self.ime.disable();
         }
@@ -69,6 +70,7 @@ impl State {
                 );
                 self.ime.set_preedit(info.text, info.cursor_begin, info.cursor_end);
                 self.keypress.set_vim_mode(&info.mode);
+                self.keypress.recording = info.recording;
                 self.update_preedit();
             }
             FromNeovim::Commit(text) => {
@@ -146,6 +148,7 @@ impl State {
                 self.ime.clear_preedit();
                 self.ime.clear_candidates();
                 self.keypress.clear();
+                self.keypress.recording.clear();
                 self.hide_popup();
                 self.wayland.release_keyboard();
                 self.keyboard.reset_modifiers();
@@ -198,6 +201,7 @@ impl State {
             selected: self.ime.selected_candidate,
             visual_selection: self.visual_display.clone(),
             ime_enabled: self.ime.is_enabled(),
+            recording: self.keypress.recording.clone(),
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();

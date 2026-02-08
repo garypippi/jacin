@@ -22,6 +22,8 @@ pub struct KeypressState {
     pub vim_mode: String,
     /// Time when keypress display was last shown/updated
     pub last_shown: Option<Instant>,
+    /// Currently recording macro register ("" when not recording)
+    pub recording: String,
 }
 
 impl KeypressState {
@@ -33,6 +35,7 @@ impl KeypressState {
             pending_type: PendingState::None,
             vim_mode: String::new(),
             last_shown: None,
+            recording: String::new(),
         }
     }
 
@@ -49,6 +52,8 @@ impl KeypressState {
         self.visible = false;
         self.pending_type = PendingState::None;
         self.last_shown = None;
+        // NOTE: recording is NOT cleared here — it's driven by Neovim snapshots,
+        // not by keypress display lifecycle. Cleared explicitly on disable/exit.
     }
 
     /// Set the pending type

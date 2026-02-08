@@ -71,6 +71,7 @@ impl Handler for NvimHandler {
                         cursor_begin,
                         cursor_end,
                         snapshot.mode,
+                        snapshot.recording,
                     )));
 
                     let _ = self.tx.send(FromNeovim::VisualRange(visual));
@@ -255,6 +256,7 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
                 mode = mode.mode,
                 blocking = mode.blocking,
                 char_width = 0,
+                recording = vim.fn.reg_recording(),
             }
 
             -- Normal/visual mode: character width under cursor
@@ -814,6 +816,7 @@ async fn query_snapshot(
         cursor_begin,
         cursor_end,
         snapshot.mode.clone(),
+        snapshot.recording.clone(),
     )));
 
     let visual = snapshot_to_visual_selection(&snapshot);
@@ -836,6 +839,7 @@ fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
         char_width: 0,
         visual_begin: None,
         visual_end: None,
+        recording: String::new(),
     };
 
     for (k, v) in map {
@@ -865,6 +869,9 @@ fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
                 if let Some(n) = v.as_u64() {
                     snapshot.visual_end = Some(n as usize);
                 }
+            }
+            "recording" => {
+                snapshot.recording = v.as_str().unwrap_or("").to_string();
             }
             _ => {}
         }

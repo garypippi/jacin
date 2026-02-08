@@ -44,6 +44,7 @@ const MODE_NORMAL_COLOR: (u8, u8, u8, u8) = (97, 175, 239, 255); // Blue
 const MODE_VISUAL_COLOR: (u8, u8, u8, u8) = (198, 120, 221, 255); // Purple
 const MODE_OP_COLOR: (u8, u8, u8, u8) = (229, 192, 123, 255); // Yellow
 const MODE_CMD_COLOR: (u8, u8, u8, u8) = (224, 108, 117, 255); // Red
+const MODE_RECORDING_COLOR: (u8, u8, u8, u8) = (224, 108, 117, 255); // Red
 
 /// Pool size: 600×450×4×2 bytes for double buffering (~2MB)
 const POOL_SIZE: usize = 600 * 450 * 4 * 2;
@@ -80,6 +81,7 @@ pub struct PopupContent {
     pub selected: usize,
     pub visual_selection: Option<VisualSelection>,
     pub ime_enabled: bool,
+    pub recording: String,
 }
 
 impl PopupContent {
@@ -212,14 +214,21 @@ impl UnifiedPopup {
         let mut y = PADDING;
         let mut max_width: f32 = 0.0;
 
-        // Icon area width: PADDING + icon_text + gap + mode_label + gap + separator + gap
+        // Icon area width: PADDING + icon_text + gap + mode_label + [gap + recording] + gap + separator + gap
         let icon_text_width = self.renderer.measure_text(ICON_TEXT);
         let (mode_text, _) = mode_label(&content.vim_mode);
         let mode_text_width = self.renderer.measure_text(mode_text);
+        let recording_width = if !content.recording.is_empty() {
+            let rec_label = format!("REC @{}", content.recording);
+            MODE_GAP + self.renderer.measure_text(&rec_label)
+        } else {
+            0.0
+        };
         let icon_area_width = PADDING
             + icon_text_width
             + MODE_GAP
             + mode_text_width
+            + recording_width
             + ICON_SEPARATOR_GAP
             + ICON_SEPARATOR_WIDTH
             + ICON_SEPARATOR_GAP;
@@ -424,9 +433,25 @@ impl UnifiedPopup {
         self.renderer
             .draw_text(pixmap, mode_text, mode_x, y_baseline, mode_color);
 
-        // Draw vertical separator
+        // Draw recording indicator if active
         let mode_text_width = self.renderer.measure_text(mode_text);
-        let sep_x = mode_x + mode_text_width + ICON_SEPARATOR_GAP;
+        let mut after_mode_x = mode_x + mode_text_width;
+        if !content.recording.is_empty() {
+            let rec_label = format!("REC @{}", content.recording);
+            let rec_color = Color::from_rgba8(
+                MODE_RECORDING_COLOR.0,
+                MODE_RECORDING_COLOR.1,
+                MODE_RECORDING_COLOR.2,
+                MODE_RECORDING_COLOR.3,
+            );
+            let rec_x = after_mode_x + MODE_GAP;
+            self.renderer
+                .draw_text(pixmap, &rec_label, rec_x, y_baseline, rec_color);
+            after_mode_x = rec_x + self.renderer.measure_text(&rec_label);
+        }
+
+        // Draw vertical separator
+        let sep_x = after_mode_x + ICON_SEPARATOR_GAP;
         if let Some(rect) =
             Rect::from_xywh(sep_x, layout.preedit_y, ICON_SEPARATOR_WIDTH, line_height)
         {
