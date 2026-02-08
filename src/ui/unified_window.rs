@@ -36,9 +36,37 @@ const MAX_PREEDIT_WIDTH: f32 = 400.0;
 const ICON_TEXT: &str = "邪";
 const ICON_SEPARATOR_WIDTH: f32 = 1.0;
 const ICON_SEPARATOR_GAP: f32 = 6.0;
+const MODE_GAP: f32 = 4.0;
+
+// Mode indicator colors
+const MODE_INSERT_COLOR: (u8, u8, u8, u8) = (152, 195, 121, 255); // Green
+const MODE_NORMAL_COLOR: (u8, u8, u8, u8) = (97, 175, 239, 255); // Blue
+const MODE_VISUAL_COLOR: (u8, u8, u8, u8) = (198, 120, 221, 255); // Purple
+const MODE_OP_COLOR: (u8, u8, u8, u8) = (229, 192, 123, 255); // Yellow
+const MODE_CMD_COLOR: (u8, u8, u8, u8) = (224, 108, 117, 255); // Red
 
 /// Pool size: 600×450×4×2 bytes for double buffering (~2MB)
 const POOL_SIZE: usize = 600 * 450 * 4 * 2;
+
+/// Get mode label text and color from vim_mode string
+fn mode_label(vim_mode: &str) -> (&'static str, (u8, u8, u8, u8)) {
+    if vim_mode.starts_with("no") {
+        ("OP", MODE_OP_COLOR)
+    } else {
+        match vim_mode {
+            "n" => ("NOR", MODE_NORMAL_COLOR),
+            "v" | "V" | "\x16" => ("VIS", MODE_VISUAL_COLOR),
+            "c" => ("CMD", MODE_CMD_COLOR),
+            _ => {
+                if vim_mode.starts_with('v') || vim_mode.starts_with('V') {
+                    ("VIS", MODE_VISUAL_COLOR)
+                } else {
+                    ("INS", MODE_INSERT_COLOR)
+                }
+            }
+        }
+    }
+}
 
 /// Content to display in the unified popup
 #[derive(Default, Clone)]
@@ -184,10 +212,17 @@ impl UnifiedPopup {
         let mut y = PADDING;
         let mut max_width: f32 = 0.0;
 
-        // Icon area width: PADDING + icon_text + gap + separator + gap
+        // Icon area width: PADDING + icon_text + gap + mode_label + gap + separator + gap
         let icon_text_width = self.renderer.measure_text(ICON_TEXT);
-        let icon_area_width =
-            PADDING + icon_text_width + ICON_SEPARATOR_GAP + ICON_SEPARATOR_WIDTH + ICON_SEPARATOR_GAP;
+        let (mode_text, _) = mode_label(&content.vim_mode);
+        let mode_text_width = self.renderer.measure_text(mode_text);
+        let icon_area_width = PADDING
+            + icon_text_width
+            + MODE_GAP
+            + mode_text_width
+            + ICON_SEPARATOR_GAP
+            + ICON_SEPARATOR_WIDTH
+            + ICON_SEPARATOR_GAP;
 
         // First row is always present (icon + optional preedit)
         let preedit_y = y;
@@ -291,7 +326,7 @@ impl UnifiedPopup {
         draw_border(&mut pixmap, self.width, self.height, border_color);
 
         // Render sections
-        self.render_icon(&mut pixmap, layout);
+        self.render_icon(&mut pixmap, content, layout);
 
         if layout.has_preedit {
             self.render_preedit_section(&mut pixmap, content, layout, layout.icon_area_width);
@@ -368,8 +403,8 @@ impl UnifiedPopup {
         self.current_buffer = buffer_idx;
     }
 
-    /// Render the "邪" icon and vertical separator in the first row
-    fn render_icon(&mut self, pixmap: &mut Pixmap, layout: &Layout) {
+    /// Render the "邪" icon, mode label, and vertical separator in the first row
+    fn render_icon(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
         let text_color = Color::from_rgba8(TEXT_COLOR.0, TEXT_COLOR.1, TEXT_COLOR.2, TEXT_COLOR.3);
         let border_color =
             Color::from_rgba8(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2, BORDER_COLOR.3);
@@ -380,9 +415,18 @@ impl UnifiedPopup {
         self.renderer
             .draw_text(pixmap, ICON_TEXT, PADDING, y_baseline, text_color);
 
-        // Draw vertical separator
+        // Draw mode label
         let icon_text_width = self.renderer.measure_text(ICON_TEXT);
-        let sep_x = PADDING + icon_text_width + ICON_SEPARATOR_GAP;
+        let (mode_text, mode_color) = mode_label(&content.vim_mode);
+        let mode_color =
+            Color::from_rgba8(mode_color.0, mode_color.1, mode_color.2, mode_color.3);
+        let mode_x = PADDING + icon_text_width + MODE_GAP;
+        self.renderer
+            .draw_text(pixmap, mode_text, mode_x, y_baseline, mode_color);
+
+        // Draw vertical separator
+        let mode_text_width = self.renderer.measure_text(mode_text);
+        let sep_x = mode_x + mode_text_width + ICON_SEPARATOR_GAP;
         if let Some(rect) =
             Rect::from_xywh(sep_x, layout.preedit_y, ICON_SEPARATOR_WIDTH, line_height)
         {
