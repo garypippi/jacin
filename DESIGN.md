@@ -338,7 +338,7 @@ Examples of simultaneously valid states:
                                +---------+
 ```
 
-### Axis 4: Macro State (design proposal -- not yet implemented)
+### Axis 4: Macro State (recording display implemented, playback delegated to Neovim)
 
 ```
                   q + register
@@ -356,6 +356,13 @@ Examples of simultaneously valid states:
      |   remaining} |
      +--------------+
 
+  Current implementation:
+    - Recording state is observed from Neovim (collect_snapshot includes recording info)
+    - Popup displays "REC @{register}" when recording is active
+    - q + register key is handled by getchar mechanism (PendingState::Getchar)
+    - Recording/playback logic is fully delegated to Neovim
+    - IME only observes and displays the recording state
+
   Orthogonality:
     Recording is fully orthogonal to VimMode and PendingState
     (Normal: qa -> Insert: type text -> Normal: q -- spans all modes)
@@ -363,22 +370,17 @@ Examples of simultaneously valid states:
     Playing is orthogonal to all others, with special constraints:
     - Nested playback (@a containing @b) is allowed (recursive)
     - Recording during playback (qa inside @b) should be forbidden (Neovim errors on this too)
-
-  Neovim delegation vs IME management:
-    The existing getchar mechanism handles q->register naturally.
-    @a playback can be fully delegated to Neovim (though intermediate preedit update
-    frequency needs consideration).
 ```
 
 ### Simultaneous State Validity Matrix
 
 ```
-                    | VimMode | PendingState | Skkeleton | Macro     |
---------------------+---------+--------------+-----------+-----------+
-ImeMode::Disabled   |   N/A   |     N/A      |    N/A    |    N/A    |
-ImeMode::Enabling   |   N/A   |     N/A      |    N/A    |    N/A    |
-ImeMode::Enabled    |  valid  |    valid     |   valid   | valid(TBD)|
-ImeMode::Disabling  |  frozen |    frozen    |   frozen  |  frozen   |
+                    | VimMode | PendingState | Skkeleton | Macro        |
+--------------------+---------+--------------+-----------+--------------+
+ImeMode::Disabled   |   N/A   |     N/A      |    N/A    |    N/A       |
+ImeMode::Enabling   |   N/A   |     N/A      |    N/A    |    N/A       |
+ImeMode::Enabled    |  valid  |    valid     |   valid   | valid(display)|
+ImeMode::Disabling  |  frozen |    frozen    |   frozen  |  frozen      |
 
 VimMode:            |         |              |           |           |
   Insert            |    -    | None/InsReg/ | Active/   | Rec/Play/ |
@@ -573,18 +575,19 @@ Adding macro state (3) would expand this to 576.
 **Defense principles:**
 
 1. **Add orthogonal axes, but minimize cross-axis interactions**
-   - Macros can be delegated to Neovim -- IME side only needs a "recording display flag"
-   - If Neovim's `get_mode()` response includes recording info, no new state axis is needed in IME
+   - Macros are delegated to Neovim -- IME observes recording state via `collect_snapshot()` and displays "REC @{register}"
+   - No new state axis needed in IME; recording info comes from Neovim's response
 
 2. **Observe Neovim's state for display, but do not replicate it**
    - VimMode is overwritten from `get_mode()` result every time (correct design)
    - PendingState is similarly derived from Neovim responses
    - Maintaining independent state transitions on IME side that mirror Neovim will inevitably diverge
 
-3. **Intentionally do not model command mode**
-   - The current "detect and auto-recover" approach is the right call
-   - Mixing command-line input into the preedit model would cause complexity explosion
-   - If `:` commands are needed in the future, add a **separate UI section (command line)** and isolate as VimMode::Command
+3. **Command mode is handled via PendingState, not VimMode**
+   - `PendingState::CommandLine` tracks intentional command mode (`:` key)
+   - Neovim handles command-line editing; IME intercepts at execution via `cnoremap <CR>`
+   - `:w` commits (keep enabled), `:wq`/`:x` commit+disable, `:q`/`:q!` discard+disable
+   - Unintentional command mode (skkeleton nested henkan) is auto-recovered via `<C-c>` + `startinsert`
 
 4. **Express forbidden states in the type system**
    - `VimMode` being nested inside `ImeMode::Enabled` is good design

@@ -14,6 +14,7 @@ A custom Input Method Editor for Linux Wayland (Hyprland/wlroots), with Neovim a
 ```sh
 cargo build          # Build
 cargo run            # Run (requires Hyprland)
+cargo run -- --clean # Run with vanilla Neovim (no user config/plugins)
 cargo clippy         # Lint
 cargo fmt            # Format
 ```
@@ -47,7 +48,7 @@ src/
 
 ## Key Components
 
-- **Config module**: TOML config at `~/.config/jacin/config.toml` with configurable keybinds (toggle, commit)
+- **Config module**: TOML config at `~/.config/jacin/config.toml` with configurable keybinds (toggle, commit), completion adapter, and behavior options (auto_startinsert). `--clean` flag for vanilla Neovim.
 - **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `KeyRepeatState`, `ImeState`, `KeypressState`
 - **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
@@ -81,10 +82,16 @@ Working:
 - Command mode: `:w` commits preedit (keep enabled), `:wq`/`:x` commit+disable, `:q`/`:q!` discard+disable, other commands pass through to Neovim
 
 - Modifier clearing: uses zwp_virtual_keyboard_v1 to clear stuck modifiers (e.g., Alt from toggle keybind) on grab start and release
+- Color-coded Vim mode indicator in popup (INS=green, NOR=blue, VIS=purple, OP=yellow, CMD=red)
+- Macro recording status display (REC @reg) in popup
+- Auto-commit preedit on line addition (CR, o, O in normal mode)
+- Command output messages shown in popup after execution
+- `--clean` flag: start with vanilla Neovim (no user config/plugins)
+- `auto_startinsert` config: optionally start IME in normal mode instead of insert mode
 
 Known Issues:
 - Multiline operations (yy, dd, cc, p, P) not yet supported (single-line preedit only)
 
 ## Architecture
 
-See `IDEA.md` for design rationale and future ideas.
+See `DESIGN.md` for detailed design documentation.

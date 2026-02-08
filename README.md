@@ -23,10 +23,13 @@ Neovim をバックエンドとした、Linux Wayland 向けカスタム IME。
 - IME 内で Vim キーバインド: ノーマルモード、ビジュアルモード、コマンドモード、テキストオブジェクト、レジスタ
 - nvim-cmp による候補選択（Ctrl+N/P で移動、Ctrl+K で確定）
 - プリエディット表示・カーソル表示・候補一覧を含むポップアップウィンドウ
+- 色分け Vim モード表示（INS=緑, NOR=青, VIS=紫, OP=黄, CMD=赤）
+- マクロ記録状態表示（REC @reg）
 - デフォルトはパススルー（IME 有効時のみキーボードをグラブ）
 - コンポジタの rate/delay に基づくキーリピート
 - トグルキー・確定キーの設定変更が可能
 - `zwp_virtual_keyboard_v1` によるモディファイアクリア（トグルキーバインドで Alt が固着する問題を修正）
+- `--clean` フラグ: ユーザ設定・プラグインなしの素の Neovim で起動
 
 ## 必要なもの
 
@@ -47,7 +50,8 @@ cargo build --release
 
 1. IME を起動（Wayland コンポジタに接続します）:
    ```sh
-   ./target/release/jacin
+   ./target/release/jacin          # 通常起動
+   ./target/release/jacin --clean  # 素の Neovim で起動（ユーザ設定・プラグインなし）
    ```
 
 2. SIGUSR1 を送って IME のオン/オフを切り替え:
@@ -72,6 +76,12 @@ cargo build --release
 [keybinds]
 toggle = "<A-`>"    # トグルキー（Vim 記法、skkeleton に送信される）
 commit = "<C-CR>"   # 確定キー（Vim 記法）
+
+[behavior]
+auto_startinsert = false  # true: IME 有効時にインサートモードで開始
+
+[completion]
+adapter = "native"  # 補完アダプタ
 ```
 
 ## ログ
@@ -86,7 +96,7 @@ RUST_LOG=jacin=debug ./target/release/jacin  # このクレートのみ
 
 ## アーキテクチャ
 
-詳細は [DESIGN.md](DESIGN.md)（設計ドキュメント）と [IDEA.md](IDEA.md)（設計思想）を参照してください。
+詳細は [DESIGN.md](DESIGN.md)（設計ドキュメント）を参照してください。
 
 ## セキュリティに関する注意
 
