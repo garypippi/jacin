@@ -453,6 +453,49 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     )
     .await?;
 
+    // Wait for skkeleton's denops backend to become ready.
+    // denops#plugin#is_loaded returns 1 only after the dispatcher is registered,
+    // which requires a working denops server connection.
+    let ready = {
+        let mut ok = false;
+        for attempt in 1..=30 {
+            let result = nvim
+                .exec_lua(
+                    r#"
+                    local ok, loaded = pcall(vim.fn['denops#plugin#is_loaded'], 'skkeleton')
+                    return ok and (loaded == 1)
+                    "#,
+                    vec![],
+                )
+                .await;
+            match result {
+                Ok(val) if val.as_bool() == Some(true) => {
+                    log::info!("[NVIM] skkeleton ready (attempt {})", attempt);
+                    ok = true;
+                    break;
+                }
+                _ => {
+                    log::debug!(
+                        "[NVIM] skkeleton not ready (attempt {}/30), retrying in 1s...",
+                        attempt
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+        ok
+    };
+
+    if !ready {
+        log::warn!("[NVIM] skkeleton not ready after 30s — dumping Neovim messages:");
+        let messages = nvim.command_output("messages").await.unwrap_or_default();
+        for line in messages.lines() {
+            if !line.trim().is_empty() {
+                log::warn!("[NVIM:msg] {}", line);
+            }
+        }
+    }
+
     // Start in insert mode
     nvim.command("startinsert").await?;
 
@@ -554,6 +597,7 @@ async fn handle_key(
     if key == config.keybinds.toggle {
         log::debug!("[NVIM] Toggling skkeleton via Lua handler...");
         let _ = nvim.exec_lua("return ime_handle_toggle()", vec![]).await?;
+
         // feedkeys queued in Lua; skkeleton-handled autocmd will push snapshot.
         *last_mode = String::from("i");
         let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
