@@ -32,7 +32,10 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     // Load configuration
-    let config = config::Config::load();
+    let mut config = config::Config::load();
+    if std::env::args().any(|a| a == "--clean") {
+        config.clean = true;
+    }
 
     // Connect to Wayland display
     let conn = Connection::connect_to_env()?;

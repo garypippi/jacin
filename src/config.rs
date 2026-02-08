@@ -7,6 +7,8 @@ pub struct Config {
     pub keybinds: Keybinds,
     pub completion: Completion,
     pub behavior: Behavior,
+    #[serde(skip)]
+    pub clean: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

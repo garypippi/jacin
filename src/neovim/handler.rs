@@ -169,6 +169,9 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     // Start Neovim in embedded mode
     let mut cmd = Command::new("nvim");
     cmd.args(["--embed", "--headless"]);
+    if config.clean {
+        cmd.arg("--clean");
+    }
 
     let handler = NvimHandler { tx: tx.clone() };
     let (nvim, io_handler, _child) = new_child_cmd(&mut cmd, handler).await?;
