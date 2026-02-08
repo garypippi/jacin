@@ -728,6 +728,13 @@ async fn handle_key(
     // Insert mode fire-and-forget: autocmd will push snapshot via rpcnotify.
     // Exception: Escape changes mode but no insert-mode autocmd fires after it.
     if last_mode.as_str() == "i" && key != "<Esc>" && key != "<C-c>" {
+        // Some insert-mode keys trigger getchar-blocking state:
+        // <C-k> = digraph (waits for 2 chars), <C-v>/<C-q> = literal char input.
+        // Detect blocking to prevent subsequent keys from being consumed as arguments.
+        if matches!(key, "<C-k>" | "<C-v>" | "<C-q>") && is_blocked(nvim).await? {
+            PENDING.store(PendingState::Getchar);
+            log::debug!("[NVIM] Insert-mode key {} triggered blocking state", key);
+        }
         let _ = tx.send(FromNeovim::KeyProcessed);
         return Ok(());
     }
