@@ -42,7 +42,8 @@ pub fn keysym_to_vim(ctrl: bool, alt: bool, keysym: xkb::Keysym, utf8: &str) -> 
             return Some(format!("<A-{}>", key));
         }
         if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
-            return Some(format!("<A-{}>", utf8));
+            let escaped = utf8.replace('<', "lt");
+            return Some(format!("<A-{}>", escaped));
         }
         return None;
     }
@@ -69,7 +70,8 @@ pub fn keysym_to_vim(ctrl: bool, alt: bool, keysym: xkb::Keysym, utf8: &str) -> 
         _ => {
             // Printable characters
             if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
-                Some(utf8.to_string())
+                // Escape '<' as '<lt>' for nvim_input (bare '<' starts a key sequence)
+                Some(utf8.replace('<', "<lt>"))
             } else {
                 None
             }
