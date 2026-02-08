@@ -295,6 +295,8 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                     log::debug!("[IME] Sending skkeleton toggle");
                                     nvim.send_key(&state.config.keybinds.toggle);
                                 }
+                                // Show icon-only popup immediately
+                                state.update_popup();
                             } else if state.ime.is_fully_enabled() {
                                 // Re-activation after deactivate/activate cycle:
                                 // Neovim is in normal mode from <Esc>ggdG, restore insert mode
@@ -303,6 +305,8 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                     log::debug!("[IME] Restoring insert mode after re-activation");
                                     nvim.send_key("<Esc>i");
                                 }
+                                // Show icon-only popup immediately
+                                state.update_popup();
                             }
                         } else {
                             log::error!("Failed to parse keymap");

@@ -33,6 +33,10 @@ const NUMBER_WIDTH: f32 = 24.0;
 const SECTION_SEPARATOR_HEIGHT: f32 = 1.0;
 const MAX_PREEDIT_WIDTH: f32 = 400.0;
 
+const ICON_TEXT: &str = "邪";
+const ICON_SEPARATOR_WIDTH: f32 = 1.0;
+const ICON_SEPARATOR_GAP: f32 = 6.0;
+
 /// Pool size: 600×450×4×2 bytes for double buffering (~2MB)
 const POOL_SIZE: usize = 600 * 450 * 4 * 2;
 
@@ -47,11 +51,15 @@ pub struct PopupContent {
     pub candidates: Vec<String>,
     pub selected: usize,
     pub visual_selection: Option<VisualSelection>,
+    pub ime_enabled: bool,
 }
 
 impl PopupContent {
     pub fn is_empty(&self) -> bool {
-        self.preedit.is_empty() && self.keypress.is_empty() && self.candidates.is_empty()
+        !self.ime_enabled
+            && self.preedit.is_empty()
+            && self.keypress.is_empty()
+            && self.candidates.is_empty()
     }
 }
 
@@ -174,18 +182,26 @@ impl UnifiedPopup {
 
         let line_height = self.renderer.line_height();
         let mut y = PADDING;
-        let mut max_width: f32 = 200.0;
+        let mut max_width: f32 = 0.0;
 
-        // Preedit section (capped at MAX_PREEDIT_WIDTH)
-        let preedit_y = if has_preedit { y } else { 0.0 };
+        // Icon area width: PADDING + icon_text + gap + separator + gap
+        let icon_text_width = self.renderer.measure_text(ICON_TEXT);
+        let icon_area_width =
+            PADDING + icon_text_width + ICON_SEPARATOR_GAP + ICON_SEPARATOR_WIDTH + ICON_SEPARATOR_GAP;
+
+        // First row is always present (icon + optional preedit)
+        let preedit_y = y;
         if has_preedit {
             let text_width = self.renderer.measure_text(&content.preedit);
-            let preedit_width = (text_width + PADDING * 2.0 + 4.0).min(MAX_PREEDIT_WIDTH);
+            let preedit_width =
+                (icon_area_width + text_width + PADDING + 4.0).min(MAX_PREEDIT_WIDTH + icon_area_width);
             max_width = max_width.max(preedit_width);
-            y += line_height;
-            if has_keypress || has_candidates {
-                y += SECTION_SEPARATOR_HEIGHT;
-            }
+        }
+        // Minimum width: icon area + right padding
+        max_width = max_width.max(icon_area_width + PADDING);
+        y += line_height;
+        if has_keypress || has_candidates {
+            y += SECTION_SEPARATOR_HEIGHT;
         }
 
         // Keypress section
@@ -235,6 +251,7 @@ impl UnifiedPopup {
         Layout {
             width,
             height,
+            icon_area_width,
             has_preedit,
             has_keypress,
             has_candidates,
@@ -274,8 +291,29 @@ impl UnifiedPopup {
         draw_border(&mut pixmap, self.width, self.height, border_color);
 
         // Render sections
+        self.render_icon(&mut pixmap, layout);
+
         if layout.has_preedit {
-            self.render_preedit_section(&mut pixmap, content, layout);
+            self.render_preedit_section(&mut pixmap, content, layout, layout.icon_area_width);
+        }
+
+        // Draw separator below first row if more sections follow
+        if layout.has_keypress || layout.has_candidates {
+            let line_height = self.renderer.line_height();
+            let sep_y = layout.preedit_y + line_height;
+            let border_color = Color::from_rgba8(
+                BORDER_COLOR.0,
+                BORDER_COLOR.1,
+                BORDER_COLOR.2,
+                BORDER_COLOR.3,
+            );
+            if let Some(rect) =
+                Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
+            {
+                let mut paint = Paint::default();
+                paint.set_color(border_color);
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            }
         }
 
         if layout.has_keypress {
@@ -330,8 +368,38 @@ impl UnifiedPopup {
         self.current_buffer = buffer_idx;
     }
 
+    /// Render the "邪" icon and vertical separator in the first row
+    fn render_icon(&mut self, pixmap: &mut Pixmap, layout: &Layout) {
+        let text_color = Color::from_rgba8(TEXT_COLOR.0, TEXT_COLOR.1, TEXT_COLOR.2, TEXT_COLOR.3);
+        let border_color =
+            Color::from_rgba8(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2, BORDER_COLOR.3);
+        let line_height = self.renderer.line_height();
+        let y_baseline = layout.preedit_y + line_height * 0.75;
+
+        // Draw "邪" icon
+        self.renderer
+            .draw_text(pixmap, ICON_TEXT, PADDING, y_baseline, text_color);
+
+        // Draw vertical separator
+        let icon_text_width = self.renderer.measure_text(ICON_TEXT);
+        let sep_x = PADDING + icon_text_width + ICON_SEPARATOR_GAP;
+        if let Some(rect) =
+            Rect::from_xywh(sep_x, layout.preedit_y, ICON_SEPARATOR_WIDTH, line_height)
+        {
+            let mut paint = Paint::default();
+            paint.set_color(border_color);
+            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        }
+    }
+
     /// Render preedit section with cursor
-    fn render_preedit_section(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
+    fn render_preedit_section(
+        &mut self,
+        pixmap: &mut Pixmap,
+        content: &PopupContent,
+        layout: &Layout,
+        preedit_left: f32,
+    ) {
         let text_color = Color::from_rgba8(TEXT_COLOR.0, TEXT_COLOR.1, TEXT_COLOR.2, TEXT_COLOR.3);
         let cursor_bg = Color::from_rgba8(CURSOR_BG.0, CURSOR_BG.1, CURSOR_BG.2, CURSOR_BG.3);
         let line_height = self.renderer.line_height();
@@ -357,9 +425,9 @@ impl UnifiedPopup {
             || content.vim_mode == "v"
             || content.vim_mode.starts_with('v');
 
-        // Calculate character positions (absolute, starting from PADDING)
+        // Calculate character positions (absolute, starting from preedit_left)
         let mut char_x_positions: Vec<f32> = Vec::with_capacity(chars.len() + 1);
-        let mut x = PADDING;
+        let mut x = preedit_left;
         for c in &chars {
             char_x_positions.push(x);
             x += self.renderer.measure_text(&c.to_string());
@@ -367,15 +435,18 @@ impl UnifiedPopup {
         char_x_positions.push(x);
 
         // Calculate total text width and visible area
-        let total_text_width = x - PADDING;
-        let visible_width = layout.width as f32 - PADDING * 2.0;
+        let total_text_width = x - preedit_left;
+        let visible_width = layout.width as f32 - PADDING - preedit_left;
 
         // Calculate scroll offset to keep cursor visible
-        let cursor_x = char_x_positions.get(cursor_char_begin).copied().unwrap_or(PADDING);
+        let cursor_x = char_x_positions
+            .get(cursor_char_begin)
+            .copied()
+            .unwrap_or(preedit_left);
         let scroll_offset = if total_text_width > visible_width {
             // Calculate offset to center cursor in visible area, with some margin
             let margin = visible_width * 0.3; // 30% margin from edges
-            let cursor_rel = cursor_x - PADDING;
+            let cursor_rel = cursor_x - preedit_left;
 
             if cursor_rel < margin {
                 // Cursor near start - no scroll
@@ -404,7 +475,8 @@ impl UnifiedPopup {
 
             // Draw visual selection background (behind cursor)
             if let Some((vbegin, vend)) = visual_char_range {
-                let visual_bg = Color::from_rgba8(VISUAL_BG.0, VISUAL_BG.1, VISUAL_BG.2, VISUAL_BG.3);
+                let visual_bg =
+                    Color::from_rgba8(VISUAL_BG.0, VISUAL_BG.1, VISUAL_BG.2, VISUAL_BG.3);
                 let vx_start = char_x_positions[vbegin] - scroll_offset;
                 let vx_end = char_x_positions[vend.min(chars.len())] - scroll_offset;
                 if let Some(rect) =
@@ -436,7 +508,9 @@ impl UnifiedPopup {
                 let char_width = self.renderer.measure_text(&c.to_string());
 
                 // Skip characters outside visible area
-                if char_x + char_width < PADDING || char_x > layout.width as f32 - PADDING {
+                if char_x + char_width < preedit_left
+                    || char_x > layout.width as f32 - PADDING
+                {
                     continue;
                 }
 
@@ -456,7 +530,9 @@ impl UnifiedPopup {
                 let char_width = self.renderer.measure_text(&c.to_string());
 
                 // Skip characters outside visible area
-                if char_x + char_width < PADDING || char_x > layout.width as f32 - PADDING {
+                if char_x + char_width < preedit_left
+                    || char_x > layout.width as f32 - PADDING
+                {
                     continue;
                 }
 
@@ -466,29 +542,13 @@ impl UnifiedPopup {
 
             // Draw line cursor
             let cursor_draw_x = cursor_x - scroll_offset;
-            if cursor_draw_x >= PADDING && cursor_draw_x <= layout.width as f32 - PADDING
-                && let Some(rect) = Rect::from_xywh(cursor_draw_x, layout.preedit_y, 2.0, line_height)
+            if cursor_draw_x >= preedit_left
+                && cursor_draw_x <= layout.width as f32 - PADDING
+                && let Some(rect) =
+                    Rect::from_xywh(cursor_draw_x, layout.preedit_y, 2.0, line_height)
             {
                 let mut paint = Paint::default();
                 paint.set_color(text_color);
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
-        }
-
-        // Draw separator if more sections follow
-        if layout.has_keypress || layout.has_candidates {
-            let sep_y = layout.preedit_y + line_height;
-            let border_color = Color::from_rgba8(
-                BORDER_COLOR.0,
-                BORDER_COLOR.1,
-                BORDER_COLOR.2,
-                BORDER_COLOR.3,
-            );
-            if let Some(rect) =
-                Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
-            {
-                let mut paint = Paint::default();
-                paint.set_color(border_color);
                 pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
         }
@@ -634,6 +694,7 @@ impl UnifiedPopup {
 struct Layout {
     width: u32,
     height: u32,
+    icon_area_width: f32,
     has_preedit: bool,
     has_keypress: bool,
     has_candidates: bool,

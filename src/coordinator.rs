@@ -64,20 +64,16 @@ impl State {
                 self.ime.clear_preedit();
                 self.ime.clear_candidates();
                 self.wayland.commit_string(&text);
-                // Hide popup on commit
-                self.hide_popup();
-                // Release keyboard grab and go back to passthrough mode
-                self.wayland.release_keyboard();
-                self.keyboard.reset_modifiers();
                 self.keypress.clear();
-                self.ime.disable();
                 // Consume any pending toggle (e.g., Alt in commit key <A-;> also
                 // triggers SIGUSR1 toggle — don't let it re-enable after commit)
                 self.toggle_flag.store(false, Ordering::SeqCst);
-                // Reset Neovim buffer for next input session
+                // Clear Neovim buffer and stay in insert mode for next input
                 if let Some(ref nvim) = self.nvim {
-                    nvim.send_key("<Esc>ggdG");
+                    nvim.send_key("<Esc>ggdGi");
                 }
+                // Keep IME enabled — show icon-only popup
+                self.update_popup();
             }
             FromNeovim::DeleteSurrounding { before, after } => {
                 log::debug!(
@@ -121,11 +117,12 @@ impl State {
                         self.ime.clear_preedit();
                         self.ime.clear_candidates();
                         self.keypress.clear();
-                        self.hide_popup();
                         // Clear buffer and back to insert mode
                         if let Some(ref nvim) = self.nvim {
                             nvim.send_key("<Esc>ggdGi");
                         }
+                        // Keep IME enabled — show icon-only popup
+                        self.update_popup();
                     }
                     CmdlineAction::WriteQuit => {
                         // Commit preedit + disable
@@ -219,6 +216,7 @@ impl State {
             candidates: self.ime.candidates.clone(),
             selected: self.ime.selected_candidate,
             visual_selection: self.visual_display.clone(),
+            ime_enabled: self.ime.is_enabled(),
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();
