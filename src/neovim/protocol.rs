@@ -99,19 +99,6 @@ pub enum VisualSelection {
     Charwise { begin: usize, end: usize },
 }
 
-/// Action from command-line mode execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CmdlineAction {
-    /// :w — commit preedit, keep enabled
-    Write,
-    /// :wq, :x — commit preedit + disable
-    WriteQuit,
-    /// :q, :q! — discard preedit + disable
-    Quit,
-    /// Other command — Neovim executed it
-    PassThrough,
-}
-
 /// Messages sent from Neovim to IME
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FromNeovim {
@@ -131,10 +118,10 @@ pub enum FromNeovim {
     KeyProcessed,
     /// Command-line text update (display in keypress area)
     CmdlineUpdate(String),
-    /// Command-line command executed
-    CmdlineCommand(CmdlineAction),
-    /// Command-line cancelled (Esc/C-c)
+    /// Command-line left (executed or cancelled)
     CmdlineCancelled,
+    /// Neovim process exited (e.g., :q)
+    NvimExited,
 }
 
 /// Preedit information

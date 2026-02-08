@@ -2,6 +2,9 @@
 //!
 //! Runs Neovim in embedded mode as a pure Wayland↔Neovim bridge for input processing.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use crossbeam_channel::{Receiver, Sender};
 use tokio::runtime::Runtime;
@@ -11,8 +14,8 @@ use nvim_rs::{Handler, Neovim};
 use tokio::process::Command;
 
 use super::protocol::{
-    AtomicPendingState, CandidateInfo, CmdlineAction, FromNeovim, PendingState, PreeditInfo,
-    Snapshot, ToNeovim, VisualSelection,
+    AtomicPendingState, CandidateInfo, FromNeovim, PendingState, PreeditInfo, Snapshot, ToNeovim,
+    VisualSelection,
 };
 use crate::config::Config;
 
@@ -125,24 +128,9 @@ impl Handler for NvimHandler {
                         let _ = self.tx.send(FromNeovim::CmdlineUpdate(text));
                     }
                 }
-                Some("command") => {
+                Some("cancelled") | Some("executed") => {
                     PENDING.clear();
-                    let action = match get_str("action").as_deref() {
-                        Some("write") => CmdlineAction::Write,
-                        Some("write_quit") => CmdlineAction::WriteQuit,
-                        Some("quit") => CmdlineAction::Quit,
-                        Some("passthrough") => CmdlineAction::PassThrough,
-                        other => {
-                            log::warn!("[NVIM] Unknown cmdline action: {:?}", other);
-                            return;
-                        }
-                    };
-                    log::debug!("[NVIM] Cmdline command: {:?}", action);
-                    let _ = self.tx.send(FromNeovim::CmdlineCommand(action));
-                }
-                Some("cancelled") => {
-                    PENDING.clear();
-                    log::debug!("[NVIM] Cmdline cancelled");
+                    log::debug!("[NVIM] Cmdline left ({})", get_str("type").unwrap_or_default());
                     let _ = self.tx.send(FromNeovim::CmdlineCancelled);
                 }
                 other => {
@@ -171,7 +159,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     cmd.args(["--embed", "--headless"]);
 
     let handler = NvimHandler { tx: tx.clone() };
-    let (nvim, _io_handler, _child) = new_child_cmd(&mut cmd, handler).await?;
+    let (nvim, io_handler, _child) = new_child_cmd(&mut cmd, handler).await?;
 
     log::info!("[NVIM] Connected to Neovim");
 
@@ -179,6 +167,22 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     init_neovim(&nvim, config).await?;
 
     let _ = tx.send(FromNeovim::Ready);
+
+    // Track whether Neovim has exited (e.g., via :q) to avoid sending qa! to dead process.
+    let exited = Arc::new(AtomicBool::new(false));
+    {
+        let tx = tx.clone();
+        let exited = exited.clone();
+        tokio::spawn(async move {
+            match io_handler.await {
+                Ok(Ok(())) => log::info!("[NVIM] I/O loop ended cleanly"),
+                Ok(Err(e)) => log::error!("[NVIM] I/O loop error: {}", e),
+                Err(e) => log::error!("[NVIM] I/O task panicked: {}", e),
+            }
+            exited.store(true, Ordering::SeqCst);
+            let _ = tx.send(FromNeovim::NvimExited);
+        });
+    }
 
     // Track last known vim mode for insert-mode fire-and-forget optimization.
     // Starts as "i" because init_neovim() ends with startinsert.
@@ -188,6 +192,10 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     loop {
         match rx.recv() {
             Ok(ToNeovim::Key(key)) => {
+                if exited.load(Ordering::SeqCst) {
+                    log::debug!("[NVIM] Ignoring key {:?} — Neovim already exited", key);
+                    continue;
+                }
                 log::debug!("[NVIM] Received key: {:?}", key);
                 if let Err(e) = handle_key(&nvim, &key, &tx, config, &mut last_mode).await {
                     log::error!("[NVIM] Key handling error: {}", e);
@@ -195,7 +203,9 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
             }
             Ok(ToNeovim::Shutdown) | Err(_) => {
                 log::info!("[NVIM] Shutting down...");
-                let _ = nvim.command("qa!").await;
+                if !exited.load(Ordering::SeqCst) {
+                    let _ = nvim.command("qa!").await;
+                }
                 break;
             }
         }
@@ -212,6 +222,9 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     // Disable "-- More --" prompt — in embedded mode nobody can dismiss it,
     // so any long message (e.g. denops error) would block Neovim forever.
     nvim.command("set nomore").await?;
+    // Mark buffer as scratch — prevents E37 "No write since last change" on :q
+    // bufhidden=wipe cleans up the buffer completely when hidden
+    nvim.command("set buftype=nofile bufhidden=wipe").await?;
 
     // Register collect_snapshot() Lua function for consolidated state queries.
     // All calls inside are in-process (vim.fn.* = C function calls, microsecond-level).
@@ -255,16 +268,10 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
 
     // Register special key handlers as Lua functions.
     // Each replaces a multi-RPC Rust handler with a single exec_lua call.
-    // Key handlers that interact with the popup menu branch on the completion adapter.
     let use_cmp = config.completion.adapter == "nvim-cmp";
 
-    let key_handlers_lua = if use_cmp {
+    nvim.exec_lua(
         r#"
-        -- Enter: not intercepted, nvim-cmp/skkeleton handle <CR> themselves
-        function _G.ime_handle_enter()
-            return { type = 'passthrough' }
-        end
-
         -- Backspace: detect empty buffer for DeleteSurrounding
         function _G.ime_handle_bs()
             local line = vim.fn.getline('.')
@@ -273,23 +280,6 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
             end
             vim.api.nvim_input('<BS>')
             return { type = 'processing' }
-        end
-
-        -- Ctrl+K: confirm via cmp with select=true
-        function _G.ime_handle_confirm()
-            local ok, cmp = pcall(require, 'cmp')
-            if ok and cmp.visible() then
-                cmp.confirm({ select = true })
-                return { type = 'confirmed' }
-            end
-            return { type = 'no_popup' }
-        end
-
-        -- Ctrl+C: clear preedit and reset to insert mode
-        function _G.ime_handle_clear()
-            vim.cmd('normal! 0D')
-            vim.cmd('startinsert')
-            return { type = 'cleared' }
         end
 
         -- Commit: get preedit text, clear buffer, return text for commit
@@ -302,63 +292,23 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
             vim.cmd('startinsert')
             return { type = 'commit', text = line }
         end
-        "#
-    } else {
-        r#"
-        -- Enter: confirm popup menu selection if visible, otherwise no-op
-        function _G.ime_handle_enter()
-            if vim.fn.pumvisible() == 1 then
-                vim.api.nvim_input('<C-y>')
-                return { type = 'processing' }
-            end
-            return { type = 'no_popup' }
-        end
+        "#,
+        vec![],
+    )
+    .await?;
 
-        -- Backspace: detect empty buffer for DeleteSurrounding
-        function _G.ime_handle_bs()
-            local line = vim.fn.getline('.')
-            if line == '' then
-                return { type = 'delete_surrounding' }
-            end
-            vim.api.nvim_input('<BS>')
-            return { type = 'processing' }
-        end
-
-        -- Ctrl+K: confirm popup menu selection
-        function _G.ime_handle_confirm()
-            if vim.fn.pumvisible() == 1 then
-                vim.api.nvim_feedkeys(
-                    vim.api.nvim_replace_termcodes('<C-y>', true, false, true), 'n', false)
-                return { type = 'confirmed' }
-            end
-            return { type = 'no_popup' }
-        end
-
-        -- Ctrl+C: clear preedit and reset to insert mode
-        function _G.ime_handle_clear()
-            vim.cmd('normal! 0D')
-            vim.cmd('startinsert')
-            return { type = 'cleared' }
-        end
-
-        -- Commit: get preedit text, clear buffer, return text for commit
-        function _G.ime_handle_commit()
-            local line = vim.fn.getline('.')
-            if line == '' then
-                return { type = 'empty' }
-            end
-            vim.cmd('normal! 0D')
-            vim.cmd('startinsert')
-            return { type = 'commit', text = line }
-        end
-        "#
-    };
-
-    nvim.exec_lua(key_handlers_lua, vec![]).await?;
+    // Set behavior config as Lua globals
+    nvim.exec_lua(
+        &format!(
+            "vim.g.ime_auto_startinsert = {}",
+            if config.behavior.auto_startinsert { "true" } else { "false" }
+        ),
+        vec![],
+    )
+    .await?;
 
     // Set up autocmds for push notifications.
     // Insert mode state changes are pushed via vim.rpcnotify instead of being polled.
-    // Shared autocmds (snapshot, cmdline) are always registered.
     nvim.exec_lua(
         r#"
         -- Insert mode changes (text edits, cursor movement)
@@ -380,46 +330,20 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
             end,
         })
 
-        -- Track command action for CmdlineLeave
-        vim.g.ime_cmdline_action = nil
-
-        -- Intercept <CR> in command mode
-        vim.keymap.set('c', '<CR>', function()
-            if vim.fn.getcmdtype() ~= ':' then
-                return vim.api.nvim_replace_termcodes('<CR>', true, false, true)
-            end
-            local cmd = vim.trim(vim.fn.getcmdline())
-            if cmd == 'w' then
-                vim.g.ime_cmdline_action = 'write'
-                return vim.api.nvim_replace_termcodes('<C-c>', true, false, true)
-            elseif cmd == 'wq' or cmd == 'x' then
-                vim.g.ime_cmdline_action = 'write_quit'
-                return vim.api.nvim_replace_termcodes('<C-c>', true, false, true)
-            elseif cmd == 'q' or cmd == 'q!' then
-                vim.g.ime_cmdline_action = 'quit'
-                return vim.api.nvim_replace_termcodes('<C-c>', true, false, true)
-            else
-                vim.g.ime_cmdline_action = 'passthrough'
-                return vim.api.nvim_replace_termcodes('<CR>', true, false, true)
-            end
-        end, { expr = true })
-
         -- Post-command handling
         vim.api.nvim_create_autocmd('CmdlineLeave', {
             callback = function()
                 if vim.fn.getcmdtype() ~= ':' then return end
-                local action = vim.g.ime_cmdline_action
-                vim.g.ime_cmdline_action = nil
-                if action then
-                    vim.rpcnotify(0, 'ime_cmdline', { type = 'command', action = action })
-                    if action == 'passthrough' then
+                if vim.v.event.abort then
+                    vim.rpcnotify(0, 'ime_cmdline', { type = 'cancelled' })
+                else
+                    vim.rpcnotify(0, 'ime_cmdline', { type = 'executed' })
+                    if vim.g.ime_auto_startinsert then
                         vim.schedule(function()
                             vim.cmd('startinsert')
                             vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
                         end)
                     end
-                else
-                    vim.rpcnotify(0, 'ime_cmdline', { type = 'cancelled' })
                 end
             end,
         })
@@ -581,15 +505,6 @@ async fn handle_key(
         return Ok(());
     }
 
-    // Handle Ctrl+C - clear preedit and reset to insert mode (1 RPC)
-    if key == "<C-c>" {
-        let _ = nvim.exec_lua("return ime_handle_clear()", vec![]).await?;
-        *last_mode = String::from("i");
-        let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
-        let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
-        return Ok(());
-    }
-
     // Handle commit key (default: Ctrl+Enter) - commit preedit to application (1 RPC)
     if key == config.keybinds.commit {
         let result = nvim.exec_lua("return ime_handle_commit()", vec![]).await?;
@@ -605,16 +520,6 @@ async fn handle_key(
         return Ok(());
     }
 
-    // Handle Enter - native adapter confirms pum selection; nvim-cmp passes through.
-    if key == "<CR>" {
-        let result = nvim.exec_lua("return ime_handle_enter()", vec![]).await?;
-        if get_map_str(&result, "type") != Some("passthrough") {
-            let _ = tx.send(FromNeovim::KeyProcessed);
-            return Ok(());
-        }
-        // passthrough: fall through to normal key handling below
-    }
-
     // Handle Backspace - detect empty buffer for DeleteSurrounding (1 RPC)
     if key == "<BS>" {
         let result = nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
@@ -627,15 +532,6 @@ async fn handle_key(
             // nvim_input('<BS>') was called in Lua; autocmd pushes snapshot.
             let _ = tx.send(FromNeovim::KeyProcessed);
         }
-        return Ok(());
-    }
-
-    // Handle Ctrl+K - confirm popup menu selection (1 RPC)
-    if key == "<C-k>" {
-        let _ = nvim.exec_lua("return ime_handle_confirm()", vec![]).await?;
-        // If confirmed, <C-y> ran in Lua; TextChangedI autocmd pushes snapshot.
-        // If no popup visible, nothing happened.
-        let _ = tx.send(FromNeovim::KeyProcessed);
         return Ok(());
     }
 
@@ -753,7 +649,7 @@ async fn handle_key(
 
     // Insert mode fire-and-forget: autocmd will push snapshot via rpcnotify.
     // Exception: Escape changes mode but no insert-mode autocmd fires after it.
-    if last_mode.as_str() == "i" && key != "<Esc>" {
+    if last_mode.as_str() == "i" && key != "<Esc>" && key != "<C-c>" {
         let _ = tx.send(FromNeovim::KeyProcessed);
         return Ok(());
     }

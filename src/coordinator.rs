@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use crate::neovim::{CmdlineAction, FromNeovim};
+use crate::neovim::{self, FromNeovim};
 use crate::ui::PopupContent;
 use crate::State;
 
@@ -11,6 +11,19 @@ impl State {
         self.reactivation_count = 0;
 
         if !was_enabled {
+            // Respawn Neovim if it exited (e.g., after :q)
+            if self.nvim.is_none() {
+                match neovim::spawn_neovim(self.config.clone()) {
+                    Ok(handle) => {
+                        log::info!("[IME] Respawned Neovim backend");
+                        self.nvim = Some(handle);
+                    }
+                    Err(e) => {
+                        log::error!("[IME] Failed to respawn Neovim: {}", e);
+                        return;
+                    }
+                }
+            }
             // Enable IME - grab keyboard
             if self.wayland.active && self.wayland.keyboard_grab.is_none() {
                 log::debug!("[IME] Grabbing keyboard");
@@ -105,68 +118,23 @@ impl State {
                 self.keypress.set_vim_mode("c");
                 self.update_popup();
             }
-            FromNeovim::CmdlineCommand(action) => {
-                log::debug!("[NVIM] CmdlineCommand: {:?}", action);
-                match action {
-                    CmdlineAction::Write => {
-                        // Commit preedit, keep enabled
-                        if !self.ime.preedit.is_empty() {
-                            self.wayland.commit_string(&self.ime.preedit);
-                        }
-                        self.ime.clear_preedit();
-                        self.ime.clear_candidates();
-                        self.keypress.clear();
-                        // Clear buffer and back to insert mode
-                        if let Some(ref nvim) = self.nvim {
-                            nvim.send_key("<Esc>ggdGi");
-                        }
-                        // Keep IME enabled — show icon-only popup
-                        self.update_popup();
-                    }
-                    CmdlineAction::WriteQuit => {
-                        // Commit preedit + disable
-                        if !self.ime.preedit.is_empty() {
-                            self.wayland.commit_string(&self.ime.preedit);
-                        }
-                        self.ime.clear_preedit();
-                        self.ime.clear_candidates();
-                        self.keypress.clear();
-                        self.hide_popup();
-                        self.wayland.release_keyboard();
-                        self.keyboard.reset_modifiers();
-                        self.ime.disable();
-                        // Clear Neovim buffer
-                        if let Some(ref nvim) = self.nvim {
-                            nvim.send_key("<Esc>ggdG");
-                        }
-                    }
-                    CmdlineAction::Quit => {
-                        // Discard preedit + disable
-                        // Clear compositor preedit (discard without committing to app)
-                        self.wayland.set_preedit("", 0, 0);
-                        self.ime.clear_preedit();
-                        self.ime.clear_candidates();
-                        self.keypress.clear();
-                        self.hide_popup();
-                        self.wayland.release_keyboard();
-                        self.keyboard.reset_modifiers();
-                        self.ime.disable();
-                        // Clear Neovim buffer
-                        if let Some(ref nvim) = self.nvim {
-                            nvim.send_key("<Esc>ggdG");
-                        }
-                    }
-                    CmdlineAction::PassThrough => {
-                        // Neovim executed the command; Lua defers startinsert + snapshot
-                        self.keypress.clear();
-                        self.update_popup();
-                    }
-                }
-            }
             FromNeovim::CmdlineCancelled => {
                 log::debug!("[NVIM] CmdlineCancelled");
                 self.keypress.clear();
                 self.update_popup();
+            }
+            FromNeovim::NvimExited => {
+                log::info!("[NVIM] Neovim exited, disabling IME");
+                self.repeat.cancel();
+                self.wayland.set_preedit("", 0, 0);
+                self.ime.clear_preedit();
+                self.ime.clear_candidates();
+                self.keypress.clear();
+                self.hide_popup();
+                self.wayland.release_keyboard();
+                self.keyboard.reset_modifiers();
+                self.ime.disable();
+                self.nvim = None;
             }
         }
     }

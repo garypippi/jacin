@@ -128,6 +128,7 @@ fn main() -> anyhow::Result<()> {
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
         reactivation_count: 0,
+        config: config.clone(),
         nvim,
         visual_display: None,
         popup,
@@ -267,6 +268,8 @@ pub struct State {
     // Counter for consecutive Deactivate/Activate re-grabs without user key input.
     // Prevents infinite loop when compositor keeps cycling.
     pub(crate) reactivation_count: u32,
+    // Config (needed for Neovim respawn after :q)
+    pub(crate) config: config::Config,
     // Neovim backend
     pub(crate) nvim: Option<NeovimHandle>,
     // Transient visual selection display state (observed from Neovim, not IME-owned)

@@ -6,6 +6,15 @@ use std::path::PathBuf;
 pub struct Config {
     pub keybinds: Keybinds,
     pub completion: Completion,
+    pub behavior: Behavior,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Behavior {
+    /// If true, automatically return to insert mode after command-line commands.
+    /// Default: false (Neovim default: stay in current mode after command).
+    pub auto_startinsert: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

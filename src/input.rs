@@ -108,15 +108,6 @@ impl State {
         };
         log::debug!("[KEY] keysym={:?}, utf8={:?}", keysym, utf8);
 
-        // Handle Ctrl+C to exit
-        use xkbcommon::xkb::Keysym;
-        if self.keyboard.ctrl_pressed && keysym == Keysym::c {
-            log::info!("Ctrl+C pressed, releasing keyboard and exiting...");
-            self.wayland.release_keyboard();
-            self.pending_exit = true;
-            return;
-        }
-
         // Convert key to Vim notation and send to Neovim
         let vim_key = keysym_to_vim(
             self.keyboard.ctrl_pressed,
