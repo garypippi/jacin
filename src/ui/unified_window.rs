@@ -33,7 +33,6 @@ const NUMBER_WIDTH: f32 = 24.0;
 const SECTION_SEPARATOR_HEIGHT: f32 = 1.0;
 const MAX_PREEDIT_WIDTH: f32 = 400.0;
 
-const ICON_TEXT: &str = "邪";
 const ICON_SEPARATOR_WIDTH: f32 = 1.0;
 const ICON_SEPARATOR_GAP: f32 = 6.0;
 const MODE_GAP: f32 = 4.0;
@@ -214,8 +213,7 @@ impl UnifiedPopup {
         let mut y = PADDING;
         let mut max_width: f32 = 0.0;
 
-        // Icon area width: PADDING + icon_text + gap + mode_label + [gap + recording] + gap + separator + gap
-        let icon_text_width = self.renderer.measure_text(ICON_TEXT);
+        // Icon area width: PADDING + mode_label + [gap + recording] + gap + separator + gap
         let (mode_text, _) = mode_label(&content.vim_mode);
         let mode_text_width = self.renderer.measure_text(mode_text);
         let recording_width = if !content.recording.is_empty() {
@@ -225,8 +223,6 @@ impl UnifiedPopup {
             0.0
         };
         let icon_area_width = PADDING
-            + icon_text_width
-            + MODE_GAP
             + mode_text_width
             + recording_width
             + ICON_SEPARATOR_GAP
@@ -335,7 +331,7 @@ impl UnifiedPopup {
         draw_border(&mut pixmap, self.width, self.height, border_color);
 
         // Render sections
-        self.render_icon(&mut pixmap, content, layout);
+        self.render_status_bar(&mut pixmap, content, layout);
 
         if layout.has_preedit {
             self.render_preedit_section(&mut pixmap, content, layout, layout.icon_area_width);
@@ -412,24 +408,18 @@ impl UnifiedPopup {
         self.current_buffer = buffer_idx;
     }
 
-    /// Render the "邪" icon, mode label, and vertical separator in the first row
-    fn render_icon(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
-        let text_color = Color::from_rgba8(TEXT_COLOR.0, TEXT_COLOR.1, TEXT_COLOR.2, TEXT_COLOR.3);
+    /// Render mode label, recording indicator, and vertical separator in the first row
+    fn render_status_bar(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
         let border_color =
             Color::from_rgba8(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2, BORDER_COLOR.3);
         let line_height = self.renderer.line_height();
         let y_baseline = layout.preedit_y + line_height * 0.75;
 
-        // Draw "邪" icon
-        self.renderer
-            .draw_text(pixmap, ICON_TEXT, PADDING, y_baseline, text_color);
-
         // Draw mode label
-        let icon_text_width = self.renderer.measure_text(ICON_TEXT);
         let (mode_text, mode_color) = mode_label(&content.vim_mode);
         let mode_color =
             Color::from_rgba8(mode_color.0, mode_color.1, mode_color.2, mode_color.3);
-        let mode_x = PADDING + icon_text_width + MODE_GAP;
+        let mode_x = PADDING;
         self.renderer
             .draw_text(pixmap, mode_text, mode_x, y_baseline, mode_color);
 
