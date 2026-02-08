@@ -577,7 +577,8 @@ async fn handle_key(
     }
 
     // Handle commit key (default: Ctrl+Enter) - commit preedit to application (1 RPC)
-    if key == config.keybinds.commit {
+    // Skip if motion-pending: exec_lua would deadlock while Neovim waits for operator input.
+    if key == config.keybinds.commit && !PENDING.load().is_motion() {
         let result = nvim.exec_lua("return ime_handle_commit()", vec![]).await?;
         if get_map_str(&result, "type") == Some("commit") {
             if let Some(text) = get_map_str(&result, "text") {
@@ -592,7 +593,8 @@ async fn handle_key(
     }
 
     // Handle Backspace - detect empty buffer for DeleteSurrounding (1 RPC)
-    if key == "<BS>" {
+    // Skip if motion-pending: exec_lua would deadlock while Neovim waits for operator input.
+    if key == "<BS>" && !PENDING.load().is_motion() {
         let result = nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
         if get_map_str(&result, "type") == Some("delete_surrounding") {
             let _ = tx.send(FromNeovim::DeleteSurrounding {
@@ -692,8 +694,8 @@ async fn handle_key(
                     | "(" | ")" | "%" => true,
                     // Doubled operators (yy, dd, cc) - operator char repeats to operate on line
                     "y" | "d" | "c" => true,
-                    // Escape cancels
-                    "<Esc>" => true,
+                    // Escape/Backspace cancels
+                    "<Esc>" | "<BS>" => true,
                     _ => false,
                 }
             }
