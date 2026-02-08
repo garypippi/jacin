@@ -123,6 +123,15 @@ impl State {
                 self.keypress.clear();
                 self.update_popup();
             }
+            FromNeovim::AutoCommit(text) => {
+                log::debug!("[NVIM] AutoCommit: {:?}", text);
+                self.wayland.commit_string(&text);
+                self.ime.clear_preedit();
+                self.ime.clear_candidates();
+                self.keypress.clear();
+                self.visual_display = None;
+                self.update_popup();
+            }
             FromNeovim::NvimExited => {
                 log::info!("[NVIM] Neovim exited, disabling IME");
                 self.repeat.cancel();

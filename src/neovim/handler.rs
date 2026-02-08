@@ -111,6 +111,11 @@ impl Handler for NvimHandler {
                 info.selected = info.selected.min(info.candidates.len().saturating_sub(1));
                 let _ = self.tx.send(FromNeovim::Candidates(info));
             }
+        } else if name == "ime_auto_commit" {
+            if let Some(text) = args.first().and_then(|v| v.as_str()) {
+                log::debug!("[NVIM] Auto-commit: {:?}", text);
+                let _ = self.tx.send(FromNeovim::AutoCommit(text.to_string()));
+            }
         } else if name == "ime_cmdline"
             && let Some(value) = args.first()
             && let Some(map) = value.as_map()
@@ -310,13 +315,58 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     )
     .await?;
 
+    // Set up line-addition detection for auto-commit.
+    // When the buffer goes from 1 to 2+ lines (e.g., <CR>, o, O), the adjacent
+    // non-cursor line is committed and deleted, keeping preedit single-line.
+    nvim.exec_lua(
+        r#"
+        _G.ime_context = { last_line_count = 1, clearing = false }
+
+        function _G.check_line_added()
+            if ime_context.clearing then return end
+            local line_count = vim.fn.line('$')
+            if line_count > ime_context.last_line_count then
+                -- Line added: commit the adjacent non-cursor line
+                local cursor_line = vim.fn.line('.')
+                local commit_line = cursor_line > 1 and (cursor_line - 1) or (cursor_line + 1)
+                local text = vim.fn.getline(commit_line)
+                if text ~= '' then
+                    vim.rpcnotify(0, 'ime_auto_commit', text)
+                end
+                -- Delete the committed line
+                ime_context.clearing = true
+                vim.o.eventignore = 'all'
+                vim.cmd(commit_line .. 'delete _')
+                vim.o.eventignore = ''
+                ime_context.clearing = false
+            end
+            ime_context.last_line_count = vim.fn.line('$')
+        end
+        "#,
+        vec![],
+    )
+    .await?;
+
     // Set up autocmds for push notifications.
     // Insert mode state changes are pushed via vim.rpcnotify instead of being polled.
     nvim.exec_lua(
         r#"
+        -- Detect line addition on insert entry (for o/O from normal mode)
+        vim.api.nvim_create_autocmd('ModeChanged', {
+            callback = function(args)
+                if ime_context.clearing then return end
+                local new_mode = args.match:match(':(.+)$')
+                if new_mode and new_mode:match('^i') then
+                    check_line_added()
+                end
+            end,
+        })
+
         -- Insert mode changes (text edits, cursor movement)
         vim.api.nvim_create_autocmd({'TextChangedI', 'CursorMovedI'}, {
             callback = function()
+                if ime_context.clearing then return end
+                check_line_added()
                 vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
             end,
         })
