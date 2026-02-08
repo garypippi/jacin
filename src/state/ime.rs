@@ -108,10 +108,10 @@ impl ImeState {
     }
 
     /// Complete enabling (keymap received). Returns true if transitioned from Enabling.
-    pub fn complete_enabling(&mut self) -> bool {
+    pub fn complete_enabling(&mut self, initial_mode: VimMode) -> bool {
         if self.mode == ImeMode::Enabling {
             self.mode = ImeMode::Enabled {
-                vim_mode: VimMode::Insert,
+                vim_mode: initial_mode,
             };
             true
         } else {

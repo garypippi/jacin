@@ -185,8 +185,11 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     }
 
     // Track last known vim mode for insert-mode fire-and-forget optimization.
-    // Starts as "i" because init_neovim() ends with startinsert.
-    let mut last_mode = String::from("i");
+    let mut last_mode = if config.behavior.auto_startinsert {
+        String::from("i")
+    } else {
+        String::from("n")
+    };
 
     // Main loop - process messages from IME
     loop {
@@ -465,8 +468,10 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
 
     nvim.exec_lua(completion_lua, vec![]).await?;
 
-    // Start in insert mode
-    nvim.command("startinsert").await?;
+    // Start in insert mode if configured
+    if config.behavior.auto_startinsert {
+        nvim.command("startinsert").await?;
+    }
 
     log::info!("[NVIM] Initialization complete");
     Ok(())

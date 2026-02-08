@@ -17,6 +17,7 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 
 use crate::State;
 use crate::input::KeyOrigin;
+use crate::state::VimMode;
 
 // Dispatch for registry (required by registry_queue_init)
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
@@ -286,11 +287,21 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             state.wayland.clear_modifiers();
 
                             // Complete enabling if transitioning
-                            if state.ime.complete_enabling() || state.ime.is_fully_enabled() {
+                            let initial_mode = if state.config.behavior.auto_startinsert {
+                                VimMode::Insert
+                            } else {
+                                VimMode::Normal
+                            };
+                            if state.ime.complete_enabling(initial_mode) || state.ime.is_fully_enabled() {
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
-                                    log::debug!("[IME] Restoring insert mode");
-                                    nvim.send_key("<Esc>i");
+                                    if state.config.behavior.auto_startinsert {
+                                        log::debug!("[IME] Restoring insert mode");
+                                        nvim.send_key("<Esc>i");
+                                    } else {
+                                        log::debug!("[IME] Restoring normal mode");
+                                        nvim.send_key("<Esc>");
+                                    }
                                 }
                                 state.update_popup();
                             }

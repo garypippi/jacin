@@ -12,8 +12,9 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Behavior {
-    /// If true, automatically return to insert mode after command-line commands.
-    /// Default: false (Neovim default: stay in current mode after command).
+    /// If true, IME starts in insert mode and returns to insert mode after commands.
+    /// If false, IME starts in normal mode.
+    /// Default: false.
     pub auto_startinsert: bool,
 }
 
