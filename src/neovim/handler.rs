@@ -176,7 +176,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     log::info!("[NVIM] Connected to Neovim");
 
     // Initialize
-    init_neovim(&nvim).await?;
+    init_neovim(&nvim, config).await?;
 
     let _ = tx.send(FromNeovim::Ready);
 
@@ -204,7 +204,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: &Con
     Ok(())
 }
 
-async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
+async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Result<()> {
     log::info!("[NVIM] Initializing...");
 
     nvim.command("set nocompatible").await?;
@@ -255,7 +255,60 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
 
     // Register special key handlers as Lua functions.
     // Each replaces a multi-RPC Rust handler with a single exec_lua call.
-    nvim.exec_lua(
+    // Key handlers that interact with the popup menu branch on the completion adapter.
+    let use_cmp = config.completion.adapter == "nvim-cmp";
+
+    let key_handlers_lua = if use_cmp {
+        r#"
+        -- Enter: confirm via cmp if visible, otherwise no-op
+        function _G.ime_handle_enter()
+            local ok, cmp = pcall(require, 'cmp')
+            if ok and cmp.visible() then
+                cmp.confirm({ select = false })
+                return { type = 'processing' }
+            end
+            return { type = 'no_popup' }
+        end
+
+        -- Backspace: detect empty buffer for DeleteSurrounding
+        function _G.ime_handle_bs()
+            local line = vim.fn.getline('.')
+            if line == '' then
+                return { type = 'delete_surrounding' }
+            end
+            vim.api.nvim_input('<BS>')
+            return { type = 'processing' }
+        end
+
+        -- Ctrl+K: confirm via cmp with select=true
+        function _G.ime_handle_confirm()
+            local ok, cmp = pcall(require, 'cmp')
+            if ok and cmp.visible() then
+                cmp.confirm({ select = true })
+                return { type = 'confirmed' }
+            end
+            return { type = 'no_popup' }
+        end
+
+        -- Ctrl+C: clear preedit and reset to insert mode
+        function _G.ime_handle_clear()
+            vim.cmd('normal! 0D')
+            vim.cmd('startinsert')
+            return { type = 'cleared' }
+        end
+
+        -- Commit: get preedit text, clear buffer, return text for commit
+        function _G.ime_handle_commit()
+            local line = vim.fn.getline('.')
+            if line == '' then
+                return { type = 'empty' }
+            end
+            vim.cmd('normal! 0D')
+            vim.cmd('startinsert')
+            return { type = 'commit', text = line }
+        end
+        "#
+    } else {
         r#"
         -- Enter: confirm popup menu selection if visible, otherwise no-op
         function _G.ime_handle_enter()
@@ -303,13 +356,14 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
             vim.cmd('startinsert')
             return { type = 'commit', text = line }
         end
-        "#,
-        vec![],
-    )
-    .await?;
+        "#
+    };
+
+    nvim.exec_lua(key_handlers_lua, vec![]).await?;
 
     // Set up autocmds for push notifications.
     // Insert mode state changes are pushed via vim.rpcnotify instead of being polled.
+    // Shared autocmds (snapshot, cmdline) are always registered.
     nvim.exec_lua(
         r#"
         -- Insert mode changes (text edits, cursor movement)
@@ -374,8 +428,61 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
                 end
             end,
         })
+        "#,
+        vec![],
+    )
+    .await?;
 
-        -- Popup menu changed (opened, selection moved)
+    // Completion adapter setup — branch on config.
+    let completion_lua = if use_cmp {
+        r#"
+        local function ime_setup_cmp()
+            local ok, cmp = pcall(require, 'cmp')
+            if not ok then return false end
+            local visible = false
+            local function send()
+                if not cmp.visible() then
+                    if visible then
+                        visible = false
+                        vim.rpcnotify(0, 'ime_candidates', { candidates = {}, selected = -1 })
+                    end
+                    return
+                end
+                visible = true
+                local entries = cmp.get_entries() or {}
+                local words = {}
+                for _, e in ipairs(entries) do
+                    local w = e.word or ''
+                    if w ~= '' then words[#words + 1] = w end
+                end
+                local sel = cmp.get_selected_index() or 0
+                vim.rpcnotify(0, 'ime_candidates', {
+                    candidates = words,
+                    selected = sel - 1,
+                })
+            end
+            cmp.event:on('menu_opened', send)
+            cmp.event:on('menu_closed', function()
+                visible = false
+                vim.rpcnotify(0, 'ime_candidates', { candidates = {}, selected = -1 })
+            end)
+            -- Poll after every key to catch selection changes (Ctrl+N/P)
+            vim.on_key(function()
+                if visible then vim.schedule(send) end
+            end)
+            return true
+        end
+        -- Handle lazy-loaded cmp: try now, retry on InsertEnter
+        if not ime_setup_cmp() then
+            vim.api.nvim_create_autocmd('InsertEnter', {
+                once = true,
+                callback = function() vim.schedule(ime_setup_cmp) end,
+            })
+        end
+        "#
+    } else {
+        r#"
+        -- Native popup menu: use CompleteChanged/CompleteDone autocmds
         vim.api.nvim_create_autocmd('CompleteChanged', {
             callback = function()
                 local info = vim.fn.complete_info({'items', 'selected'})
@@ -391,7 +498,6 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
             end,
         })
 
-        -- Popup menu closed (confirmed or cancelled)
         vim.api.nvim_create_autocmd('CompleteDone', {
             callback = function()
                 vim.rpcnotify(0, 'ime_candidates', {
@@ -400,10 +506,10 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
                 })
             end,
         })
-        "#,
-        vec![],
-    )
-    .await?;
+        "#
+    };
+
+    nvim.exec_lua(completion_lua, vec![]).await?;
 
     // Start in insert mode
     nvim.command("startinsert").await?;

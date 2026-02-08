@@ -5,6 +5,21 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct Config {
     pub keybinds: Keybinds,
+    pub completion: Completion,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Completion {
+    pub adapter: String,
+}
+
+impl Default for Completion {
+    fn default() -> Self {
+        Self {
+            adapter: "native".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
