@@ -260,14 +260,9 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
 
     let key_handlers_lua = if use_cmp {
         r#"
-        -- Enter: confirm via cmp if visible, otherwise no-op
+        -- Enter: not intercepted, nvim-cmp/skkeleton handle <CR> themselves
         function _G.ime_handle_enter()
-            local ok, cmp = pcall(require, 'cmp')
-            if ok and cmp.visible() then
-                cmp.confirm({ select = false })
-                return { type = 'processing' }
-            end
-            return { type = 'no_popup' }
+            return { type = 'passthrough' }
         end
 
         -- Backspace: detect empty buffer for DeleteSurrounding
@@ -610,13 +605,14 @@ async fn handle_key(
         return Ok(());
     }
 
-    // Handle Enter - only pass to neovim if in SKK conversion mode (1 RPC)
+    // Handle Enter - native adapter confirms pum selection; nvim-cmp passes through.
     if key == "<CR>" {
-        let _ = nvim.exec_lua("return ime_handle_enter()", vec![]).await?;
-        // Both cases (no_marker and processing) are fire-and-forget.
-        // If markers present, nvim_input('<CR>') was called in Lua; autocmd pushes snapshot.
-        let _ = tx.send(FromNeovim::KeyProcessed);
-        return Ok(());
+        let result = nvim.exec_lua("return ime_handle_enter()", vec![]).await?;
+        if get_map_str(&result, "type") != Some("passthrough") {
+            let _ = tx.send(FromNeovim::KeyProcessed);
+            return Ok(());
+        }
+        // passthrough: fall through to normal key handling below
     }
 
     // Handle Backspace - detect empty buffer for DeleteSurrounding (1 RPC)
