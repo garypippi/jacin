@@ -131,7 +131,6 @@ fn main() -> anyhow::Result<()> {
         nvim,
         visual_display: None,
         popup,
-        config,
     };
 
     // Set up calloop event loop
@@ -274,6 +273,4 @@ pub struct State {
     pub(crate) visual_display: Option<VisualSelection>,
     // Unified popup window (preedit, keypress, candidates)
     pub(crate) popup: Option<UnifiedPopup>,
-    // Configuration
-    pub(crate) config: config::Config,
 }

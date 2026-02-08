@@ -1,6 +1,6 @@
 //! Neovim backend handler
 //!
-//! Runs Neovim in embedded mode with vim-skkeleton for Japanese input.
+//! Runs Neovim in embedded mode as a pure Wayland↔Neovim bridge for input processing.
 
 use async_trait::async_trait;
 use crossbeam_channel::{Receiver, Sender};
@@ -70,26 +70,43 @@ impl Handler for NvimHandler {
                         snapshot.mode,
                     )));
 
-                    if let Some(candidates) = snapshot.candidates {
-                        if candidates.is_empty() {
-                            let _ =
-                                self.tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
-                        } else {
-                            let selected = snapshot.selected.unwrap_or(-1).max(0) as usize;
-                            let mut info = CandidateInfo::new(candidates, selected);
-                            info.selected =
-                                info.selected.min(info.candidates.len().saturating_sub(1));
-                            let _ = self.tx.send(FromNeovim::Candidates(info));
-                        }
-                    } else {
-                        let _ = self.tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
-                    }
-
                     let _ = self.tx.send(FromNeovim::VisualRange(visual));
                 }
                 Err(e) => {
                     log::error!("[NVIM] Failed to parse push snapshot: {}", e);
                 }
+            }
+        } else if name == "ime_candidates"
+            && let Some(value) = args.first()
+            && let Some(map) = value.as_map()
+        {
+            let get_arr = |field: &str| -> Option<&Vec<nvim_rs::Value>> {
+                map.iter()
+                    .find(|(k, _)| k.as_str() == Some(field))
+                    .and_then(|(_, v)| v.as_array())
+            };
+            let get_i64 = |field: &str| -> Option<i64> {
+                map.iter()
+                    .find(|(k, _)| k.as_str() == Some(field))
+                    .and_then(|(_, v)| v.as_i64())
+            };
+
+            let words: Vec<String> = get_arr("candidates")
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let selected = get_i64("selected").unwrap_or(-1);
+
+            if words.is_empty() {
+                let _ = self.tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
+            } else {
+                let sel = selected.max(0) as usize;
+                let mut info = CandidateInfo::new(words, sel);
+                info.selected = info.selected.min(info.candidates.len().saturating_sub(1));
+                let _ = self.tx.send(FromNeovim::Candidates(info));
             }
         } else if name == "ime_cmdline"
             && let Some(value) = args.first()
@@ -196,47 +213,8 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     // so any long message (e.g. denops error) would block Neovim forever.
     nvim.command("set nomore").await?;
 
-    // Check if user config was loaded
-    let rtp = nvim.command_output("echo &runtimepath").await?;
-    log::debug!(
-        "[NVIM] runtimepath: {}",
-        rtp.trim().chars().take(100).collect::<String>()
-    );
-
-    // Check if skkeleton is available
-    let result = nvim
-        .command_output("echo exists('*skkeleton#is_enabled')")
-        .await?;
-    log::debug!("[NVIM] skkeleton#is_enabled exists: {}", result.trim());
-
-    // List loaded scripts to see what's loaded
-    let scripts = nvim.command_output("scriptnames").await?;
-    let script_count = scripts.lines().count();
-    log::debug!("[NVIM] Loaded scripts: {} files", script_count);
-
-    // Verify <Plug>(skkeleton-toggle) mapping exists
-    let mapping = nvim
-        .command_output("imap <Plug>(skkeleton-toggle)")
-        .await
-        .unwrap_or_default();
-    log::debug!(
-        "[NVIM] skkeleton-toggle mapping: {}",
-        mapping.trim().chars().take(60).collect::<String>()
-    );
-
-    // List skkeleton functions to find candidate API
-    let funcs = nvim
-        .command_output("filter /skkeleton/ function")
-        .await
-        .unwrap_or_default();
-    log::debug!(
-        "[NVIM] skkeleton functions: {}",
-        funcs.lines().take(10).collect::<Vec<_>>().join(", ")
-    );
-
     // Register collect_snapshot() Lua function for consolidated state queries.
     // All calls inside are in-process (vim.fn.* = C function calls, microsecond-level).
-    // This replaces multiple separate RPC calls (getline, col, strlen, cmp) with one.
     nvim.exec_lua(
         r#"
         function _G.collect_snapshot()
@@ -268,30 +246,6 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
                 snapshot.visual_end = sel_end_col + vim.fn.strlen(end_char)
             end
 
-            -- Candidates (only when cmp is visible)
-            local ok, cmp = pcall(require, 'cmp')
-            if ok and cmp.visible() then
-                local entries = cmp.get_entries() or {}
-                local words = {}
-                for _, e in ipairs(entries) do
-                    local w = e:get_word()
-                    if w and w ~= '' then
-                        words[#words + 1] = w
-                    end
-                end
-                snapshot.candidates = words
-
-                local sel_entry = cmp.get_active_entry()
-                if sel_entry then
-                    for i, e in ipairs(entries) do
-                        if e == sel_entry then
-                            snapshot.selected = i - 1
-                            break
-                        end
-                    end
-                end
-            end
-
             return snapshot
         end
         "#,
@@ -303,14 +257,13 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     // Each replaces a multi-RPC Rust handler with a single exec_lua call.
     nvim.exec_lua(
         r#"
-        -- Enter: check for henkan markers before passing through
+        -- Enter: confirm popup menu selection if visible, otherwise no-op
         function _G.ime_handle_enter()
-            local line = vim.fn.getline('.')
-            if not (line:find('▼') or line:find('▽')) then
-                return { type = 'no_marker' }
+            if vim.fn.pumvisible() == 1 then
+                vim.api.nvim_input('<C-y>')
+                return { type = 'processing' }
             end
-            vim.api.nvim_input('<CR>')
-            return { type = 'processing' }
+            return { type = 'no_popup' }
         end
 
         -- Backspace: detect empty buffer for DeleteSurrounding
@@ -323,14 +276,14 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
             return { type = 'processing' }
         end
 
-        -- Ctrl+K: confirm cmp completion
+        -- Ctrl+K: confirm popup menu selection
         function _G.ime_handle_confirm()
-            local ok, cmp = pcall(require, 'cmp')
-            if ok and cmp.visible() then
-                cmp.confirm({ select = true })
+            if vim.fn.pumvisible() == 1 then
+                vim.api.nvim_feedkeys(
+                    vim.api.nvim_replace_termcodes('<C-y>', true, false, true), 'n', false)
                 return { type = 'confirmed' }
             end
-            return { type = 'no_cmp' }
+            return { type = 'no_popup' }
         end
 
         -- Ctrl+C: clear preedit and reset to insert mode
@@ -350,16 +303,6 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
             vim.cmd('startinsert')
             return { type = 'commit', text = line }
         end
-
-        -- Toggle: switch skkeleton on/off
-        function _G.ime_handle_toggle()
-            vim.cmd('startinsert')
-            local cu = vim.api.nvim_replace_termcodes('<C-u>', true, false, true)
-            vim.api.nvim_feedkeys(cu, 'n', false)
-            local plug = vim.api.nvim_replace_termcodes('<Plug>(skkeleton-toggle)', true, false, true)
-            vim.api.nvim_feedkeys(plug, 'm', false)
-            return { type = 'toggled' }
-        end
         "#,
         vec![],
     )
@@ -369,24 +312,7 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     // Insert mode state changes are pushed via vim.rpcnotify instead of being polled.
     nvim.exec_lua(
         r#"
-        -- skkeleton processing complete (fires after Deno IPC finishes)
-        vim.api.nvim_create_autocmd('User', {
-            pattern = 'skkeleton-handled',
-            callback = function()
-                -- Trigger cmp completion in henkan mode
-                local status = vim.fn['skkeleton#vim_status']()
-                vim.g.ime_skk_status = status
-                if status == 'henkan' then
-                    local ok, cmp = pcall(require, 'cmp')
-                    if ok and cmp then
-                        cmp.complete()
-                    end
-                end
-                vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
-            end,
-        })
-
-        -- Non-skkeleton insert mode changes (direct ASCII, BS, cursor movement)
+        -- Insert mode changes (text edits, cursor movement)
         vim.api.nvim_create_autocmd({'TextChangedI', 'CursorMovedI'}, {
             callback = function()
                 vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
@@ -448,53 +374,36 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
                 end
             end,
         })
+
+        -- Popup menu changed (opened, selection moved)
+        vim.api.nvim_create_autocmd('CompleteChanged', {
+            callback = function()
+                local info = vim.fn.complete_info({'items', 'selected'})
+                local words = {}
+                for _, item in ipairs(info.items or {}) do
+                    local w = item.word or item.abbr or ''
+                    if w ~= '' then words[#words + 1] = w end
+                end
+                vim.rpcnotify(0, 'ime_candidates', {
+                    candidates = words,
+                    selected = info.selected,
+                })
+            end,
+        })
+
+        -- Popup menu closed (confirmed or cancelled)
+        vim.api.nvim_create_autocmd('CompleteDone', {
+            callback = function()
+                vim.rpcnotify(0, 'ime_candidates', {
+                    candidates = {},
+                    selected = -1,
+                })
+            end,
+        })
         "#,
         vec![],
     )
     .await?;
-
-    // Wait for skkeleton's denops backend to become ready.
-    // denops#plugin#is_loaded returns 1 only after the dispatcher is registered,
-    // which requires a working denops server connection.
-    let ready = {
-        let mut ok = false;
-        for attempt in 1..=30 {
-            let result = nvim
-                .exec_lua(
-                    r#"
-                    local ok, loaded = pcall(vim.fn['denops#plugin#is_loaded'], 'skkeleton')
-                    return ok and (loaded == 1)
-                    "#,
-                    vec![],
-                )
-                .await;
-            match result {
-                Ok(val) if val.as_bool() == Some(true) => {
-                    log::info!("[NVIM] skkeleton ready (attempt {})", attempt);
-                    ok = true;
-                    break;
-                }
-                _ => {
-                    log::debug!(
-                        "[NVIM] skkeleton not ready (attempt {}/30), retrying in 1s...",
-                        attempt
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
-            }
-        }
-        ok
-    };
-
-    if !ready {
-        log::warn!("[NVIM] skkeleton not ready after 30s — dumping Neovim messages:");
-        let messages = nvim.command_output("messages").await.unwrap_or_default();
-        for line in messages.lines() {
-            if !line.trim().is_empty() {
-                log::warn!("[NVIM:msg] {}", line);
-            }
-        }
-    }
 
     // Start in insert mode
     nvim.command("startinsert").await?;
@@ -584,23 +493,12 @@ async fn handle_key(
         return Ok(());
     }
 
-    // Handle Ctrl+K - confirm cmp completion (1 RPC)
+    // Handle Ctrl+K - confirm popup menu selection (1 RPC)
     if key == "<C-k>" {
         let _ = nvim.exec_lua("return ime_handle_confirm()", vec![]).await?;
-        // If confirmed, cmp.confirm() ran in Lua; TextChangedI autocmd pushes snapshot.
-        // If no cmp visible, nothing happened.
+        // If confirmed, <C-y> ran in Lua; TextChangedI autocmd pushes snapshot.
+        // If no popup visible, nothing happened.
         let _ = tx.send(FromNeovim::KeyProcessed);
-        return Ok(());
-    }
-
-    // Handle toggle key - trigger the <Plug>(skkeleton-toggle) mapping (1 RPC)
-    if key == config.keybinds.toggle {
-        log::debug!("[NVIM] Toggling skkeleton via Lua handler...");
-        let _ = nvim.exec_lua("return ime_handle_toggle()", vec![]).await?;
-
-        // feedkeys queued in Lua; skkeleton-handled autocmd will push snapshot.
-        *last_mode = String::from("i");
-        let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
         return Ok(());
     }
 
@@ -754,7 +652,7 @@ async fn handle_key(
     }
 
     // Handle unexpected command-line mode (c, cv, ce, cr, etc.)
-    // This can happen when skkeleton internals trigger command-line mode
+    // This can happen when plugin internals trigger command-line mode
     // (e.g., nested henkan with capital letters). Escape and restore insert mode.
     // Skip if we intentionally entered command mode (PENDING == CommandLine).
     if snapshot.mode.starts_with('c') && PENDING.load() != PendingState::CommandLine {
@@ -784,7 +682,7 @@ async fn is_blocked(nvim: &Neovim<NvimWriter>) -> anyhow::Result<bool> {
 }
 
 /// Query full state snapshot from Neovim via collect_snapshot() Lua function.
-/// Replaces separate getline/col/strlen/cmp queries with a single RPC call.
+/// Replaces separate getline/col/strlen queries with a single RPC call.
 async fn query_snapshot(
     nvim: &Neovim<NvimWriter>,
     tx: &Sender<FromNeovim>,
@@ -812,22 +710,6 @@ async fn query_snapshot(
         snapshot.mode.clone(),
     )));
 
-    if let Some(ref candidates) = snapshot.candidates {
-        if candidates.is_empty() {
-            let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
-        } else {
-            let selected = snapshot
-                .selected
-                .unwrap_or(-1)
-                .max(0) as usize;
-            let mut info = CandidateInfo::new(candidates.clone(), selected);
-            info.selected = info.selected.min(info.candidates.len().saturating_sub(1));
-            let _ = tx.send(FromNeovim::Candidates(info));
-        }
-    } else {
-        let _ = tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
-    }
-
     let visual = snapshot_to_visual_selection(&snapshot);
     let _ = tx.send(FromNeovim::VisualRange(visual));
 
@@ -846,8 +728,6 @@ fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
         mode: "n".to_string(),
         blocking: false,
         char_width: 0,
-        candidates: None,
-        selected: None,
         visual_begin: None,
         visual_end: None,
     };
@@ -869,20 +749,6 @@ fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
             }
             "char_width" => {
                 snapshot.char_width = v.as_u64().unwrap_or(0) as usize;
-            }
-            "candidates" => {
-                if let Some(arr) = v.as_array() {
-                    let words: Vec<String> = arr
-                        .iter()
-                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
-                        .collect();
-                    snapshot.candidates = Some(words);
-                }
-            }
-            "selected" => {
-                if let Some(n) = v.as_i64() {
-                    snapshot.selected = Some(n as i32);
-                }
             }
             "visual_begin" => {
                 if let Some(n) = v.as_u64() {

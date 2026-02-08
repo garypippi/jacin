@@ -10,16 +10,11 @@ pub enum ImeMode {
     #[default]
     Disabled,
     /// IME is being enabled, waiting for keymap
-    Enabling {
-        /// Whether to send skkeleton toggle after keymap loads
-        enable_skkeleton_after: bool,
-    },
+    Enabling,
     /// IME is fully enabled and processing input
     Enabled {
         /// Current Vim editing mode
         vim_mode: VimMode,
-        /// Whether skkeleton is active for Japanese input
-        skkeleton_active: bool,
     },
     /// IME is being disabled
     Disabling,
@@ -90,24 +85,13 @@ impl ImeState {
     pub fn is_enabled(&self) -> bool {
         matches!(
             self.mode,
-            ImeMode::Enabled { .. } | ImeMode::Enabling { .. }
+            ImeMode::Enabled { .. } | ImeMode::Enabling
         )
     }
 
     /// Check if IME is fully enabled (not transitioning)
     pub fn is_fully_enabled(&self) -> bool {
         matches!(self.mode, ImeMode::Enabled { .. })
-    }
-
-    /// Check if skkeleton is active
-    pub fn is_skkeleton_active(&self) -> bool {
-        matches!(
-            self.mode,
-            ImeMode::Enabled {
-                skkeleton_active: true,
-                ..
-            }
-        )
     }
 
     /// Get current vim mode (if enabled)
@@ -119,23 +103,17 @@ impl ImeState {
     }
 
     /// Start enabling the IME
-    pub fn start_enabling(&mut self, enable_skkeleton: bool) {
-        self.mode = ImeMode::Enabling {
-            enable_skkeleton_after: enable_skkeleton,
-        };
+    pub fn start_enabling(&mut self) {
+        self.mode = ImeMode::Enabling;
     }
 
-    /// Complete enabling (keymap received)
+    /// Complete enabling (keymap received). Returns true if transitioned from Enabling.
     pub fn complete_enabling(&mut self) -> bool {
-        if let ImeMode::Enabling {
-            enable_skkeleton_after,
-        } = self.mode
-        {
+        if self.mode == ImeMode::Enabling {
             self.mode = ImeMode::Enabled {
                 vim_mode: VimMode::Insert,
-                skkeleton_active: enable_skkeleton_after,
             };
-            enable_skkeleton_after
+            true
         } else {
             false
         }
@@ -243,26 +221,6 @@ impl ImeState {
                 ..
             } => Some(awaiting),
             _ => None,
-        }
-    }
-
-    /// Toggle skkeleton active state
-    pub fn toggle_skkeleton(&mut self) {
-        if let ImeMode::Enabled {
-            skkeleton_active, ..
-        } = &mut self.mode
-        {
-            *skkeleton_active = !*skkeleton_active;
-        }
-    }
-
-    /// Set skkeleton active state
-    pub fn set_skkeleton_active(&mut self, active: bool) {
-        if let ImeMode::Enabled {
-            skkeleton_active, ..
-        } = &mut self.mode
-        {
-            *skkeleton_active = active;
         }
     }
 

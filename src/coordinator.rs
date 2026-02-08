@@ -11,12 +11,12 @@ impl State {
         self.reactivation_count = 0;
 
         if !was_enabled {
-            // Enable IME - grab keyboard, skkeleton toggle will be sent after keymap loads
+            // Enable IME - grab keyboard
             if self.wayland.active && self.wayland.keyboard_grab.is_none() {
                 log::debug!("[IME] Grabbing keyboard");
                 self.wayland.grab_keyboard();
                 self.keyboard.pending_keymap = true;
-                self.ime.start_enabling(true); // Will enable skkeleton after keymap
+                self.ime.start_enabling();
             }
         } else {
             // Disable IME - commit preedit text, release keyboard, disable skkeleton
@@ -30,11 +30,10 @@ impl State {
             }
             self.wayland.release_keyboard();
             self.keyboard.reset_modifiers();
-            // Send toggle to Neovim to disable skkeleton, then clear buffer.
+            // Clear Neovim buffer.
             // Must clear here rather than relying on Deactivate handler,
             // because rapid re-enable can happen before Deactivate fires.
             if let Some(ref nvim) = self.nvim {
-                nvim.send_key(&self.config.keybinds.toggle);
                 nvim.send_key("<Esc>ggdG");
             }
             // Clear preedit and keypress display
@@ -136,9 +135,8 @@ impl State {
                         self.wayland.release_keyboard();
                         self.keyboard.reset_modifiers();
                         self.ime.disable();
-                        // Toggle skkeleton off and clear buffer
+                        // Clear Neovim buffer
                         if let Some(ref nvim) = self.nvim {
-                            nvim.send_key(&self.config.keybinds.toggle);
                             nvim.send_key("<Esc>ggdG");
                         }
                     }
@@ -153,9 +151,8 @@ impl State {
                         self.wayland.release_keyboard();
                         self.keyboard.reset_modifiers();
                         self.ime.disable();
-                        // Toggle skkeleton off and clear buffer
+                        // Clear Neovim buffer
                         if let Some(ref nvim) = self.nvim {
-                            nvim.send_key(&self.config.keybinds.toggle);
                             nvim.send_key("<Esc>ggdG");
                         }
                     }

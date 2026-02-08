@@ -199,8 +199,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                         log::debug!("[IME] Re-grabbing keyboard after activation (count={})", state.reactivation_count);
                         state.wayland.grab_keyboard();
                         state.keyboard.pending_keymap = true;
-                        // false = don't toggle skkeleton (already enabled), just restore insert mode
-                        state.ime.start_enabling(false);
+                        state.ime.start_enabling();
                     } else {
                         log::warn!("[IME] Skipping re-grab (too many consecutive reactivations), disabling");
                         state.ime.disable();
@@ -287,25 +286,12 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             state.wayland.clear_modifiers();
 
                             // Complete enabling if transitioning
-                            let should_toggle = state.ime.complete_enabling();
-                            if should_toggle {
-                                // Set ready_time for debouncing
+                            if state.ime.complete_enabling() || state.ime.is_fully_enabled() {
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
-                                    log::debug!("[IME] Sending skkeleton toggle");
-                                    nvim.send_key(&state.config.keybinds.toggle);
-                                }
-                                // Show icon-only popup immediately
-                                state.update_popup();
-                            } else if state.ime.is_fully_enabled() {
-                                // Re-activation after deactivate/activate cycle:
-                                // Neovim is in normal mode from <Esc>ggdG, restore insert mode
-                                state.keyboard.mark_ready();
-                                if let Some(ref nvim) = state.nvim {
-                                    log::debug!("[IME] Restoring insert mode after re-activation");
+                                    log::debug!("[IME] Restoring insert mode");
                                     nvim.send_key("<Esc>i");
                                 }
-                                // Show icon-only popup immediately
                                 state.update_popup();
                             }
                         } else {

@@ -123,7 +123,7 @@ pub enum FromNeovim {
     Commit(String),
     /// Delete surrounding text (before_length, after_length)
     DeleteSurrounding { before: u32, after: u32 },
-    /// Completion candidates from nvim-cmp
+    /// Completion candidates from Neovim's popup menu
     Candidates(CandidateInfo),
     /// Visual selection range (None = no visual selection)
     VisualRange(Option<VisualSelection>),
@@ -208,10 +208,6 @@ pub struct Snapshot {
     /// Character width under cursor (normal/visual mode only, 0 otherwise)
     #[serde(default)]
     pub char_width: usize,
-    /// Completion candidates (None when cmp not visible)
-    pub candidates: Option<Vec<String>>,
-    /// Selected candidate index (0-indexed, None when no selection)
-    pub selected: Option<i32>,
     /// Visual selection start column (1-indexed byte offset, from Lua)
     #[serde(default)]
     pub visual_begin: Option<usize>,

@@ -1,7 +1,7 @@
 //! Neovim backend module
 //!
-//! Provides communication with an embedded Neovim instance for vim-skkeleton
-//! Japanese input support.
+//! Provides communication with an embedded Neovim instance for input processing.
+//! Users manage their own Japanese input plugins inside Neovim.
 
 mod event_source;
 mod handler;
