@@ -32,9 +32,9 @@ pub struct NeovimHandle {
 }
 
 impl NeovimHandle {
-    /// Send a key to Neovim
+    /// Send a key to Neovim (non-blocking: drops key if channel full)
     pub fn send_key(&self, key: &str) {
-        let _ = self.sender.send(ToNeovim::Key(key.to_string()));
+        let _ = self.sender.try_send(ToNeovim::Key(key.to_string()));
     }
 
     /// Try to receive a message from Neovim (non-blocking)
@@ -47,9 +47,9 @@ impl NeovimHandle {
         self.receiver.recv_timeout(timeout).ok()
     }
 
-    /// Shutdown Neovim
+    /// Shutdown Neovim (non-blocking: best-effort if channel full)
     pub fn shutdown(&self) {
-        let _ = self.sender.send(ToNeovim::Shutdown);
+        let _ = self.sender.try_send(ToNeovim::Shutdown);
     }
 
     /// Get the receiver for use with calloop event source
