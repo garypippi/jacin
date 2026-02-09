@@ -514,7 +514,7 @@ impl UnifiedPopup {
             0.0
         };
 
-        if is_normal_mode && cursor_char_begin < chars.len() {
+        if is_normal_mode && cursor_char_begin <= chars.len() {
             // Convert visual selection byte offsets to char positions
             let visual_char_range = match &content.visual_selection {
                 Some(VisualSelection::Charwise { begin, end }) => {
