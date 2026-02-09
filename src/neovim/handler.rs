@@ -578,6 +578,12 @@ async fn handle_key(
         }
         let snapshot = query_snapshot(nvim, tx).await?;
         *last_mode = snapshot.mode.clone();
+        // Getchar completion may lead to operator-pending mode (e.g., g→U creates gU operator).
+        // Must store Motion so subsequent keys are handled as motion input.
+        if snapshot.mode.starts_with("no") {
+            PENDING.store(PendingState::Motion);
+            log::debug!("[NVIM] Getchar completed into operator-pending mode ({})", snapshot.mode);
+        }
         return Ok(());
     }
 
