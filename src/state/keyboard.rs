@@ -3,6 +3,8 @@
 //! Handles XKB keymap, modifier tracking, and key debouncing.
 
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 use xkbcommon::xkb;
 
@@ -26,6 +28,10 @@ pub struct KeyboardState {
     pub repeat_rate: i32,
     /// Key repeat initial delay (ms)
     pub repeat_delay: i32,
+    /// Hash of the last successfully loaded keymap (for caching)
+    pub keymap_hash: Option<u64>,
+    /// Whether this is a reactivation (skip debounce)
+    pub is_reactivation: bool,
 }
 
 impl KeyboardState {
@@ -41,11 +47,24 @@ impl KeyboardState {
             pending_keymap: false,
             repeat_rate: 0,
             repeat_delay: 0,
+            keymap_hash: None,
+            is_reactivation: false,
         }
     }
 
-    /// Load keymap from string
+    /// Load keymap from string (skips XKB reload if hash matches)
     pub fn load_keymap(&mut self, keymap_str: &str) -> bool {
+        let mut hasher = DefaultHasher::new();
+        keymap_str.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        if self.keymap_hash == Some(hash) {
+            // Same keymap — skip XKB reload
+            log::debug!("Keymap unchanged (cache hit, skipped XKB reload)");
+            self.pending_keymap = false;
+            return true;
+        }
+
         if let Some(keymap) = xkb::Keymap::new_from_string(
             &self.xkb_context,
             keymap_str.to_string(),
@@ -54,6 +73,7 @@ impl KeyboardState {
         ) {
             self.xkb_state = Some(xkb::State::new(&keymap));
             self.pending_keymap = false;
+            self.keymap_hash = Some(hash);
             true
         } else {
             false
@@ -109,9 +129,14 @@ impl KeyboardState {
         self.ignored_keys.remove(&key);
     }
 
-    /// Mark as ready with debounce window
+    /// Mark as ready with debounce window (skipped on reactivation)
     pub fn mark_ready(&mut self) {
-        self.ready_time = Some(Instant::now());
+        if self.is_reactivation {
+            // Skip debounce — this is a window switch, not a fresh enable
+            self.is_reactivation = false;
+        } else {
+            self.ready_time = Some(Instant::now());
+        }
     }
 
     /// Get keysym and UTF-8 for a key

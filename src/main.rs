@@ -130,7 +130,6 @@ fn main() -> anyhow::Result<()> {
         keypress: KeypressState::new(),
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
-        reactivation_count: 0,
         config: config.clone(),
         nvim,
         visual_display: None,
@@ -268,9 +267,6 @@ pub struct State {
     // Exit and toggle flags
     pub(crate) pending_exit: bool,
     pub(crate) toggle_flag: Arc<AtomicBool>,
-    // Counter for consecutive Deactivate/Activate re-grabs without user key input.
-    // Prevents infinite loop when compositor keeps cycling.
-    pub(crate) reactivation_count: u32,
     // Config (needed for Neovim respawn after :q)
     pub(crate) config: config::Config,
     // Neovim backend

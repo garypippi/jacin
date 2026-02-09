@@ -29,6 +29,10 @@ pub struct WaylandState {
     pub virtual_keyboard: Option<ZwpVirtualKeyboardV1>,
     /// Whether the virtual keyboard has a keymap set (required before sending events)
     pub virtual_keyboard_ready: bool,
+    /// Pending activate flag (set in Activate, processed in Done)
+    pub pending_activate: bool,
+    /// Pending deactivate flag (set in Deactivate, processed in Done)
+    pub pending_deactivate: bool,
 }
 
 impl WaylandState {
@@ -42,6 +46,8 @@ impl WaylandState {
             active: false,
             virtual_keyboard: None,
             virtual_keyboard_ready: false,
+            pending_activate: false,
+            pending_deactivate: false,
         }
     }
 

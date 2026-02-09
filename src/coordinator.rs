@@ -8,7 +8,6 @@ impl State {
     pub(crate) fn handle_ime_toggle(&mut self) {
         let was_enabled = self.ime.is_enabled();
         log::info!("[IME] Toggle: was_enabled = {}", was_enabled);
-        self.reactivation_count = 0;
 
         if !was_enabled {
             // Respawn Neovim if it exited (e.g., after :q)
@@ -162,11 +161,7 @@ impl State {
         let cursor_begin = self.ime.cursor_begin as i32;
         let cursor_end = self.ime.cursor_end as i32;
         // Don't send preedit to compositor when IME is disabled or deactivated.
-        // Also skip empty preedit during re-activation (reactivation_count > 0) to avoid
-        // sending commit(serial) that triggers compositor to cycle Deactivate/Activate again.
-        if self.wayland.active && self.ime.is_enabled()
-            && !(self.ime.preedit.is_empty() && self.reactivation_count > 0)
-        {
+        if self.wayland.active && self.ime.is_enabled() {
             self.wayland
                 .set_preedit(&self.ime.preedit, cursor_begin, cursor_end);
             log::debug!(

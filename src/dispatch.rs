@@ -188,48 +188,12 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
     ) {
         match event {
             zwp_input_method_v2::Event::Activate => {
-                state.wayland.active = true;
                 log::info!("IME activated!");
-
-                // Re-grab keyboard if IME was enabled before deactivation.
-                // Limit consecutive re-grabs to prevent infinite Deactivate/Activate
-                // loops (the grab itself can trigger compositor re-evaluation).
-                if state.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
-                    if state.reactivation_count < 2 {
-                        state.reactivation_count += 1;
-                        log::debug!("[IME] Re-grabbing keyboard after activation (count={})", state.reactivation_count);
-                        state.wayland.grab_keyboard();
-                        state.keyboard.pending_keymap = true;
-                        state.ime.start_enabling();
-                    } else {
-                        log::warn!("[IME] Skipping re-grab (too many consecutive reactivations), disabling");
-                        state.ime.disable();
-                        state.reactivation_count = 0;
-                    }
-                }
+                state.wayland.pending_activate = true;
             }
             zwp_input_method_v2::Event::Deactivate => {
                 log::info!("IME deactivated");
-                state.wayland.active = false;
-                // Only do cleanup when IME is enabled — avoids flooding Neovim
-                // during rapid compositor activate/deactivate cycles (window switching)
-                if state.ime.is_enabled() {
-                    // Cancel any active key repeat
-                    state.repeat.cancel();
-                    // Release keyboard grab to stop receiving key events while deactivated
-                    state.wayland.release_keyboard();
-                    state.keyboard.reset_modifiers();
-                    // Clear local state (don't send Wayland protocol requests while deactivated,
-                    // the compositor automatically clears preedit on deactivate)
-                    state.ime.clear_preedit();
-                    state.ime.clear_candidates();
-                    state.keypress.clear();
-                    state.hide_popup();
-                    // Clear Neovim buffer to reset state for next activation
-                    if let Some(ref nvim) = state.nvim {
-                        nvim.send_key("<Esc>ggdG");
-                    }
-                }
+                state.wayland.pending_deactivate = true;
             }
             zwp_input_method_v2::Event::SurroundingText { .. } => {
                 // Noisy, don't print
@@ -244,6 +208,41 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 // Serial must equal the number of Done events received
                 // (required by the commit request protocol)
                 state.wayland.serial += 1;
+
+                let pending_deactivate = std::mem::take(&mut state.wayland.pending_deactivate);
+                let pending_activate = std::mem::take(&mut state.wayland.pending_activate);
+
+                // Process deactivate first (like fcitx5)
+                if pending_deactivate {
+                    state.wayland.active = false;
+                    if state.ime.is_enabled() {
+                        state.repeat.cancel();
+                        state.wayland.release_keyboard();
+                        state.keyboard.reset_modifiers();
+                        // Clear local state (don't send Wayland protocol requests while deactivated,
+                        // the compositor automatically clears preedit on deactivate)
+                        state.ime.clear_preedit();
+                        state.ime.clear_candidates();
+                        state.keypress.clear();
+                        state.hide_popup();
+                        // Clear Neovim buffer to reset state for next activation
+                        if let Some(ref nvim) = state.nvim {
+                            nvim.send_key("<Esc>ggdG");
+                        }
+                    }
+                }
+
+                // Then process activate
+                if pending_activate {
+                    state.wayland.active = true;
+                    if state.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
+                        log::debug!("[IME] Re-grabbing keyboard after activation");
+                        state.wayland.grab_keyboard();
+                        state.keyboard.pending_keymap = true;
+                        state.keyboard.is_reactivation = true;
+                        state.ime.start_enabling();
+                    }
+                }
             }
             zwp_input_method_v2::Event::Unavailable => {
                 log::warn!("IME unavailable - another IME may be running");
@@ -318,8 +317,6 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                 state: key_state,
             } => {
                 log::debug!("[GRAB] Key event: key={}, state={:?}", key, key_state);
-                // User interaction: reset reactivation counter
-                state.reactivation_count = 0;
                 if let WEnum::Value(ks) = key_state {
                     if ks == wl_keyboard::KeyState::Pressed {
                         if state.keyboard.key_repeats(key) {
