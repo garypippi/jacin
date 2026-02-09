@@ -1,6 +1,10 @@
-//! Text rendering for candidate window using fontdb, fontdue, and tiny-skia
+//! Text rendering for candidate window using fontconfig, fontdue, and tiny-skia
 
-use fontdb::{Database, Query};
+use fontconfig::{FC_CHARSET, Fontconfig};
+use fontconfig_sys as sys;
+use fontconfig_sys::ffi_dispatch;
+// Without dlopen, ffi_dispatch! expands to direct function calls from sys::*
+use sys::*;
 use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
 use std::collections::HashMap;
@@ -11,9 +15,11 @@ use wayland_client::protocol::{wl_shm, wl_shm_pool};
 
 use crate::State;
 
-/// Font renderer with glyph caching
+/// Font renderer with glyph caching and per-glyph font fallback
 pub struct TextRenderer {
     font: Font,
+    fallback_fonts: Vec<Font>,
+    fc: Fontconfig,
     font_size: f32,
     glyph_cache: HashMap<char, GlyphData>,
 }
@@ -25,23 +31,96 @@ struct GlyphData {
 }
 
 impl TextRenderer {
-    /// Create a new text renderer, searching for a Japanese-capable font
+    /// Create a new text renderer, searching for a font via fontconfig
     pub fn new(font_size: f32) -> Option<Self> {
-        let font = load_japanese_font()?;
+        let (font, fc) = load_font()?;
         Some(Self {
             font,
+            fallback_fonts: Vec::new(),
+            fc,
             font_size,
             glyph_cache: HashMap::new(),
         })
     }
 
-    /// Get or rasterize a glyph (returns owned data to avoid borrow issues)
+    /// Get or rasterize a glyph with font fallback
     fn get_glyph(&mut self, c: char) -> GlyphData {
-        if !self.glyph_cache.contains_key(&c) {
-            let (metrics, bitmap) = self.font.rasterize(c, self.font_size);
-            self.glyph_cache.insert(c, GlyphData { metrics, bitmap });
+        if let Some(cached) = self.glyph_cache.get(&c) {
+            return cached.clone();
         }
-        self.glyph_cache.get(&c).unwrap().clone()
+
+        // Try primary font
+        if self.font.has_glyph(c) {
+            let (metrics, bitmap) = self.font.rasterize(c, self.font_size);
+            let data = GlyphData { metrics, bitmap };
+            self.glyph_cache.insert(c, data.clone());
+            return data;
+        }
+
+        // Try existing fallback fonts
+        for fb in &self.fallback_fonts {
+            if fb.has_glyph(c) {
+                let (metrics, bitmap) = fb.rasterize(c, self.font_size);
+                let data = GlyphData { metrics, bitmap };
+                self.glyph_cache.insert(c, data.clone());
+                return data;
+            }
+        }
+
+        // Query fontconfig for a fallback font covering this character
+        if let Some(fb) = self.query_fallback_font(c) {
+            let (metrics, bitmap) = fb.rasterize(c, self.font_size);
+            let data = GlyphData { metrics, bitmap };
+            self.glyph_cache.insert(c, data.clone());
+            self.fallback_fonts.push(fb);
+            return data;
+        }
+
+        // Last resort: primary font's .notdef glyph
+        let (metrics, bitmap) = self.font.rasterize(c, self.font_size);
+        let data = GlyphData { metrics, bitmap };
+        self.glyph_cache.insert(c, data.clone());
+        data
+    }
+
+    /// Query fontconfig for a font that covers the given character
+    #[allow(unexpected_cfgs)] // ffi_dispatch! macro checks cfg(feature = "dlopen") internally
+    fn query_fallback_font(&self, c: char) -> Option<Font> {
+        unsafe {
+            let cs = ffi_dispatch!(LIB, FcCharSetCreate,);
+            ffi_dispatch!(LIB, FcCharSetAddChar, cs, c as u32);
+
+            let mut pat = fontconfig::Pattern::new(&self.fc);
+            ffi_dispatch!(
+                LIB,
+                FcPatternAddCharSet,
+                pat.as_mut_ptr(),
+                FC_CHARSET.as_ptr(),
+                cs
+            );
+            let matched = pat.font_match();
+            ffi_dispatch!(LIB, FcCharSetDestroy, cs);
+
+            let path = matched.filename()?;
+            let index = matched.face_index().unwrap_or(0) as u32;
+
+            let data = std::fs::read(path)
+                .map_err(|e| log::warn!("[FONT] Failed to read fallback {}: {}", path, e))
+                .ok()?;
+
+            let font = Font::from_bytes(
+                data,
+                FontSettings {
+                    collection_index: index,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| log::warn!("[FONT] Failed to parse fallback {}: {}", path, e))
+            .ok()?;
+
+            log::info!("[FONT] Fallback for '{}': {} (index={})", c, path, index);
+            Some(font)
+        }
     }
 
     /// Measure text width
@@ -206,89 +285,44 @@ pub fn draw_border(pixmap: &mut Pixmap, width: u32, height: u32, color: Color) {
     }
 }
 
-/// Load a Japanese-capable font from system fonts
-fn load_japanese_font() -> Option<Font> {
-    let mut db = Database::new();
+/// Find and load a font via fontconfig (automatic detection, no preferences).
+fn load_font() -> Option<(Font, Fontconfig)> {
+    let fc = Fontconfig::new().or_else(|| {
+        log::warn!("[FONT] Failed to initialize fontconfig");
+        None
+    })?;
 
-    // Load system fonts
-    db.load_system_fonts();
+    // Extract path and index from fontconfig match, then drop patterns to release borrow on fc
+    let (path, index) = {
+        let mut pat = fontconfig::Pattern::new(&fc);
+        let matched = pat.font_match();
 
-    // Also check common paths
-    let common_paths = ["/usr/share/fonts", "/usr/local/share/fonts"];
-    for path in common_paths {
-        if std::path::Path::new(path).exists() {
-            db.load_fonts_dir(path);
-        }
-    }
+        let path = matched.filename().or_else(|| {
+            log::warn!("[FONT] fontconfig returned no filename");
+            None
+        })?;
+        let index = matched.face_index().unwrap_or(0) as u32;
+        (path.to_owned(), index)
+    };
 
-    // Load user fonts
-    if let Some(home) = std::env::var_os("HOME") {
-        let user_fonts = std::path::PathBuf::from(home).join(".local/share/fonts");
-        if user_fonts.exists() {
-            db.load_fonts_dir(user_fonts);
-        }
-    }
+    let data = std::fs::read(&path)
+        .map_err(|e| {
+            log::warn!("[FONT] Failed to read {}: {}", path, e);
+        })
+        .ok()?;
 
-    log::info!("[FONT] Loaded {} font faces", db.faces().count());
+    let font = Font::from_bytes(
+        data,
+        FontSettings {
+            collection_index: index,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| {
+        log::warn!("[FONT] Failed to parse {}: {}", path, e);
+    })
+    .ok()?;
 
-    // Preferred fonts for Japanese text
-    let preferred_families = [
-        "Noto Sans CJK JP",
-        "Noto Sans CJK",
-        "Source Han Sans",
-        "Source Han Sans JP",
-        "M+ 1p",
-        "IPAGothic",
-        "IPAPGothic",
-        "VL Gothic",
-        "TakaoGothic", // Note: no space
-        "TakaoPGothic",
-        "Noto Sans Mono", // Fallback (limited Japanese but widely available)
-        "Liberation Sans",
-        "DejaVu Sans",
-    ];
-
-    for family in preferred_families {
-        let query = Query {
-            families: &[fontdb::Family::Name(family)],
-            ..Query::default()
-        };
-
-        if let Some(id) = db.query(&query)
-            && let Some(face) = db.face(id)
-        {
-            log::debug!("[FONT] Found font: {} ({})", family, face.post_script_name);
-
-            // Load the font data
-            if let Some(font_data) = db.face_source(id) {
-                match &font_data.0 {
-                    fontdb::Source::File(path) => {
-                        if let Ok(data) = std::fs::read(path)
-                            && let Ok(font) = Font::from_bytes(data, FontSettings::default())
-                        {
-                            log::debug!("[FONT] Loaded: {}", path.display());
-                            return Some(font);
-                        }
-                    }
-                    fontdb::Source::Binary(data) => {
-                        let bytes: Vec<u8> = data.as_ref().as_ref().to_vec();
-                        if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
-                            log::debug!("[FONT] Loaded from memory");
-                            return Some(font);
-                        }
-                    }
-                    fontdb::Source::SharedFile(_, data) => {
-                        let bytes: Vec<u8> = data.as_ref().as_ref().to_vec();
-                        if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
-                            log::debug!("[FONT] Loaded from memory");
-                            return Some(font);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    log::warn!("[FONT] No Japanese font found, candidate window disabled");
-    None
+    log::info!("[FONT] Loaded: {} (index={})", path, index);
+    Some((font, fc))
 }
