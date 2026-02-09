@@ -74,4 +74,3 @@ pub fn spawn_neovim(config: Config) -> anyhow::Result<NeovimHandle> {
         receiver: from_nvim_rx,
     })
 }
-

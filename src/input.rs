@@ -1,8 +1,8 @@
 use wayland_client::protocol::wl_keyboard;
 use xkbcommon::xkb;
 
-use crate::neovim::{PendingState, pending_state};
 use crate::State;
+use crate::neovim::{PendingState, pending_state};
 
 /// Distinguishes physical key presses from repeat events
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +80,12 @@ pub fn keysym_to_vim(ctrl: bool, alt: bool, keysym: xkb::Keysym, utf8: &str) -> 
 }
 
 impl State {
-    pub(crate) fn handle_key(&mut self, key: u32, key_state: wl_keyboard::KeyState, _origin: KeyOrigin) {
+    pub(crate) fn handle_key(
+        &mut self,
+        key: u32,
+        key_state: wl_keyboard::KeyState,
+        _origin: KeyOrigin,
+    ) {
         let state_str = match key_state {
             wl_keyboard::KeyState::Pressed => "pressed",
             wl_keyboard::KeyState::Released => "released",
@@ -88,7 +93,9 @@ impl State {
         };
         log::debug!(
             "[KEY] code={}, state={}, ctrl={}",
-            key, state_str, self.keyboard.ctrl_pressed
+            key,
+            state_str,
+            self.keyboard.ctrl_pressed
         );
 
         // Handle key releases
@@ -227,13 +234,15 @@ impl State {
         if old_ctrl != self.keyboard.ctrl_pressed {
             log::debug!(
                 "[MOD] ctrl changed: {} -> {}",
-                old_ctrl, self.keyboard.ctrl_pressed
+                old_ctrl,
+                self.keyboard.ctrl_pressed
             );
         }
         if old_alt != self.keyboard.alt_pressed {
             log::debug!(
                 "[MOD] alt changed: {} -> {}",
-                old_alt, self.keyboard.alt_pressed
+                old_alt,
+                self.keyboard.alt_pressed
             );
         }
     }
@@ -255,5 +264,113 @@ impl State {
         } else {
             self.hide_keypress();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keysym_to_vim;
+    use xkbcommon::xkb::Keysym;
+
+    #[test]
+    fn printable_ascii() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::a, "a"),
+            Some("a".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::z, "z"),
+            Some("z".into())
+        );
+    }
+
+    #[test]
+    fn uppercase_via_utf8() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::A, "A"),
+            Some("A".into())
+        );
+    }
+
+    #[test]
+    fn special_keys() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::Return, ""),
+            Some("<CR>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::BackSpace, ""),
+            Some("<BS>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::Escape, ""),
+            Some("<Esc>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::Tab, ""),
+            Some("<Tab>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::space, ""),
+            Some("<Space>".into())
+        );
+    }
+
+    #[test]
+    fn ctrl_modifier() {
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::a, "a"),
+            Some("<C-a>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::Return, ""),
+            Some("<C-CR>".into())
+        );
+    }
+
+    #[test]
+    fn alt_modifier() {
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::a, "a"),
+            Some("<A-a>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::Return, ""),
+            Some("<A-CR>".into())
+        );
+    }
+
+    #[test]
+    fn less_than_escaped() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::less, "<"),
+            Some("<lt>".into())
+        );
+    }
+
+    #[test]
+    fn bare_modifier_returns_none() {
+        assert_eq!(keysym_to_vim(false, false, Keysym::Shift_L, ""), None);
+        assert_eq!(keysym_to_vim(false, false, Keysym::Control_L, ""), None);
+    }
+
+    #[test]
+    fn arrow_keys() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::Left, ""),
+            Some("<Left>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::Up, ""),
+            Some("<Up>".into())
+        );
+    }
+
+    #[test]
+    fn japanese_utf8() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::NoSymbol, "あ"),
+            Some("あ".into())
+        );
     }
 }

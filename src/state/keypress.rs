@@ -93,7 +93,6 @@ impl KeypressState {
             false
         }
     }
-
 }
 
 impl Default for KeypressState {

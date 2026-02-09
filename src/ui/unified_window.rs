@@ -12,19 +12,26 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 };
 
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
-use crate::neovim::VisualSelection;
 use crate::State;
+use crate::neovim::VisualSelection;
+
+/// RGBA color as (r, g, b, a) tuple — converted to Color at use via `rgba()`.
+type Rgba = (u8, u8, u8, u8);
+
+fn rgba(c: Rgba) -> Color {
+    Color::from_rgba8(c.0, c.1, c.2, c.3)
+}
 
 // Colors (matching existing windows)
-const BG_COLOR: (u8, u8, u8, u8) = (40, 44, 52, 240);
-const TEXT_COLOR: (u8, u8, u8, u8) = (220, 223, 228, 255);
-const BORDER_COLOR: (u8, u8, u8, u8) = (80, 84, 92, 255);
-const SELECTED_BG: (u8, u8, u8, u8) = (61, 89, 161, 255);
-const CURSOR_BG: (u8, u8, u8, u8) = (97, 175, 239, 255);
-const VISUAL_BG: (u8, u8, u8, u8) = (61, 89, 161, 200);
-const NUMBER_COLOR: (u8, u8, u8, u8) = (152, 195, 121, 255);
-const SCROLLBAR_BG: (u8, u8, u8, u8) = (60, 64, 72, 255);
-const SCROLLBAR_THUMB: (u8, u8, u8, u8) = (100, 104, 112, 255);
+const BG_COLOR: Rgba = (40, 44, 52, 240);
+const TEXT_COLOR: Rgba = (220, 223, 228, 255);
+const BORDER_COLOR: Rgba = (80, 84, 92, 255);
+const SELECTED_BG: Rgba = (61, 89, 161, 255);
+const CURSOR_BG: Rgba = (97, 175, 239, 255);
+const VISUAL_BG: Rgba = (61, 89, 161, 200);
+const NUMBER_COLOR: Rgba = (152, 195, 121, 255);
+const SCROLLBAR_BG: Rgba = (60, 64, 72, 255);
+const SCROLLBAR_THUMB: Rgba = (100, 104, 112, 255);
 
 const PADDING: f32 = 8.0;
 const MAX_VISIBLE_CANDIDATES: usize = 9;
@@ -38,18 +45,18 @@ const ICON_SEPARATOR_GAP: f32 = 6.0;
 const MODE_GAP: f32 = 4.0;
 
 // Mode indicator colors
-const MODE_INSERT_COLOR: (u8, u8, u8, u8) = (152, 195, 121, 255); // Green
-const MODE_NORMAL_COLOR: (u8, u8, u8, u8) = (97, 175, 239, 255); // Blue
-const MODE_VISUAL_COLOR: (u8, u8, u8, u8) = (198, 120, 221, 255); // Purple
-const MODE_OP_COLOR: (u8, u8, u8, u8) = (229, 192, 123, 255); // Yellow
-const MODE_CMD_COLOR: (u8, u8, u8, u8) = (224, 108, 117, 255); // Red
-const MODE_RECORDING_COLOR: (u8, u8, u8, u8) = (224, 108, 117, 255); // Red
+const MODE_INSERT_COLOR: Rgba = (152, 195, 121, 255); // Green
+const MODE_NORMAL_COLOR: Rgba = (97, 175, 239, 255); // Blue
+const MODE_VISUAL_COLOR: Rgba = (198, 120, 221, 255); // Purple
+const MODE_OP_COLOR: Rgba = (229, 192, 123, 255); // Yellow
+const MODE_CMD_COLOR: Rgba = (224, 108, 117, 255); // Red
+const MODE_RECORDING_COLOR: Rgba = (224, 108, 117, 255); // Red
 
 /// Pool size: 600×450×4×2 bytes for double buffering (~2MB)
 const POOL_SIZE: usize = 600 * 450 * 4 * 2;
 
 /// Get mode label text and color from vim_mode string
-fn mode_label(vim_mode: &str) -> (&'static str, (u8, u8, u8, u8)) {
+fn mode_label(vim_mode: &str) -> (&'static str, Rgba) {
     if vim_mode.starts_with("no") {
         ("OP", MODE_OP_COLOR)
     } else {
@@ -233,8 +240,8 @@ impl UnifiedPopup {
         let preedit_y = y;
         if has_preedit {
             let text_width = self.renderer.measure_text(&content.preedit);
-            let preedit_width =
-                (icon_area_width + text_width + PADDING + 4.0).min(MAX_PREEDIT_WIDTH + icon_area_width);
+            let preedit_width = (icon_area_width + text_width + PADDING + 4.0)
+                .min(MAX_PREEDIT_WIDTH + icon_area_width);
             max_width = max_width.max(preedit_width);
         }
         // Minimum width: icon area + right padding
@@ -309,7 +316,8 @@ impl UnifiedPopup {
         if buffer_size * 2 > POOL_SIZE {
             log::warn!(
                 "[POPUP] Buffer too large ({}x{}), skipping render",
-                self.width, self.height
+                self.width,
+                self.height
             );
             return;
         }
@@ -322,13 +330,10 @@ impl UnifiedPopup {
         let mut pixmap = Pixmap::new(self.width, self.height).unwrap();
 
         // Background
-        let bg_color = Color::from_rgba8(BG_COLOR.0, BG_COLOR.1, BG_COLOR.2, BG_COLOR.3);
-        pixmap.fill(bg_color);
+        pixmap.fill(rgba(BG_COLOR));
 
         // Border
-        let border_color =
-            Color::from_rgba8(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2, BORDER_COLOR.3);
-        draw_border(&mut pixmap, self.width, self.height, border_color);
+        draw_border(&mut pixmap, self.width, self.height, rgba(BORDER_COLOR));
 
         // Render sections
         self.render_status_bar(&mut pixmap, content, layout);
@@ -341,17 +346,11 @@ impl UnifiedPopup {
         if layout.has_keypress || layout.has_candidates {
             let line_height = self.renderer.line_height();
             let sep_y = layout.preedit_y + line_height;
-            let border_color = Color::from_rgba8(
-                BORDER_COLOR.0,
-                BORDER_COLOR.1,
-                BORDER_COLOR.2,
-                BORDER_COLOR.3,
-            );
             if let Some(rect) =
                 Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
             {
                 let mut paint = Paint::default();
-                paint.set_color(border_color);
+                paint.set_color(rgba(BORDER_COLOR));
                 pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
         }
@@ -410,33 +409,28 @@ impl UnifiedPopup {
 
     /// Render mode label, recording indicator, and vertical separator in the first row
     fn render_status_bar(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
-        let border_color =
-            Color::from_rgba8(BORDER_COLOR.0, BORDER_COLOR.1, BORDER_COLOR.2, BORDER_COLOR.3);
         let line_height = self.renderer.line_height();
         let y_baseline = layout.preedit_y + line_height * 0.75;
 
         // Draw mode label
         let (mode_text, mode_color) = mode_label(&content.vim_mode);
-        let mode_color =
-            Color::from_rgba8(mode_color.0, mode_color.1, mode_color.2, mode_color.3);
         let mode_x = PADDING;
         self.renderer
-            .draw_text(pixmap, mode_text, mode_x, y_baseline, mode_color);
+            .draw_text(pixmap, mode_text, mode_x, y_baseline, rgba(mode_color));
 
         // Draw recording indicator if active
         let mode_text_width = self.renderer.measure_text(mode_text);
         let mut after_mode_x = mode_x + mode_text_width;
         if !content.recording.is_empty() {
             let rec_label = format!("REC @{}", content.recording);
-            let rec_color = Color::from_rgba8(
-                MODE_RECORDING_COLOR.0,
-                MODE_RECORDING_COLOR.1,
-                MODE_RECORDING_COLOR.2,
-                MODE_RECORDING_COLOR.3,
-            );
             let rec_x = after_mode_x + MODE_GAP;
-            self.renderer
-                .draw_text(pixmap, &rec_label, rec_x, y_baseline, rec_color);
+            self.renderer.draw_text(
+                pixmap,
+                &rec_label,
+                rec_x,
+                y_baseline,
+                rgba(MODE_RECORDING_COLOR),
+            );
             after_mode_x = rec_x + self.renderer.measure_text(&rec_label);
         }
 
@@ -446,7 +440,7 @@ impl UnifiedPopup {
             Rect::from_xywh(sep_x, layout.preedit_y, ICON_SEPARATOR_WIDTH, line_height)
         {
             let mut paint = Paint::default();
-            paint.set_color(border_color);
+            paint.set_color(rgba(BORDER_COLOR));
             pixmap.fill_rect(rect, &paint, Transform::identity(), None);
         }
     }
@@ -459,8 +453,8 @@ impl UnifiedPopup {
         layout: &Layout,
         preedit_left: f32,
     ) {
-        let text_color = Color::from_rgba8(TEXT_COLOR.0, TEXT_COLOR.1, TEXT_COLOR.2, TEXT_COLOR.3);
-        let cursor_bg = Color::from_rgba8(CURSOR_BG.0, CURSOR_BG.1, CURSOR_BG.2, CURSOR_BG.3);
+        let text_color = rgba(TEXT_COLOR);
+        let cursor_bg = rgba(CURSOR_BG);
         let line_height = self.renderer.line_height();
         let y_baseline = layout.preedit_y + line_height * 0.75;
 
@@ -480,9 +474,8 @@ impl UnifiedPopup {
             .copied()
             .unwrap_or(chars.len());
 
-        let is_normal_mode = content.vim_mode == "n"
-            || content.vim_mode == "v"
-            || content.vim_mode.starts_with('v');
+        let is_normal_mode =
+            content.vim_mode == "n" || content.vim_mode == "v" || content.vim_mode.starts_with('v');
 
         // Calculate character positions (absolute, starting from preedit_left)
         let mut char_x_positions: Vec<f32> = Vec::with_capacity(chars.len() + 1);
@@ -534,8 +527,7 @@ impl UnifiedPopup {
 
             // Draw visual selection background (behind cursor)
             if let Some((vbegin, vend)) = visual_char_range {
-                let visual_bg =
-                    Color::from_rgba8(VISUAL_BG.0, VISUAL_BG.1, VISUAL_BG.2, VISUAL_BG.3);
+                let visual_bg = rgba(VISUAL_BG);
                 let vx_start = char_x_positions[vbegin] - scroll_offset;
                 let vx_end = char_x_positions[vend.min(chars.len())] - scroll_offset;
                 if let Some(rect) =
@@ -567,9 +559,7 @@ impl UnifiedPopup {
                 let char_width = self.renderer.measure_text(&c.to_string());
 
                 // Skip characters outside visible area
-                if char_x + char_width < preedit_left
-                    || char_x > layout.width as f32 - PADDING
-                {
+                if char_x + char_width < preedit_left || char_x > layout.width as f32 - PADDING {
                     continue;
                 }
 
@@ -589,9 +579,7 @@ impl UnifiedPopup {
                 let char_width = self.renderer.measure_text(&c.to_string());
 
                 // Skip characters outside visible area
-                if char_x + char_width < preedit_left
-                    || char_x > layout.width as f32 - PADDING
-                {
+                if char_x + char_width < preedit_left || char_x > layout.width as f32 - PADDING {
                     continue;
                 }
 
@@ -614,48 +602,48 @@ impl UnifiedPopup {
     }
 
     /// Render keypress section
-    fn render_keypress_section(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
-        let text_color = Color::from_rgba8(TEXT_COLOR.0, TEXT_COLOR.1, TEXT_COLOR.2, TEXT_COLOR.3);
+    fn render_keypress_section(
+        &mut self,
+        pixmap: &mut Pixmap,
+        content: &PopupContent,
+        layout: &Layout,
+    ) {
         let line_height = self.renderer.line_height();
         let y_baseline = layout.keypress_y + line_height * 0.75;
 
-        self.renderer
-            .draw_text(pixmap, &content.keypress, PADDING, y_baseline, text_color);
+        self.renderer.draw_text(
+            pixmap,
+            &content.keypress,
+            PADDING,
+            y_baseline,
+            rgba(TEXT_COLOR),
+        );
 
         // Draw separator if candidates follow
         if layout.has_candidates {
             let sep_y = layout.keypress_y + line_height;
-            let border_color = Color::from_rgba8(
-                BORDER_COLOR.0,
-                BORDER_COLOR.1,
-                BORDER_COLOR.2,
-                BORDER_COLOR.3,
-            );
             if let Some(rect) =
                 Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
             {
                 let mut paint = Paint::default();
-                paint.set_color(border_color);
+                paint.set_color(rgba(BORDER_COLOR));
                 pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
         }
     }
 
     /// Render candidate section with scrollbar
-    fn render_candidate_section(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
-        let text_color = Color::from_rgba8(TEXT_COLOR.0, TEXT_COLOR.1, TEXT_COLOR.2, TEXT_COLOR.3);
-        let selected_bg =
-            Color::from_rgba8(SELECTED_BG.0, SELECTED_BG.1, SELECTED_BG.2, SELECTED_BG.3);
-        let number_color =
-            Color::from_rgba8(NUMBER_COLOR.0, NUMBER_COLOR.1, NUMBER_COLOR.2, NUMBER_COLOR.3);
-        let scrollbar_bg =
-            Color::from_rgba8(SCROLLBAR_BG.0, SCROLLBAR_BG.1, SCROLLBAR_BG.2, SCROLLBAR_BG.3);
-        let scrollbar_thumb = Color::from_rgba8(
-            SCROLLBAR_THUMB.0,
-            SCROLLBAR_THUMB.1,
-            SCROLLBAR_THUMB.2,
-            SCROLLBAR_THUMB.3,
-        );
+    fn render_candidate_section(
+        &mut self,
+        pixmap: &mut Pixmap,
+        content: &PopupContent,
+        layout: &Layout,
+    ) {
+        let text_color = rgba(TEXT_COLOR);
+        let selected_bg = rgba(SELECTED_BG);
+        let number_color = rgba(NUMBER_COLOR);
+        let scrollbar_bg = rgba(SCROLLBAR_BG);
+        let scrollbar_thumb = rgba(SCROLLBAR_THUMB);
 
         let line_height = self.renderer.line_height();
         let total_count = content.candidates.len();
@@ -692,8 +680,13 @@ impl UnifiedPopup {
                 .draw_text(pixmap, &number, PADDING, y_text, number_color);
 
             // Draw candidate text
-            self.renderer
-                .draw_text(pixmap, candidate, PADDING + NUMBER_WIDTH, y_text, text_color);
+            self.renderer.draw_text(
+                pixmap,
+                candidate,
+                PADDING + NUMBER_WIDTH,
+                y_text,
+                text_color,
+            );
         }
 
         // Draw scrollbar if needed

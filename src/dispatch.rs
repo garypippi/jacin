@@ -156,7 +156,10 @@ impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for State 
             // This is informational - positioning is handled by the compositor
             log::debug!(
                 "[POPUP] Text input rectangle: x={}, y={}, {}x{}",
-                x, y, width, height
+                x,
+                y,
+                width,
+                height
             );
         }
     }
@@ -291,7 +294,9 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             } else {
                                 VimMode::Normal
                             };
-                            if state.ime.complete_enabling(initial_mode) || state.ime.is_fully_enabled() {
+                            if state.ime.complete_enabling(initial_mode)
+                                || state.ime.is_fully_enabled()
+                            {
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
                                     if state.config.behavior.auto_startinsert {

@@ -70,7 +70,11 @@ impl Config {
                 config
             }
             Err(e) => {
-                log::warn!("[CONFIG] Parse error in {}: {} (using defaults)", path.display(), e);
+                log::warn!(
+                    "[CONFIG] Parse error in {}: {} (using defaults)",
+                    path.display(),
+                    e
+                );
                 Self::default()
             }
         }

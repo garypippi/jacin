@@ -1,8 +1,8 @@
 use std::sync::atomic::Ordering;
 
+use crate::State;
 use crate::neovim::{self, FromNeovim};
 use crate::ui::PopupContent;
-use crate::State;
 
 impl State {
     pub(crate) fn handle_ime_toggle(&mut self) {
@@ -65,9 +65,13 @@ impl State {
             FromNeovim::Preedit(info) => {
                 log::debug!(
                     "[NVIM] Preedit: {:?}, cursor: {}..{}, mode: {}",
-                    info.text, info.cursor_begin, info.cursor_end, info.mode
+                    info.text,
+                    info.cursor_begin,
+                    info.cursor_end,
+                    info.mode
                 );
-                self.ime.set_preedit(info.text, info.cursor_begin, info.cursor_end);
+                self.ime
+                    .set_preedit(info.text, info.cursor_begin, info.cursor_end);
                 self.keypress.set_vim_mode(&info.mode);
                 self.keypress.recording = info.recording;
                 self.update_preedit();
@@ -91,17 +95,22 @@ impl State {
             FromNeovim::DeleteSurrounding { before, after } => {
                 log::debug!(
                     "[NVIM] DeleteSurrounding: before={}, after={}",
-                    before, after
+                    before,
+                    after
                 );
                 self.wayland.delete_surrounding(before, after);
             }
             FromNeovim::Candidates(info) => {
-                log::debug!("[NVIM] Candidates: {:?}, selected={}", info.candidates, info.selected);
+                log::debug!(
+                    "[NVIM] Candidates: {:?}, selected={}",
+                    info.candidates,
+                    info.selected
+                );
                 if info.candidates.is_empty() {
                     self.hide_candidates();
                 } else {
                     self.ime.set_candidates(info.candidates, info.selected);
-                    self.show_candidates();
+                    self.update_popup();
                 }
             }
             FromNeovim::VisualRange(selection) => {
@@ -166,7 +175,9 @@ impl State {
                 .set_preedit(&self.ime.preedit, cursor_begin, cursor_end);
             log::debug!(
                 "[PREEDIT] updated: {:?}, cursor: {}..{}",
-                self.ime.preedit, cursor_begin, cursor_end
+                self.ime.preedit,
+                cursor_begin,
+                cursor_end
             );
         } else {
             log::debug!(
@@ -177,7 +188,7 @@ impl State {
             );
         }
         // Show preedit window with cursor visualization
-        self.show_preedit_window();
+        self.update_popup();
     }
 
     /// Update the unified popup with current state
@@ -211,16 +222,8 @@ impl State {
         }
     }
 
-    pub(crate) fn show_candidates(&mut self) {
-        self.update_popup();
-    }
-
     pub(crate) fn hide_candidates(&mut self) {
         self.ime.clear_candidates();
-        self.update_popup();
-    }
-
-    pub(crate) fn show_preedit_window(&mut self) {
         self.update_popup();
     }
 }

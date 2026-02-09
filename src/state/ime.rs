@@ -4,7 +4,6 @@
 
 /// Main IME mode state machine
 #[derive(Debug, Clone, PartialEq, Default)]
-#[allow(dead_code)]
 pub enum ImeMode {
     /// IME is disabled, keyboard not grabbed, passthrough mode
     #[default]
@@ -16,42 +15,19 @@ pub enum ImeMode {
         /// Current Vim editing mode
         vim_mode: VimMode,
     },
-    /// IME is being disabled
-    Disabling,
 }
 
 /// Vim editing mode within the IME
 #[derive(Debug, Clone, PartialEq, Default)]
-#[allow(dead_code)]
 pub enum VimMode {
     /// Insert mode - characters inserted at cursor
     #[default]
     Insert,
     /// Normal mode - commands and motions
     Normal,
-    /// Visual mode - selection active
-    Visual,
-    /// Operator pending - waiting for motion (e.g., after 'd')
-    OperatorPending {
-        /// The operator character (d, c, y, etc.)
-        operator: char,
-        /// What kind of motion we're waiting for
-        awaiting: MotionAwaiting,
-    },
-}
-
-/// What the operator-pending mode is waiting for
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
-pub enum MotionAwaiting {
-    /// Waiting for any motion (w, e, b, etc.) or text object prefix (i, a)
-    Motion,
-    /// Waiting for text object character (w, p, ", etc.) after i/a prefix
-    TextObjectChar,
 }
 
 /// IME state including mode, preedit, and candidates
-#[allow(dead_code)]
 pub struct ImeState {
     /// Current IME mode
     pub mode: ImeMode,
@@ -67,7 +43,6 @@ pub struct ImeState {
     pub selected_candidate: usize,
 }
 
-#[allow(dead_code)]
 impl ImeState {
     /// Create new IME state
     pub fn new() -> Self {
@@ -83,23 +58,12 @@ impl ImeState {
 
     /// Check if IME is enabled (or enabling)
     pub fn is_enabled(&self) -> bool {
-        matches!(
-            self.mode,
-            ImeMode::Enabled { .. } | ImeMode::Enabling
-        )
+        matches!(self.mode, ImeMode::Enabled { .. } | ImeMode::Enabling)
     }
 
     /// Check if IME is fully enabled (not transitioning)
     pub fn is_fully_enabled(&self) -> bool {
         matches!(self.mode, ImeMode::Enabled { .. })
-    }
-
-    /// Get current vim mode (if enabled)
-    pub fn vim_mode(&self) -> Option<&VimMode> {
-        match &self.mode {
-            ImeMode::Enabled { vim_mode, .. } => Some(vim_mode),
-            _ => None,
-        }
     }
 
     /// Start enabling the IME
@@ -119,109 +83,10 @@ impl ImeState {
         }
     }
 
-    /// Start disabling the IME
-    pub fn start_disabling(&mut self) {
-        self.mode = ImeMode::Disabling;
-        self.clear_preedit();
-    }
-
-    /// Complete disabling
-    pub fn complete_disabling(&mut self) {
-        self.mode = ImeMode::Disabled;
-    }
-
     /// Disable immediately (for toggle off)
     pub fn disable(&mut self) {
         self.mode = ImeMode::Disabled;
         self.clear_preedit();
-    }
-
-    /// Set vim mode (only when enabled)
-    pub fn set_vim_mode(&mut self, vim_mode: VimMode) {
-        if let ImeMode::Enabled {
-            vim_mode: ref mut current,
-            ..
-        } = self.mode
-        {
-            *current = vim_mode;
-        }
-    }
-
-    /// Update vim mode from Neovim mode string
-    pub fn update_vim_mode_from_string(&mut self, mode_str: &str) {
-        let vim_mode = match mode_str {
-            "i" => VimMode::Insert,
-            "n" => VimMode::Normal,
-            m if m.starts_with("no") => {
-                // Operator-pending mode
-                VimMode::OperatorPending {
-                    operator: '?', // We don't know the operator from mode string alone
-                    awaiting: MotionAwaiting::Motion,
-                }
-            }
-            m if m.starts_with('v') || m.starts_with('V') || m == "\x16" => VimMode::Visual,
-            _ => return, // Unknown mode, don't change
-        };
-        self.set_vim_mode(vim_mode);
-    }
-
-    /// Enter operator-pending mode
-    pub fn enter_operator_pending(&mut self, operator: char) {
-        self.set_vim_mode(VimMode::OperatorPending {
-            operator,
-            awaiting: MotionAwaiting::Motion,
-        });
-    }
-
-    /// Advance operator-pending to text object char (after i/a)
-    pub fn advance_to_text_object_char(&mut self) {
-        if let ImeMode::Enabled {
-            vim_mode:
-                VimMode::OperatorPending {
-                    operator,
-                    ref mut awaiting,
-                },
-            ..
-        } = self.mode
-        {
-            let _ = operator; // Silence unused warning
-            *awaiting = MotionAwaiting::TextObjectChar;
-        }
-    }
-
-    /// Exit operator-pending mode back to normal
-    pub fn exit_operator_pending(&mut self) {
-        if matches!(
-            self.mode,
-            ImeMode::Enabled {
-                vim_mode: VimMode::OperatorPending { .. },
-                ..
-            }
-        ) {
-            self.set_vim_mode(VimMode::Normal);
-        }
-    }
-
-    /// Check if in operator-pending mode
-    pub fn is_operator_pending(&self) -> bool {
-        matches!(
-            self.mode,
-            ImeMode::Enabled {
-                vim_mode: VimMode::OperatorPending { .. },
-                ..
-            }
-        )
-    }
-
-    /// Get operator-pending awaiting state
-    pub fn operator_pending_awaiting(&self) -> Option<&MotionAwaiting> {
-        match &self.mode {
-            ImeMode::Enabled {
-                vim_mode: VimMode::OperatorPending { awaiting, .. },
-                ..
-            } => Some(awaiting),
-            _ => None,
-        }
     }
 
     /// Update preedit
@@ -249,15 +114,84 @@ impl ImeState {
         self.candidates.clear();
         self.selected_candidate = 0;
     }
-
-    /// Check if has candidates
-    pub fn has_candidates(&self) -> bool {
-        !self.candidates.is_empty()
-    }
 }
 
 impl Default for ImeState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starts_disabled() {
+        let state = ImeState::new();
+        assert!(!state.is_enabled());
+        assert!(!state.is_fully_enabled());
+        assert_eq!(state.mode, ImeMode::Disabled);
+    }
+
+    #[test]
+    fn enabling_lifecycle() {
+        let mut state = ImeState::new();
+        state.start_enabling();
+        assert!(state.is_enabled()); // Enabling counts as "enabled"
+        assert!(!state.is_fully_enabled()); // But not fully
+
+        let transitioned = state.complete_enabling(VimMode::Insert);
+        assert!(transitioned);
+        assert!(state.is_enabled());
+        assert!(state.is_fully_enabled());
+    }
+
+    #[test]
+    fn complete_enabling_only_from_enabling() {
+        let mut state = ImeState::new();
+        // complete_enabling from Disabled should not transition
+        let transitioned = state.complete_enabling(VimMode::Insert);
+        assert!(!transitioned);
+        assert!(!state.is_enabled());
+    }
+
+    #[test]
+    fn disable_clears_preedit() {
+        let mut state = ImeState::new();
+        state.start_enabling();
+        state.complete_enabling(VimMode::Insert);
+        state.set_preedit("hello".into(), 0, 5);
+
+        state.disable();
+        assert!(!state.is_enabled());
+        assert!(state.preedit.is_empty());
+        assert_eq!(state.cursor_begin, 0);
+        assert_eq!(state.cursor_end, 0);
+    }
+
+    #[test]
+    fn preedit_operations() {
+        let mut state = ImeState::new();
+        state.set_preedit("test".into(), 1, 3);
+        assert_eq!(state.preedit, "test");
+        assert_eq!(state.cursor_begin, 1);
+        assert_eq!(state.cursor_end, 3);
+
+        state.clear_preedit();
+        assert!(state.preedit.is_empty());
+        assert_eq!(state.cursor_begin, 0);
+    }
+
+    #[test]
+    fn candidate_operations() {
+        let mut state = ImeState::new();
+        state.set_candidates(vec!["a".into(), "b".into()], 1);
+        assert_eq!(state.candidates.len(), 2);
+        assert_eq!(state.selected_candidate, 1);
+
+        state.clear_candidates();
+        assert!(state.candidates.is_empty());
+        assert_eq!(state.selected_candidate, 0);
     }
 }

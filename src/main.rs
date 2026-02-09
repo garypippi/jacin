@@ -76,7 +76,10 @@ fn main() -> anyhow::Result<()> {
             Some(vk)
         }
         Err(e) => {
-            log::warn!("zwp_virtual_keyboard_manager_v1 not available: {} (modifier clearing disabled)", e);
+            log::warn!(
+                "zwp_virtual_keyboard_manager_v1 not available: {} (modifier clearing disabled)",
+                e
+            );
             None
         }
     };
@@ -194,10 +197,9 @@ fn main() -> anyhow::Result<()> {
         .handle()
         .insert_source(repeat_timer, |_, _, state| {
             if state.ime.is_fully_enabled()
-                && let Some(key) = state.repeat.should_fire(
-                    state.keyboard.repeat_rate,
-                    state.keyboard.repeat_delay,
-                )
+                && let Some(key) = state
+                    .repeat
+                    .should_fire(state.keyboard.repeat_rate, state.keyboard.repeat_delay)
             {
                 state.handle_key(
                     key,

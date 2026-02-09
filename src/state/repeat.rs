@@ -85,3 +85,60 @@ impl Default for KeyRepeatState {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_fire_without_start() {
+        let mut state = KeyRepeatState::new();
+        assert!(state.should_fire(25, 600).is_none());
+    }
+
+    #[test]
+    fn no_fire_zero_rate() {
+        let mut state = KeyRepeatState::new();
+        state.start(42);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(state.should_fire(0, 600).is_none());
+    }
+
+    #[test]
+    fn fires_after_delay() {
+        let mut state = KeyRepeatState::new();
+        state.start(42);
+        // Should not fire immediately
+        assert!(state.should_fire(25, 600).is_none());
+        // Wait past delay
+        std::thread::sleep(std::time::Duration::from_millis(650));
+        assert_eq!(state.should_fire(25, 600), Some(42));
+    }
+
+    #[test]
+    fn stop_cancels_specific_key() {
+        let mut state = KeyRepeatState::new();
+        state.start(42);
+        state.stop(42);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(state.should_fire(25, 600).is_none());
+    }
+
+    #[test]
+    fn stop_ignores_different_key() {
+        let mut state = KeyRepeatState::new();
+        state.start(42);
+        state.stop(99); // Different key — no effect
+        std::thread::sleep(std::time::Duration::from_millis(650));
+        assert_eq!(state.should_fire(25, 600), Some(42));
+    }
+
+    #[test]
+    fn cancel_stops_all() {
+        let mut state = KeyRepeatState::new();
+        state.start(42);
+        state.cancel();
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(state.should_fire(25, 600).is_none());
+    }
+}

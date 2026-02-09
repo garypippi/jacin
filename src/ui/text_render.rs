@@ -4,11 +4,11 @@ use fontconfig::{FC_CHARSET, Fontconfig};
 use fontconfig_sys as sys;
 use fontconfig_sys::ffi_dispatch;
 // Without dlopen, ffi_dispatch! expands to direct function calls from sys::*
-use sys::*;
 use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
 use std::collections::HashMap;
 use std::os::fd::AsFd;
+use sys::*;
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
 use wayland_client::QueueHandle;
 use wayland_client::protocol::{wl_shm, wl_shm_pool};
