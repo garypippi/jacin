@@ -8,57 +8,57 @@
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                        Wayland Compositor (Hyprland)                    │
 │                                                                         │
-│  zwp_input_method_v2          zwp_input_popup_surface_v2    wl_shm     │
+│  zwp_input_method_v2          zwp_input_popup_surface_v2    wl_shm      │
 └──┬──────────┬──────────────────────────▲──────────────────────▲─────────┘
    │Events    │ Requests                 │ surface.commit()    │ buffer
    │          │                          │                     │ attach
    ▼          │                          │                     │
-┌──────────────────────────────────────────────────────────────────────────┐
-│                     Wayland Frontend Layer                               │
-│                                                                          │
-│  ┌──────────────────────┐    ┌──────────────────────────────────────┐    │
-│  │  Event Dispatch       │    │  WaylandState                       │    │
-│  │                       │    │                                      │    │
-│  │  Activate ─┐          │    │  input_method: ZwpInputMethodV2     │    │
-│  │  Deactivate│          │    │  keyboard_grab: Option<Grab>        │    │
-│  │  Done ─────┼──────────┼──▶ │  serial: u32  (Done count)          │    │
-│  │  Key ──────┼──┐       │    │                                      │    │
-│  │  Modifiers─┼──┤       │    │  set_preedit_string(text, b, e)     │    │
-│  │  Keymap ───┼──┤       │    │  commit_string(text)                │    │
-│  └────────────┘  │       │    │  commit(serial)                     │    │
-│                  │       │    │  delete_surrounding(before, after)   │    │
-│                  │       │    │  grab_keyboard() / release()        │    │
-│                  │       │    └──────────────────────────────────────┘    │
-│                  │       │                                                │
-│  SIGUSR1 ────────┼──┐    │    ┌────────────────────────────────┐         │
-│  (toggle)        │  │    │    │  KeyboardState                 │         │
-│                  │  │    │    │  xkb_context / xkb_state       │         │
-│                  │  │    │    │  modifiers (ctrl, alt, shift)   │         │
-│                  │  │    │    │  get_key_info(key) -> (sym, utf8)│        │
-│                  │  │    │    └────────────────────────────────┘         │
-└──────────────────┼──┼────┼──────────────────────────────────────────────┘
-                   │  │    │
-                   ▼  ▼    ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                     IME Core (State + Coordination)                      │
-│                     State -- main thread                                 │
-│                     (coordinator.rs, input.rs)                           │
-│                                                                          │
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Wayland Frontend Layer                              │
+│                                                                         │
+│  ┌─────────────────────┐    ┌─────────────────────────────────────┐     │
+│  │  Event Dispatch     │    │  WaylandState                       │     │
+│  │                     │    │                                     │     │
+│  │  Activate ─┐        │    │  input_method: ZwpInputMethodV2     │     │
+│  │  Deactivate│        │    │  keyboard_grab: Option<Grab>        │     │
+│  │  Done ─────┼────────▶    │  serial: u32  (Done count)          │     │
+│  │  Key ──────┼──┐     │    │                                     │     │
+│  │  Modifiers─┼──┤     │    │  set_preedit_string(text, b, e)     │     │
+│  │  Keymap ───┼──┤     │    │  commit_string(text)                │     │
+│  └────────────┘  │     │    │  commit(serial)                     │     │
+│                  │     │    │  delete_surrounding(before, after)  │     │
+│                  │     │    │  grab_keyboard() / release()        │     │
+│                  │     │    └─────────────────────────────────────┘     │
+│                  │     │                                                │
+│  SIGUSR1 ────────┼──┐  │    ┌────────────────────────────────┐          │
+│  (toggle)        │  │  │    │  KeyboardState                 │          │
+│                  │  │  │    │  xkb_context / xkb_state       │          │
+│                  │  │  │    │  modifiers (ctrl, alt, shift)   │         │
+│                  │  │  │    │  get_key_info(key) -> (sym, utf8)│        │
+│                  │  │  │    └────────────────────────────────┘          │
+└──────────────────┼──┼──┼────────────────────────────────────────────────┘
+                   │  │  │
+                   ▼  ▼  ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     IME Core (State + Coordination)                     │
+│                     State -- main thread                                │
+│                     (coordinator.rs, input.rs)                          │
+│                                                                         │
 │  ┌─────────────────────────┐     ┌────────────────────────────────┐     │
 │  │  ImeState               │     │  KeypressState                 │     │
 │  │                         │     │                                │     │
 │  │  mode: ImeMode          │     │  accumulated_keys: String      │     │
 │  │    Disabled             │     │  visible: bool                 │     │
-│  │    Enabling{skk_after}  │     │  timeout: Instant              │     │
-│  │    Enabled{vim,skk}     │     │  vim_mode: String              │     │
+│  │    Enabling             │     │  timeout: Instant              │     │
+│  │    Enabled{vim_mode}    │     │  vim_mode: String              │     │
 │  │    Disabling            │     │                                │     │
 │  │                         │     │  (display timeout: 1.5s)       │     │
 │  │  preedit: String        │     └────────────────────────────────┘     │
 │  │  cursor_begin: usize    │                                            │
 │  │  cursor_end: usize      │     ┌────────────────────────────────┐     │
 │  │  candidates: Vec<Str>   │     │  Config                        │     │
-│  │  selected_candidate     │     │  toggle_key: "<A-`>"           │     │
-│  └─────────────────────────┘     │  commit_key: "<C-CR>"          │     │
+│  │  selected_candidate     │     │  commit_key: "<C-CR>"          │     │
+│  └─────────────────────────┘     │                                │     │
 │                                  └────────────────────────────────┘     │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │  handle_key(key, state)                                          │   │
@@ -81,29 +81,29 @@
 ┌───────────────────────────────┐    ┌────────────────────────────────────┐
 │  Neovim Backend               │    │  UI Layer                          │
 │  (separate thread + Tokio)    │    │                                    │
-│                               │    │  ┌──────────────────────────┐      │
-│  ┌─────────────────────────┐  │    │  │  UnifiedPopup            │      │
-│  │  Handler Thread         │  │    │  │                          │      │
-│  │                         │  │    │  │  ┌────────────────────┐  │      │
-│  │  recv ToNeovim::Key ────┼──┼─┐  │  │  │  Preedit Section   │  │      │
-│  │                         │  │ │  │  │  │  line/block cursor  │  │      │
-│  │  nvim.input(key)        │  │ │  │  │  │  horizontal scroll  │  │      │
-│  │  exec_lua(Lua handlers) │  │ │  │  │  └────────────────────┘  │      │
-│  │  exec_lua(snapshot)     │  │ │  │  │  ┌────────────────────┐  │      │
-│  │                         │  │ │  │  │  │  Keypress Section   │  │      │
-│  │  PendingState logic:    │  │ │  │  │  │  "d$", "di", "<C-r>a"│ │      │
-│  │    Getchar / Motion /   │  │ │  │  │  └────────────────────┘  │      │
-│  │    TextObject /         │  │ │  │  │  ┌────────────────────┐  │      │
-│  │    InsertRegister /     │  │ │  │  │  │  Candidate Section  │  │      │
-│  │    NormalRegister       │  │ │  │  │  │  numbered + sel HL  │  │      │
-│  │                         │  │ │  │  │  │  scrollbar          │  │      │
-│  │  query_snapshot (normal) │  │ │  │  │  └────────────────────┘  │      │
-│  │    exec_lua(collect_    │  │ │  │  └──────────────────────────┘      │
-│  │      snapshot())        │  │ │  │                                    │
-│  └────────┬────────────────┘  │ │  │  ┌──────────────────────────┐      │
-│           │                   │ │  │  │  TextRenderer             │      │
-│           │ FromNeovim:       │ │  │  │  fontdue + glyph cache    │      │
-│           │   Preedit(info)   │ │  │  │  SHM double buffering     │      │
+│                               │    │  ┌────────────────────────────┐    │
+│  ┌──────────────────────────┐ │    │  │  UnifiedPopup              │    │
+│  │  Handler Thread          │ │    │  │                            │    │
+│  │                          │ │    │  │  ┌───────────────────────┐ │    │
+│  │  recv ToNeovim::Key ─────┼─┼─┐  │  │  │  Preedit Section      │ │    │
+│  │                          │ │ │  │  │  │  line/block cursor    │ │    │
+│  │  nvim.input(key)         │ │ │  │  │  │  horizontal scroll    │ │    │
+│  │  exec_lua(Lua handlers)  │ │ │  │  │  └───────────────────────┘ │    │
+│  │  exec_lua(snapshot)      │ │ │  │  │  ┌───────────────────────┐ │    │
+│  │                          │ │ │  │  │  │  Keypress Section     │ │    │
+│  │  PendingState logic:     │ │ │  │  │  │  "d$", "di", "<C-r>a" │ │    │
+│  │    Getchar / Motion /    │ │ │  │  │  └───────────────────────┘ │    │
+│  │    TextObject /          │ │ │  │  │  ┌─────────────────────┐   │    │
+│  │    InsertRegister /      │ │ │  │  │  │  Candidate Section  │   │    │
+│  │    NormalRegister        │ │ │  │  │  │  numbered + sel HL  │   │    │
+│  │                          │ │ │  │  │  │  scrollbar          │   │    │
+│  │  query_snapshot (normal) │ │ │  │  │  └─────────────────────┘   │    │
+│  │    exec_lua(collect_     │ │ │  │  └────────────────────────────┘    │
+│  │      snapshot())         │ │ │  │                                    │
+│  └────────┬─────────────────┘ │ │  │  ┌──────────────────────────┐      │
+│           │                   │ │  │  │  TextRenderer            │      │
+│           │ FromNeovim:       │ │  │  │  fontdue + glyph cache   │      │
+│           │   Preedit(info)   │ │  │  │  SHM double buffering    │      │
 │           │   Commit(text)    │ │  │  └──────────────────────────┘      │
 │           │   Candidates(..)  │ │  │                                    │
 │           │   DeleteSurround  │ │  └────────────────────────────────────┘
@@ -126,8 +126,8 @@
 │  ┌─────────────────────────┐  │
 │  │  Neovim Process         │  │
 │  │  (headless, nvim-rs)    │  │
-│  │  + skkeleton plugin     │  │
-│  │  + nvim-cmp plugin      │  │
+│  │  + optional plugins     │  │
+│  │  (skkeleton, nvim-cmp…) │  │
 │  └─────────────────────────┘  │
 └───────────────────────────────┘
 ```
@@ -148,8 +148,8 @@ Main Thread                Handler Thread              Neovim Process
     |<--------------------------|                           |
     |  FromNeovim::KeyProcessed |  (fire-and-forget)        |
     |  (ready for next key)     |                           |
-    |                           |                           | skkeleton processes
-    |                           |                           | autocmd fires
+    |                           |                           | text changes
+    |                           |                           | TextChangedI fires
     |                           |                           | vim.rpcnotify(0,
     |                           |  handle_notify()   <------|   "ime_snapshot", ...)
     |                           |  tx.send(Preedit)         |
@@ -192,21 +192,20 @@ normal mode operations complete synchronously in Neovim.
 
 ### Special Keys: Single Lua Function Call
 
-Toggle, Enter, BS, Ctrl+K, Commit, and Clear each use a single
-`exec_lua("return ime_handle_*()")` call that combines the check
-and action into one RPC round-trip.
+BS and Commit each use a single `exec_lua("return ime_handle_*()")` call
+that combines the check and action into one RPC round-trip.
 
 ## 2. State Transition Diagrams
 
 ### Orthogonal State Decomposition
 
-The design has **3 independent state axes** (plus macros, not yet implemented):
+The design has **3 independent state axes** (plus macros, observed from Neovim):
 
 ```
 +---------------------------------------------------------------------+
-|                     Orthogonal State Structure                       |
+|                     Orthogonal State Structure                      |
 |                                                                     |
-|  Axis 1: ImeMode (exclusive)     Axis 2: VimMode (exclusive)       |
+|  Axis 1: ImeMode (exclusive)     Axis 2: VimMode (exclusive)        |
 |  +---------------+               +---------------+                  |
 |  | Disabled      |               | Insert        |  <- only valid   |
 |  | Enabling      |               | Normal        |     when Enabled |
@@ -214,23 +213,21 @@ The design has **3 independent state axes** (plus macros, not yet implemented):
 |  | Disabling     |               | Op-Pending    |                  |
 |  +---------------+               +---------------+                  |
 |                                                                     |
-|  Axis 3: PendingState (exclusive)  Axis 4: Macro (not implemented) |
+|  Axis 3: PendingState (exclusive)  Axis 4: Macro (display only)     |
 |  +---------------+               +---------------+                  |
 |  | None          |               | Idle          |                  |
-|  | Getchar       |               | Recording     | <- orthogonal   |
-|  | Motion        |               | Playing       |    to VimMode   |
+|  | Getchar       |               | Recording     | <- orthogonal    |
+|  | Motion        |               | Playing       |    to VimMode    |
 |  | TextObject    |               +---------------+                  |
 |  | InsertReg     |                                                  |
-|  | NormalReg     |               Axis 5: Skkeleton (parallel)      |
-|  +---------------+               +---------------+                  |
-|                                  | Active        | <- only valid   |
-|                                  | Inactive      |    when Enabled |
-|                                  +---------------+                  |
+|  | NormalReg     |                                                  |
+|  | CommandLine   |                                                  |
+|  +---------------+                                                  |
 +---------------------------------------------------------------------+
 
 Examples of simultaneously valid states:
-  ImeMode::Enabled + VimMode::Normal + PendingState::Motion + Skk::Active
-  ImeMode::Enabled + VimMode::Insert + PendingState::None + Skk::Active + Macro::Recording
+  ImeMode::Enabled + VimMode::Normal + PendingState::Motion
+  ImeMode::Enabled + VimMode::Insert + PendingState::None + Macro::Recording
 ```
 
 ### Axis 1: ImeMode Transitions
@@ -239,19 +236,19 @@ Examples of simultaneously valid states:
                      SIGUSR1 (toggle on)
                     +----------------------+
                     |                      v
-              +----------+          +--------------+
-              |          |          |   Enabling    |
-              | Disabled |          | {skk_after:   |
-              |          |          |   true/false}  |
-              +----------+          +------+-------+
+              +-----------+          +--------------+
+              |           |          |   Enabling   |
+              | Disabled  |          |              |
+              |           |          |              |
+              +-----------+          +------+-------+
                     ^                      | keymap event arrives
                     |                      | complete_enabling()
                     |                      v
-              +----------+          +--------------+
-              |          |<---------|   Enabled     |
-              |Disabling | (normal) | {vim_mode,    |
-              |          |          |  skk_active}  |
-              +----------+          +--------------+
+              +-----------+          +--------------+
+              |           |<---------|   Enabled    |
+              | Disabling | (normal) | {vim_mode}   |
+              |           |          |              |
+              +-----------+          +--------------+
                     ^                      |
                     |                      |
                     +----------------------+
@@ -263,7 +260,7 @@ Examples of simultaneously valid states:
 
   Deactivate/Activate cycle (compositor-driven):
     Enabled -> [compositor: Deactivate] -> release grab -> [compositor: Activate]
-    -> Enabling{skk_after: false} -> [keymap] -> Enabled (state restored)
+    -> Enabling -> [keymap] -> Enabled (state restored)
 
   Forbidden transitions:
     Disabled -> Enabled    (must go through Enabling)
@@ -288,20 +285,21 @@ Examples of simultaneously valid states:
    v, V|      | <Esc> or op complete           | op complete (c-family)
        |      |                                |
        v      |         d, y, c, >          +--+
-     +----------+ ----------------> +-----------------+
-     |          |                   |  OperatorPending |
+     +----------+ ----------------> +-------------------+
+     |          |                   |  OperatorPending  |
      |  Visual  |                   |  {operator, await}|
-     |          |                   +-----------------+
+     |          |                   +-------------------+
      +----------+                     |           ^
                                       | i, a      |
                                       v           |
-                                   +--+-----------+
-                                   | TextObjectChar
-                                   | (w,p,",),b,etc)
-                                   +---------------
+                                   +--+---------------+
+                                   | TextObjectChar   |
+                                   | (w,p,",),b,etc)  |
+                                   +------------------+
 
   Command-line mode (intentionally not modeled as VimMode):
-    Occurs on Neovim side -> handler detects -> auto-recovery via <C-c> + startinsert
+    Intentional (`:` key) -> PendingState::CommandLine, keys forwarded, display via CmdlineChanged
+    Unintentional (plugin-triggered) -> auto-recovery via <C-c> + startinsert
     (Design decision: IME does not have VimMode::Command)
 ```
 
@@ -315,21 +313,21 @@ Examples of simultaneously valid states:
           +------+   None   |<-----------------+             |
           |      +----------+                  |             |
           |        |  |  |  |                  |             |
-          |   q,f,t|  |  |  |"                 |             |
-          |   r,m  |  |  |  |(normal)          | resolved    |
-          |        |  |  |  |                  | by next key |
-          v        |  |  |  v                  |             |
-     +----------+  |  |  | +--------------+    |             |
-     | Getchar  |--+  |  | |NormalRegister|----+             |
-     |(blocking)|     |  | | ("+register) |                  |
-     +----------+     |  | +--------------+                  |
-       next key->None |  |                                   |
+          |   q,f,t|  |  |  |"        |        |             |
+          |   r,m  |  |  |  |(normal) | ":"    | resolved    |
+          |        |  |  |  |         |(normal)| by next key |
+          v        |  |  |  v        v         |             |
+     +----------+  |  |  | +---------+--+ +-----------+      |
+     | Getchar  |--+  |  | |NormalReg   | |CommandLine|      |
+     |(blocking)|     |  | |("+register)| |(fwd keys) |      |
+     +----------+     |  | +------------+ +-----------+      |
+       next key->None |  |        |        CmdlineLeave->None|
                       |  | d,c,y,>,<                         |
                  <C-r>|  | (operator)                        |
                 (ins) |  |                                   |
                       v  v                                   |
                +--------------+     i, a      +--------------+
-               |InsertRegister|     +-------->| TextObject    |
+               |InsertRegister|     +-------->| TextObject   |
                |(<C-r>+reg)  |     |         | (diw, caw etc)|
                +--------------+     |         +------+-------+
                  next key->None+---------+          |
@@ -375,23 +373,22 @@ Examples of simultaneously valid states:
 ### Simultaneous State Validity Matrix
 
 ```
-                    | VimMode | PendingState | Skkeleton | Macro        |
---------------------+---------+--------------+-----------+--------------+
-ImeMode::Disabled   |   N/A   |     N/A      |    N/A    |    N/A       |
-ImeMode::Enabling   |   N/A   |     N/A      |    N/A    |    N/A       |
-ImeMode::Enabled    |  valid  |    valid     |   valid   | valid(display)|
-ImeMode::Disabling  |  frozen |    frozen    |   frozen  |  frozen      |
+                    | VimMode | PendingState | Macro          |
+--------------------+---------+--------------+----------------+
+ImeMode::Disabled   |   N/A   |     N/A      |     N/A        |
+ImeMode::Enabling   |   N/A   |     N/A      |     N/A        |
+ImeMode::Enabled    |  valid  |    valid     | valid(display) |
+ImeMode::Disabling  |  frozen |    frozen    |   frozen       |
 
-VimMode:            |         |              |           |           |
-  Insert            |    -    | None/InsReg/ | Active/   | Rec/Play/ |
-                    |         | Getchar      | Inactive  | Idle      |
-  Normal            |    -    | None/NrmReg/ | Active/   | Rec/Play/ |
-                    |         | Motion/TxtOb/| Inactive  | Idle      |
-                    |         | Getchar      |           |           |
-  Visual            |    -    | None/Motion  | (usually  | Rec/Play  |
-                    |         |              |  Active)  |           |
-  Op-Pending        |    -    | Motion/TxtOb | (usually  | Rec/Play  |
-                    |         |              |  Active)  |           |
+VimMode:            |         |              |                |
+  Insert            |    -    | None/InsReg/ | Rec/Play/      |
+                    |         | Getchar      | Idle           |
+  Normal            |    -    | None/NrmReg/ | Rec/Play/      |
+                    |         | Motion/TxtOb/| Idle           |
+                    |         | Getchar/     |                |
+                    |         | CommandLine  |                |
+  Visual            |    -    | None/Motion  | Rec/Play       |
+  Op-Pending        |    -    | Motion/TxtOb | Rec/Play       |
 ```
 
 ## 3. Design Principles and Boundaries
@@ -415,18 +412,18 @@ VimMode:            |         |              |           |           |
 +---------------+----------------------+-----------------------+
                 |                      |
                 v                      v
-+----------------------+  +------------------------------------+
++----------------------+  +-------------------------------------+
 |  Wayland set_preedit |  |  UI Popup (self-drawn)              |
 |  (shown inline in    |  |  cursor, candidates, mode display   |
-|   app via compositor) |  |  <- builds PopupContent from state  |
-+----------------------+  +------------------------------------+
+|   app via compositor) |  |  <- builds PopupContent from state |
++----------------------+  +-------------------------------------+
 ```
 
 **Principle: Neovim = Single Source of Truth**
 
 - The IME only **reads** Neovim's buffer content, never **writes** to it directly (only indirect manipulation via `nvim.input()`)
 - `ImeState.preedit` is the latest snapshot from Neovim; the IME never independently manipulates the string
-- This ensures Neovim's undo/redo, macros, and plugins (skkeleton, nvim-cmp) all function correctly
+- This ensures Neovim's undo/redo, macros, and any plugins all function correctly
 
 **Notes for future extensions:**
 
@@ -441,7 +438,7 @@ VimMode:            |         |              |           |           |
 +-----------------------------------------------------+
 |  Text field                                          |
 |  "hello world|"  <- committed text + app's cursor    |
-|                                                     |
+|                                                      |
 |  Line wrapping, font, text area height               |
 |  -> all app-internal, invisible to IME               |
 +-----------------------------------------------------+
@@ -459,13 +456,13 @@ VimMode:            |         |              |           |           |
 |  IME UI (UnifiedPopup)                               |
 |  Self-drawn to SHM buffer                            |
 |  Preedit + keypress + candidates in one surface      |
-|                                                     |
+|                                                      |
 |  What we CAN control:                                |
 |    - popup width and height                          |
 |    - internal layout (section arrangement)           |
 |    - font, color, cursor rendering                   |
 |    - horizontal scroll (long preedit)                |
-|                                                     |
+|                                                      |
 |  What we CANNOT control:                             |
 |    - popup absolute position (compositor decides)    |
 |    - collision with app's text wrapping              |
@@ -489,7 +486,7 @@ VimMode:            |         |              |           |           |
 
 ```
 +--------------------------------------------------------------+
-|              Wayland-Dependent Layer (not portable)            |
+|              Wayland-Dependent Layer (not portable)          |
 |                                                              |
 |  WaylandState:                                               |
 |    All zwp_input_method_v2 operations                        |
@@ -507,7 +504,7 @@ VimMode:            |         |              |           |           |
 +--------------------------------------------------------------+
 
 +--------------------------------------------------------------+
-|              Wayland-Independent Layer (portable / testable)   |
+|              Wayland-Independent Layer (portable / testable) |
 |                                                              |
 |  ImeState:                                                   |
 |    ImeMode state transitions                                 |
@@ -535,7 +532,7 @@ VimMode:            |         |              |           |           |
 |    <- only SHM copy is Wayland-dependent                     |
 |                                                              |
 |  UnifiedPopup:                                               |
-|    Layout calculation, rendering logic                        |
+|    Layout calculation, rendering logic                       |
 |    <- drawing to tiny-skia Pixmap is independent             |
 |    <- surface.attach / commit is Wayland-dependent           |
 +--------------------------------------------------------------+
@@ -566,11 +563,9 @@ VimMode:            |         |              |           |           |
 **Current state count:**
 
 ```
-ImeMode: 4 * VimMode: 4 * PendingState: 6 * Skkeleton: 2
-= 192 theoretical combinations (roughly 30 actually valid)
+ImeMode: 4 * VimMode: 4 * PendingState: 7
+= 112 theoretical combinations (roughly 20 actually valid)
 ```
-
-Adding macro state (3) would expand this to 576.
 
 **Defense principles:**
 
@@ -585,9 +580,10 @@ Adding macro state (3) would expand this to 576.
 
 3. **Command mode is handled via PendingState, not VimMode**
    - `PendingState::CommandLine` tracks intentional command mode (`:` key)
-   - Neovim handles command-line editing; IME intercepts at execution via `cnoremap <CR>`
-   - `:w` commits (keep enabled), `:wq`/`:x` commit+disable, `:q`/`:q!` discard+disable
-   - Unintentional command mode (skkeleton nested henkan) is auto-recovered via `<C-c>` + `startinsert`
+   - Neovim handles command-line editing; keys are forwarded, display updates come via `CmdlineChanged` autocmd
+   - `:q`/`:q!`/`:wq`/`:x` exit Neovim → `NvimExited` → IME disables (preedit discarded)
+   - Other commands execute normally; output messages shown in popup via `CmdlineLeave` + `1messages` diff
+   - Unintentional command mode (e.g., plugin-triggered) is auto-recovered via `<C-c>` + `startinsert`
 
 4. **Express forbidden states in the type system**
    - `VimMode` being nested inside `ImeMode::Enabled` is good design
@@ -606,14 +602,14 @@ Future:  Neovim buffer = N lines ->  preedit = 1 line  ->  popup = v+h-scroll
 
 **Key design decisions:**
 
-| Item | Current | Extension |
-|------|---------|-----------|
-| Neovim -> IME query | `getline('.')` | `getline(1, '$')` + `line('.')` |
-| ImeState.preedit | `String` (1 line) | `Vec<String>` or `String` with newlines |
-| Wayland set_preedit | send full text | send current line only |
-| Popup rendering | h-scroll only | per-line rendering, add v-scroll |
-| Cursor position | byte offset in line | (line number, byte offset) |
-| yy, dd, p, P | not supported | work naturally with multiline buffer |
+| Item                | Current             | Extension                               |
+|---------------------|---------------------|-----------------------------------------|
+| Neovim -> IME query | `getline('.')`      | `getline(1, '$')` + `line('.')`         |
+| ImeState.preedit    | `String` (1 line)   | `Vec<String>` or `String` with newlines |
+| Wayland set_preedit | send full text      | send current line only                  |
+| Popup rendering     | h-scroll only       | per-line rendering, add v-scroll        |
+| Cursor position     | byte offset in line | (line number, byte offset)              |
+| yy, dd, p, P        | not supported       | work naturally with multiline buffer    |
 
 **Impact scope (modules requiring changes):**
 
