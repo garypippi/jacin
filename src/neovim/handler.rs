@@ -533,6 +533,10 @@ async fn handle_register_pending(
 /// Handle motion-pending: advance operator-pending state machine.
 /// Returns `true` if motion completed (fall through to snapshot query),
 /// `false` if still pending (caller should return).
+///
+/// Queries Neovim's actual mode after sending the key to determine completion.
+/// This correctly handles all motion types including char-search motions
+/// (f/t/F/T) that require an argument character.
 async fn handle_motion_pending(
     nvim: &Neovim<NvimWriter>,
     key: &str,
@@ -546,28 +550,28 @@ async fn handle_motion_pending(
     );
     let _ = nvim.input(key).await;
 
-    let completes = match current {
-        PendingState::Motion => match key {
-            "i" | "a" => {
-                PENDING.store(PendingState::TextObject);
-                false
-            }
-            "w" | "e" | "b" | "h" | "j" | "k" | "l" | "$" | "0" | "^" | "G" | "{" | "}" | "("
-            | ")" | "%" | "y" | "d" | "c" | "<Esc>" | "<BS>" => true,
-            _ => false,
-        },
-        PendingState::TextObject => true,
-        _ => false,
-    };
+    // Query Neovim's actual mode to determine if the motion completed.
+    let mode_info = nvim.get_mode().await?;
+    let blocking = mode_info
+        .iter()
+        .any(|(k, v)| k.as_str() == Some("blocking") && v.as_bool() == Some(true));
+    let mode = mode_info
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("mode"))
+        .and_then(|(_, v)| v.as_str())
+        .unwrap_or("n");
 
-    if completes {
-        log::debug!("[NVIM] Motion completed, resuming normal queries");
-        PENDING.clear();
-        Ok(true)
-    } else {
+    if blocking || mode.starts_with("no") {
+        // Still pending: either blocked in getchar (e.g., f/t waiting for char)
+        // or still in operator-pending (e.g., "di" waiting for text object name).
         let _ = tx.send(FromNeovim::KeyProcessed);
-        Ok(false)
+        return Ok(false);
     }
+
+    // Motion completed (mode is now n, i, v, etc.)
+    log::debug!("[NVIM] Motion completed, resuming normal queries");
+    PENDING.clear();
+    Ok(true)
 }
 
 /// Query snapshot and handle post-key mode transitions (operator-pending, command-line recovery).
