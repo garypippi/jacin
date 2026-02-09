@@ -414,7 +414,8 @@ async fn handle_commit_key(
     config: &Config,
     last_mode: &mut String,
 ) -> anyhow::Result<bool> {
-    if key != config.keybinds.commit || PENDING.load().is_motion() {
+    let pending = PENDING.load();
+    if key != config.keybinds.commit || pending.is_motion() || pending.is_register() {
         return Ok(false);
     }
     let result = nvim.exec_lua("return ime_handle_commit()", vec![]).await?;
@@ -436,7 +437,8 @@ async fn handle_backspace(
     key: &str,
     tx: &Sender<FromNeovim>,
 ) -> anyhow::Result<bool> {
-    if key != "<BS>" || PENDING.load().is_motion() {
+    let pending = PENDING.load();
+    if key != "<BS>" || pending.is_motion() || pending.is_register() {
         return Ok(false);
     }
     let result = nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
