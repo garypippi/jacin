@@ -8,6 +8,16 @@ function _G.ime_handle_bs()
     return { type = 'processing' }
 end
 
+-- Enter: detect empty buffer for passthrough
+function _G.ime_handle_enter()
+    local line = vim.fn.getline('.')
+    if line == '' then
+        return { type = 'passthrough' }
+    end
+    vim.api.nvim_input('<CR>')
+    return { type = 'processing' }
+end
+
 -- Commit: get preedit text, clear buffer, return text for commit
 function _G.ime_handle_commit()
     local line = vim.fn.getline('.')

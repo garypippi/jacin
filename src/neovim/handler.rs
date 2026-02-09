@@ -295,6 +295,7 @@ async fn handle_key(
         || handle_getchar_pending(nvim, key, tx, last_mode).await?
         || handle_commit_key(nvim, key, tx, config, last_mode).await?
         || handle_backspace(nvim, key, tx).await?
+        || handle_enter(nvim, key, tx).await?
         || handle_insert_register(nvim, key, tx).await?
         || handle_normal_register(nvim, key, tx).await?
     {
@@ -425,7 +426,8 @@ async fn handle_commit_key(
         }
         let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
     } else {
-        let _ = tx.send(FromNeovim::KeyProcessed);
+        // Empty buffer — passthrough so the app receives the key (e.g., Ctrl+Enter to send)
+        let _ = tx.send(FromNeovim::PassthroughKey);
     }
     *last_mode = String::from("i");
     Ok(true)
@@ -447,6 +449,26 @@ async fn handle_backspace(
             before: 1,
             after: 0,
         });
+    } else {
+        let _ = tx.send(FromNeovim::KeyProcessed);
+    }
+    Ok(true)
+}
+
+/// Handle Enter — detect empty buffer for passthrough. Skip if motion/register pending.
+async fn handle_enter(
+    nvim: &Neovim<NvimWriter>,
+    key: &str,
+    tx: &Sender<FromNeovim>,
+) -> anyhow::Result<bool> {
+    let pending = PENDING.load();
+    if !matches!(key, "<CR>" | "<C-CR>" | "<A-CR>") || pending.is_motion() || pending.is_register()
+    {
+        return Ok(false);
+    }
+    let result = nvim.exec_lua("return ime_handle_enter()", vec![]).await?;
+    if get_map_str(&result, "type") == Some("passthrough") {
+        let _ = tx.send(FromNeovim::PassthroughKey);
     } else {
         let _ = tx.send(FromNeovim::KeyProcessed);
     }

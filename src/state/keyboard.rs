@@ -32,6 +32,11 @@ pub struct KeyboardState {
     pub keymap_hash: Option<u64>,
     /// Whether this is a reactivation (skip debounce)
     pub is_reactivation: bool,
+    /// Raw modifier values (for virtual keyboard passthrough)
+    pub mods_depressed: u32,
+    pub mods_latched: u32,
+    pub mods_locked: u32,
+    pub mods_group: u32,
 }
 
 impl KeyboardState {
@@ -49,6 +54,10 @@ impl KeyboardState {
             repeat_delay: 0,
             keymap_hash: None,
             is_reactivation: false,
+            mods_depressed: 0,
+            mods_latched: 0,
+            mods_locked: 0,
+            mods_group: 0,
         }
     }
 
@@ -93,6 +102,12 @@ impl KeyboardState {
 
         self.ctrl_pressed = (mods_depressed & CTRL_MASK) != 0;
         self.alt_pressed = (mods_depressed & ALT_MASK) != 0;
+
+        // Store raw values for virtual keyboard passthrough
+        self.mods_depressed = mods_depressed;
+        self.mods_latched = mods_latched;
+        self.mods_locked = mods_locked;
+        self.mods_group = group;
 
         if let Some(xkb_state) = &mut self.xkb_state {
             xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
@@ -152,6 +167,10 @@ impl KeyboardState {
     pub fn reset_modifiers(&mut self) {
         self.ctrl_pressed = false;
         self.alt_pressed = false;
+        self.mods_depressed = 0;
+        self.mods_latched = 0;
+        self.mods_locked = 0;
+        self.mods_group = 0;
     }
 
     /// Store compositor repeat info

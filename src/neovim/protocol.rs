@@ -124,6 +124,8 @@ pub enum FromNeovim {
     AutoCommit(String),
     /// Command output message (e.g., from :s/foo/bar/g)
     CmdlineMessage(String),
+    /// Key should be passed through to the application via virtual keyboard
+    PassthroughKey,
     /// Neovim process exited (e.g., :q)
     NvimExited,
 }

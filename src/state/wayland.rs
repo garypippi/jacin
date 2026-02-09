@@ -115,6 +115,39 @@ impl WaylandState {
         self.input_method.delete_surrounding_text(before, after);
         self.input_method.commit(self.serial);
     }
+
+    /// Send a key event via the virtual keyboard (for passthrough).
+    /// Sends modifiers, key press, key release, then clears modifiers.
+    pub fn send_virtual_key(
+        &self,
+        keycode: u32,
+        mods_depressed: u32,
+        mods_latched: u32,
+        mods_locked: u32,
+        mods_group: u32,
+    ) {
+        if !self.virtual_keyboard_ready {
+            log::warn!("[VK] Cannot send virtual key — keymap not set");
+            return;
+        }
+        let Some(ref vk) = self.virtual_keyboard else {
+            log::warn!("[VK] Cannot send virtual key — no virtual keyboard");
+            return;
+        };
+        // Set current modifier state
+        vk.modifiers(mods_depressed, mods_latched, mods_locked, mods_group);
+        // Key press (time=0 is fine for synthetic events)
+        vk.key(0, keycode, 1); // 1 = pressed
+        // Key release
+        vk.key(0, keycode, 0); // 0 = released
+        // Clear modifiers after the key event
+        vk.modifiers(0, 0, 0, 0);
+        log::debug!(
+            "[VK] Sent virtual key: keycode={}, mods_depressed=0x{:x}",
+            keycode,
+            mods_depressed
+        );
+    }
 }
 
 /// Create a memfd containing the keymap string (with null terminator) for the virtual keyboard

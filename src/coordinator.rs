@@ -121,6 +121,20 @@ impl State {
                 self.visual_display = selection;
                 self.update_popup();
             }
+            FromNeovim::PassthroughKey => {
+                // Send the current key through the virtual keyboard to the focused app
+                if let Some(keycode) = self.current_keycode {
+                    self.wayland.send_virtual_key(
+                        keycode,
+                        self.keyboard.mods_depressed,
+                        self.keyboard.mods_latched,
+                        self.keyboard.mods_locked,
+                        self.keyboard.mods_group,
+                    );
+                } else {
+                    log::warn!("[IME] PassthroughKey but no current_keycode");
+                }
+            }
             FromNeovim::KeyProcessed => {
                 // Acknowledgment only — unblocks wait_for_nvim_response
             }

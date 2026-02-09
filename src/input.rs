@@ -135,9 +135,15 @@ impl State {
             let was_register_pending = before.is_register();
             let was_insert_register_pending = before == PendingState::InsertRegister;
 
+            // Store raw keycode for potential passthrough
+            self.current_keycode = Some(key);
+
             self.send_to_nvim(vim_key);
             // Wait for Neovim response with timeout
             self.wait_for_nvim_response();
+
+            // Clear keycode after processing
+            self.current_keycode = None;
 
             // Check state after Neovim response
             let after = pending_state().load();

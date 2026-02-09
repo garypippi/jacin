@@ -139,6 +139,7 @@ fn main() -> anyhow::Result<()> {
         popup,
         repeat_timer_token: None,
         keypress_timer_token: None,
+        current_keycode: None,
     };
 
     // Set up calloop event loop
@@ -301,4 +302,6 @@ pub struct State {
     // On-demand timer tokens (None = timer not running)
     pub(crate) repeat_timer_token: Option<RegistrationToken>,
     pub(crate) keypress_timer_token: Option<RegistrationToken>,
+    // Raw evdev keycode of the currently-being-processed key (for passthrough)
+    pub(crate) current_keycode: Option<u32>,
 }
