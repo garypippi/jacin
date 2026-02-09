@@ -253,6 +253,7 @@ impl State {
 
     pub(crate) fn hide_keypress(&mut self) {
         self.keypress.clear();
+        self.keypress_timer_token = None;
         self.update_popup();
     }
 

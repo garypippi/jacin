@@ -41,6 +41,11 @@ impl KeyRepeatState {
         }
     }
 
+    /// Whether a key is currently held for repeat
+    pub fn has_key(&self) -> bool {
+        self.key.is_some()
+    }
+
     /// Unconditionally cancel all repeat state
     pub fn cancel(&mut self) {
         self.key = None;

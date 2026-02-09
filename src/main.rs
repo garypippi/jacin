@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use calloop::{
-    EventLoop, LoopSignal,
+    EventLoop, LoopSignal, RegistrationToken,
     ping::make_ping,
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
@@ -137,6 +137,8 @@ fn main() -> anyhow::Result<()> {
         nvim,
         visual_display: None,
         popup,
+        repeat_timer_token: None,
+        keypress_timer_token: None,
     };
 
     // Set up calloop event loop
@@ -177,40 +179,6 @@ fn main() -> anyhow::Result<()> {
         .handle()
         .insert_source(ping_source, |_, _, _| {})?;
 
-    // Add timer for keypress display timeout (fires every 100ms to check)
-    let timer = Timer::from_duration(std::time::Duration::from_millis(100));
-    event_loop
-        .handle()
-        .insert_source(timer, |_, _, state| {
-            // Check for keypress display timeout
-            if state.keypress.should_show() && state.keypress.is_timed_out() {
-                state.hide_keypress();
-            }
-            // Re-arm the timer to fire again
-            TimeoutAction::ToDuration(std::time::Duration::from_millis(100))
-        })
-        .expect("Failed to insert timer source");
-
-    // Add timer for key repeat (~5ms polling interval)
-    let repeat_timer = Timer::from_duration(std::time::Duration::from_millis(5));
-    event_loop
-        .handle()
-        .insert_source(repeat_timer, |_, _, state| {
-            if state.ime.is_fully_enabled()
-                && let Some(key) = state
-                    .repeat
-                    .should_fire(state.keyboard.repeat_rate, state.keyboard.repeat_delay)
-            {
-                state.handle_key(
-                    key,
-                    wl_keyboard::KeyState::Pressed,
-                    input::KeyOrigin::Repeat,
-                );
-            }
-            TimeoutAction::ToDuration(std::time::Duration::from_millis(5))
-        })
-        .expect("Failed to insert repeat timer source");
-
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -218,6 +186,7 @@ fn main() -> anyhow::Result<()> {
     log::info!("Focus a text input field to activate the IME");
 
     // Run the event loop
+    let handle = event_loop.handle();
     event_loop.run(None, &mut state, |state| {
         // Check for IME toggle signal (SIGUSR1)
         if state.toggle_flag.swap(false, Ordering::SeqCst) {
@@ -234,6 +203,58 @@ fn main() -> anyhow::Result<()> {
 
         for msg in messages {
             state.handle_nvim_message(msg);
+        }
+
+        // Insert on-demand repeat timer when a key is held
+        if state.repeat.has_key() && state.repeat_timer_token.is_none() {
+            let token = handle
+                .insert_source(
+                    Timer::from_duration(std::time::Duration::from_millis(5)),
+                    |_, _, state| {
+                        if state.ime.is_fully_enabled()
+                            && let Some(key) = state.repeat.should_fire(
+                                state.keyboard.repeat_rate,
+                                state.keyboard.repeat_delay,
+                            )
+                        {
+                            state.handle_key(
+                                key,
+                                wl_keyboard::KeyState::Pressed,
+                                input::KeyOrigin::Repeat,
+                            );
+                        }
+                        if state.repeat.has_key() {
+                            TimeoutAction::ToDuration(std::time::Duration::from_millis(5))
+                        } else {
+                            state.repeat_timer_token = None;
+                            TimeoutAction::Drop
+                        }
+                    },
+                )
+                .expect("Failed to insert repeat timer");
+            state.repeat_timer_token = Some(token);
+        }
+
+        // Insert on-demand keypress display timeout timer
+        if state.keypress.should_show() && state.keypress_timer_token.is_none() {
+            let token = handle
+                .insert_source(
+                    Timer::from_duration(std::time::Duration::from_millis(100)),
+                    |_, _, state| {
+                        if state.keypress.should_show() && state.keypress.is_timed_out() {
+                            state.hide_keypress();
+                            state.keypress_timer_token = None;
+                            TimeoutAction::Drop
+                        } else if state.keypress.should_show() {
+                            TimeoutAction::ToDuration(std::time::Duration::from_millis(100))
+                        } else {
+                            state.keypress_timer_token = None;
+                            TimeoutAction::Drop
+                        }
+                    },
+                )
+                .expect("Failed to insert keypress timer");
+            state.keypress_timer_token = Some(token);
         }
 
         if state.pending_exit
@@ -277,4 +298,7 @@ pub struct State {
     pub(crate) visual_display: Option<VisualSelection>,
     // Unified popup window (preedit, keypress, candidates)
     pub(crate) popup: Option<UnifiedPopup>,
+    // On-demand timer tokens (None = timer not running)
+    pub(crate) repeat_timer_token: Option<RegistrationToken>,
+    pub(crate) keypress_timer_token: Option<RegistrationToken>,
 }

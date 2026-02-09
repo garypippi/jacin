@@ -220,6 +220,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                     state.wayland.active = false;
                     if state.ime.is_enabled() {
                         state.repeat.cancel();
+                        state.repeat_timer_token = None;
                         state.wayland.release_keyboard();
                         state.keyboard.reset_modifiers();
                         // Clear local state (don't send Wayland protocol requests while deactivated,
@@ -227,6 +228,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                         state.ime.clear_preedit();
                         state.ime.clear_candidates();
                         state.keypress.clear();
+                        state.keypress_timer_token = None;
                         state.hide_popup();
                         // Clear Neovim buffer to reset state for next activation
                         if let Some(ref nvim) = state.nvim {
@@ -329,6 +331,9 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         }
                     } else {
                         state.repeat.stop(key);
+                        if !state.repeat.has_key() {
+                            state.repeat_timer_token = None;
+                        }
                     }
                     state.handle_key(key, ks, KeyOrigin::Physical);
                 }

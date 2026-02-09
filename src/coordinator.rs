@@ -35,6 +35,7 @@ impl State {
             log::debug!("[IME] Releasing keyboard");
             // Cancel any active key repeat
             self.repeat.cancel();
+            self.repeat_timer_token = None;
             // Commit any pending preedit text BEFORE releasing keyboard
             // (must match Commit handler order: commit first, then release)
             if !self.ime.preedit.is_empty() {
@@ -51,6 +52,7 @@ impl State {
             // Clear preedit and keypress display
             self.ime.clear_preedit();
             self.keypress.clear();
+            self.keypress_timer_token = None;
             self.keypress.recording.clear();
             self.hide_popup();
             self.ime.disable();
@@ -82,6 +84,7 @@ impl State {
                 self.ime.clear_candidates();
                 self.wayland.commit_string(&text);
                 self.keypress.clear();
+                self.keypress_timer_token = None;
                 // Consume any pending toggle (e.g., Alt in commit key <A-;> also
                 // triggers SIGUSR1 toggle — don't let it re-enable after commit)
                 self.toggle_flag.store(false, Ordering::SeqCst);
@@ -131,6 +134,7 @@ impl State {
             FromNeovim::CmdlineCancelled => {
                 log::debug!("[NVIM] CmdlineCancelled");
                 self.keypress.clear();
+                self.keypress_timer_token = None;
                 self.update_popup();
             }
             FromNeovim::CmdlineMessage(text) => {
@@ -146,16 +150,19 @@ impl State {
                 self.ime.clear_preedit();
                 self.ime.clear_candidates();
                 self.keypress.clear();
+                self.keypress_timer_token = None;
                 self.visual_display = None;
                 self.update_popup();
             }
             FromNeovim::NvimExited => {
                 log::info!("[NVIM] Neovim exited, disabling IME");
                 self.repeat.cancel();
+                self.repeat_timer_token = None;
                 self.wayland.set_preedit("", 0, 0);
                 self.ime.clear_preedit();
                 self.ime.clear_candidates();
                 self.keypress.clear();
+                self.keypress_timer_token = None;
                 self.keypress.recording.clear();
                 self.hide_popup();
                 self.wayland.release_keyboard();
