@@ -51,7 +51,6 @@
 │  │    Disabled             │     │  visible: bool                 │     │
 │  │    Enabling             │     │  timeout: Instant              │     │
 │  │    Enabled{vim_mode}    │     │  vim_mode: String              │     │
-│  │    Disabling            │     │                                │     │
 │  │                         │     │  (display timeout: 1.5s)       │     │
 │  │  preedit: String        │     └────────────────────────────────┘     │
 │  │  cursor_begin: usize    │                                            │
@@ -194,6 +193,7 @@ normal mode operations complete synchronously in Neovim.
 
 BS and Commit each use a single `exec_lua("return ime_handle_*()")` call
 that combines the check and action into one RPC round-trip.
+Lua functions are defined in `src/neovim/lua/` and loaded via `include_str!`.
 
 ## 2. State Transition Diagrams
 
@@ -209,9 +209,9 @@ The design has **3 independent state axes** (plus macros, observed from Neovim):
 |  +---------------+               +---------------+                  |
 |  | Disabled      |               | Insert        |  <- only valid   |
 |  | Enabling      |               | Normal        |     when Enabled |
-|  | Enabled ------+--- contains ->| Visual        |                  |
-|  | Disabling     |               | Op-Pending    |                  |
+|  | Enabled ------+--- contains ->|               |                  |
 |  +---------------+               +---------------+                  |
+|  (Visual/Op-Pending tracked by Neovim, observed via PendingState)  |
 |                                                                     |
 |  Axis 3: PendingState (exclusive)  Axis 4: Macro (display only)     |
 |  +---------------+               +---------------+                  |
@@ -244,19 +244,14 @@ Examples of simultaneously valid states:
                     ^                      | keymap event arrives
                     |                      | complete_enabling()
                     |                      v
-              +-----------+          +--------------+
-              |           |<---------|   Enabled    |
-              | Disabling | (normal) | {vim_mode}   |
-              |           |          |              |
-              +-----------+          +--------------+
-                    ^                      |
-                    |                      |
-                    +----------------------+
-                     start_disabling()
+                    |                +--------------+
+                    |<--------------|   Enabled    |
+                    | disable()     | {vim_mode}   |
+                    | (toggle-off,  |              |
+                    |  commit)      +--------------+
 
-  Shortcut transition (disable() -- toggle-off, commit):
-    Enabled ------------------------------------> Disabled
-    (Skips Disabling. Caller handles keyboard release directly.)
+  disable() transition (toggle-off, commit):
+    Enabled -> Disabled directly. Caller handles keyboard release.
 
   Deactivate/Activate cycle (compositor-driven):
     Enabled -> [compositor: Deactivate] -> release grab -> [compositor: Activate]
@@ -265,7 +260,6 @@ Examples of simultaneously valid states:
   Forbidden transitions:
     Disabled -> Enabled    (must go through Enabling)
     Enabling -> Disabled   (no way to cancel keymap wait)
-    Disabling -> Enabling  (must fully return to Disabled first)
 ```
 
 ### Axis 2: VimMode Transitions (inside ImeMode::Enabled)
@@ -280,22 +274,10 @@ Examples of simultaneously valid states:
      |  Normal  | <---------------------- |  Insert  |  <- initial state
      |          |         <Esc>           |          |
      +----------+                         +----------+
-       |      ^                                ^
-       |      |                                |
-   v, V|      | <Esc> or op complete           | op complete (c-family)
-       |      |                                |
-       v      |         d, y, c, >          +--+
-     +----------+ ----------------> +-------------------+
-     |          |                   |  OperatorPending  |
-     |  Visual  |                   |  {operator, await}|
-     |          |                   +-------------------+
-     +----------+                     |           ^
-                                      | i, a      |
-                                      v           |
-                                   +--+---------------+
-                                   | TextObjectChar   |
-                                   | (w,p,",),b,etc)  |
-                                   +------------------+
+
+  ImeState only tracks Insert and Normal modes.
+  Visual mode and operator-pending are observed from Neovim via PendingState
+  (handler.rs reads mode from collect_snapshot() and derives the display state).
 
   Command-line mode (intentionally not modeled as VimMode):
     Intentional (`:` key) -> PendingState::CommandLine, keys forwarded, display via CmdlineChanged
@@ -378,17 +360,17 @@ Examples of simultaneously valid states:
 ImeMode::Disabled   |   N/A   |     N/A      |     N/A        |
 ImeMode::Enabling   |   N/A   |     N/A      |     N/A        |
 ImeMode::Enabled    |  valid  |    valid     | valid(display) |
-ImeMode::Disabling  |  frozen |    frozen    |   frozen       |
 
-VimMode:            |         |              |                |
+VimMode (in ImeState):
   Insert            |    -    | None/InsReg/ | Rec/Play/      |
                     |         | Getchar      | Idle           |
   Normal            |    -    | None/NrmReg/ | Rec/Play/      |
                     |         | Motion/TxtOb/| Idle           |
                     |         | Getchar/     |                |
                     |         | CommandLine  |                |
-  Visual            |    -    | None/Motion  | Rec/Play       |
-  Op-Pending        |    -    | Motion/TxtOb | Rec/Play       |
+
+  Note: Visual and Op-Pending are not tracked in ImeState.
+  They are observed from Neovim's mode string and PendingState.
 ```
 
 ## 3. Design Principles and Boundaries
@@ -521,6 +503,8 @@ VimMode:            |         |              |                |
 |    Normal mode: synchronous 2-RPC (input + snapshot)         |
 |    Special keys: single Lua function calls                   |
 |    PendingState management (atomic, cross-thread)            |
+|    Decomposed into 10 named sub-handlers                     |
+|    Lua logic extracted to src/neovim/lua/ (include_str!)     |
 |    <- depends on Neovim RPC, not on Wayland                  |
 |                                                              |
 |  Config:                                                     |
@@ -549,11 +533,24 @@ VimMode:            |         |              |                |
 1. **~~`main.rs::State` is a large God Object (~970 lines)~~** (resolved)
    - Split into: `main.rs` (State struct + event loop), `dispatch.rs` (Wayland dispatch), `input.rs` (key processing), `coordinator.rs` (Neovim responses + toggle + preedit coordination)
 
-2. **`UnifiedPopup` directly owns the wl_surface**
+2. **~~`handler.rs::handle_key` was a 244-line monolith~~** (resolved)
+   - Decomposed into dispatcher + 10 named sub-handlers (`handle_commandline_mode`, `handle_getchar_pending`, `handle_commit_key`, `handle_backspace`, `handle_insert_register`, `handle_normal_register`, `handle_register_pending`, `handle_motion_pending`, `handle_snapshot_response`)
+
+3. **~~Embedded Lua strings in handler.rs~~** (resolved)
+   - Extracted ~250 lines of Lua into 6 `.lua` files under `src/neovim/lua/`, loaded via `include_str!` at compile time
+
+4. **~~Dead VimMode/ImeMode variants~~** (resolved)
+   - Removed `ImeMode::Disabling`, `VimMode::OperatorPending`, `VimMode::Visual`, `MotionAwaiting` enum, and 8+ dead methods
+   - ImeMode now has 3 states (Disabled, Enabling, Enabled), VimMode has 2 (Insert, Normal)
+
+5. **~~Duplicate snapshot→PreeditInfo conversion~~** (resolved)
+   - Added `Snapshot::to_preedit_info()` and `Snapshot::to_visual_selection()` methods in protocol.rs
+
+6. **`UnifiedPopup` directly owns the wl_surface**
    - Rendering logic (`calculate_layout`, `render_*`) and Wayland surface operations are interleaved
    - Potential split: `PopupRenderer` (Pixmap generation) and `WaylandSurface` (attach/commit) -- would make rendering testable
 
-3. **`PendingState` is a static AtomicU8**
+7. **`PendingState` is a static AtomicU8**
    - Thread-safe but difficult to test or reset
    - Problematic if multiple instances are ever needed
    - Alternative: `Arc<AtomicU8>` shared between handler and main thread
@@ -563,8 +560,8 @@ VimMode:            |         |              |                |
 **Current state count:**
 
 ```
-ImeMode: 4 * VimMode: 4 * PendingState: 7
-= 112 theoretical combinations (roughly 20 actually valid)
+ImeMode: 3 * VimMode: 2 * PendingState: 7
+= 42 theoretical combinations (roughly 15 actually valid)
 ```
 
 **Defense principles:**

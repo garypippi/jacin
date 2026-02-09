@@ -37,9 +37,16 @@ src/
     keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
   neovim/
     mod.rs                   # NeovimHandle (public API)
-    protocol.rs              # ToNeovim, FromNeovim typed messages (serde)
-    handler.rs               # Tokio-side Neovim message handling
+    protocol.rs              # ToNeovim, FromNeovim typed messages (serde), Snapshot
+    handler.rs               # Tokio-side Neovim message handling (decomposed sub-handlers)
     event_source.rs          # Calloop event source (infrastructure)
+    lua/
+      snapshot.lua           # collect_snapshot() function
+      key_handlers.lua       # ime_handle_bs(), ime_handle_commit()
+      auto_commit.lua        # ime_context table, check_line_added()
+      autocmds.lua           # ModeChanged, TextChangedI, CursorMovedI, CmdlineChanged, CmdlineLeave
+      completion_cmp.lua     # nvim-cmp completion adapter
+      completion_native.lua  # Native CompleteChanged/CompleteDone adapter
   ui/
     mod.rs                   # Re-exports
     unified_window.rs        # Unified popup (preedit, keypress, candidates)
@@ -50,7 +57,7 @@ src/
 
 - **Config module**: TOML config at `~/.config/jacin/config.toml` with configurable commit keybind, completion adapter, and behavior options (auto_startinsert). `--clean` flag for vanilla Neovim.
 - **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `KeyRepeatState`, `ImeState`, `KeypressState`
-- **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled, Disabling) replacing boolean flags
+- **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
 - **Optimized RPC**: Insert mode uses fire-and-forget (`nvim_input` + push notification via `TextChangedI`/`CursorMovedI` autocmds); normal mode uses 2-RPC pull (`nvim_input` + `collect_snapshot()`); special keys use single Lua function calls
 - **UI module**: Unified popup window (preedit with cursor, keypress display, candidates with scrollbar)
