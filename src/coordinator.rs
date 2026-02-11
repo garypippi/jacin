@@ -175,6 +175,10 @@ impl State {
     fn on_cmdline_cancelled(&mut self) {
         log::debug!("[NVIM] CmdlineCancelled");
         self.keypress.clear();
+        // Restore vim_mode to normal — command mode is only entered from normal
+        // mode (`:` key), so after cancel/execution the mode is always `n`.
+        // clear() doesn't reset vim_mode, so it stays "c" without this.
+        self.keypress.set_vim_mode("n");
         self.keypress_timer_token = None;
         self.update_popup();
     }
