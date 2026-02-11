@@ -157,6 +157,37 @@ mod tests {
     }
 
     #[test]
+    fn complete_enabling_sets_requested_vim_mode() {
+        let mut state = ImeState::new();
+        state.start_enabling();
+
+        let transitioned = state.complete_enabling(VimMode::Normal);
+        assert!(transitioned);
+        assert_eq!(
+            state.mode,
+            ImeMode::Enabled {
+                vim_mode: VimMode::Normal,
+            }
+        );
+    }
+
+    #[test]
+    fn complete_enabling_from_enabled_does_not_override_mode() {
+        let mut state = ImeState::new();
+        state.start_enabling();
+        assert!(state.complete_enabling(VimMode::Insert));
+
+        let transitioned = state.complete_enabling(VimMode::Normal);
+        assert!(!transitioned);
+        assert_eq!(
+            state.mode,
+            ImeMode::Enabled {
+                vim_mode: VimMode::Insert,
+            }
+        );
+    }
+
+    #[test]
     fn disable_clears_preedit() {
         let mut state = ImeState::new();
         state.start_enabling();

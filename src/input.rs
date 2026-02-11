@@ -275,8 +275,77 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::keysym_to_vim;
+    use super::{is_printable, keysym_to_letter, keysym_to_vim, special_key_name};
     use xkbcommon::xkb::Keysym;
+
+    // ── special_key_name ──
+
+    #[test]
+    fn special_key_name_return_variants() {
+        assert_eq!(special_key_name(Keysym::Return), Some("CR"));
+        assert_eq!(special_key_name(Keysym::KP_Enter), Some("CR"));
+    }
+
+    #[test]
+    fn special_key_name_all_mapped() {
+        assert_eq!(special_key_name(Keysym::BackSpace), Some("BS"));
+        assert_eq!(special_key_name(Keysym::Tab), Some("Tab"));
+        assert_eq!(special_key_name(Keysym::Escape), Some("Esc"));
+        assert_eq!(special_key_name(Keysym::space), Some("Space"));
+        assert_eq!(special_key_name(Keysym::Left), Some("Left"));
+        assert_eq!(special_key_name(Keysym::Right), Some("Right"));
+        assert_eq!(special_key_name(Keysym::Up), Some("Up"));
+        assert_eq!(special_key_name(Keysym::Down), Some("Down"));
+    }
+
+    #[test]
+    fn special_key_name_non_special_returns_none() {
+        assert_eq!(special_key_name(Keysym::a), None);
+        assert_eq!(special_key_name(Keysym::_1), None);
+        assert_eq!(special_key_name(Keysym::Shift_L), None);
+    }
+
+    // ── keysym_to_letter ──
+
+    #[test]
+    fn keysym_to_letter_lowercase_range() {
+        assert_eq!(keysym_to_letter(Keysym::a), Some('a'));
+        assert_eq!(keysym_to_letter(Keysym::m), Some('m'));
+        assert_eq!(keysym_to_letter(Keysym::z), Some('z'));
+    }
+
+    #[test]
+    fn keysym_to_letter_non_letter_returns_none() {
+        assert_eq!(keysym_to_letter(Keysym::A), None);
+        assert_eq!(keysym_to_letter(Keysym::_1), None);
+        assert_eq!(keysym_to_letter(Keysym::Return), None);
+        assert_eq!(keysym_to_letter(Keysym::space), None);
+    }
+
+    // ── is_printable ──
+
+    #[test]
+    fn is_printable_ascii() {
+        assert!(is_printable("a"));
+        assert!(is_printable("Z"));
+        assert!(is_printable("1"));
+        assert!(is_printable("<"));
+    }
+
+    #[test]
+    fn is_printable_multibyte() {
+        assert!(is_printable("あ"));
+        assert!(is_printable("漢"));
+    }
+
+    #[test]
+    fn is_printable_empty_and_control() {
+        assert!(!is_printable(""));
+        assert!(!is_printable("\x00"));
+        assert!(!is_printable("\x1b"));
+    }
+
+    // ── keysym_to_vim: no modifiers ──
 
     #[test]
     fn printable_ascii() {
@@ -295,6 +364,18 @@ mod tests {
         assert_eq!(
             keysym_to_vim(false, false, Keysym::A, "A"),
             Some("A".into())
+        );
+    }
+
+    #[test]
+    fn digit_keys() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::_0, "0"),
+            Some("0".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::_9, "9"),
+            Some("9".into())
         );
     }
 
@@ -323,26 +404,30 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_modifier() {
+    fn kp_enter_maps_to_cr() {
         assert_eq!(
-            keysym_to_vim(true, false, Keysym::a, "a"),
-            Some("<C-a>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::Return, ""),
-            Some("<C-CR>".into())
+            keysym_to_vim(false, false, Keysym::KP_Enter, ""),
+            Some("<CR>".into())
         );
     }
 
     #[test]
-    fn alt_modifier() {
+    fn arrow_keys() {
         assert_eq!(
-            keysym_to_vim(false, true, Keysym::a, "a"),
-            Some("<A-a>".into())
+            keysym_to_vim(false, false, Keysym::Left, ""),
+            Some("<Left>".into())
         );
         assert_eq!(
-            keysym_to_vim(false, true, Keysym::Return, ""),
-            Some("<A-CR>".into())
+            keysym_to_vim(false, false, Keysym::Right, ""),
+            Some("<Right>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::Up, ""),
+            Some("<Up>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::Down, ""),
+            Some("<Down>".into())
         );
     }
 
@@ -357,19 +442,11 @@ mod tests {
     #[test]
     fn bare_modifier_returns_none() {
         assert_eq!(keysym_to_vim(false, false, Keysym::Shift_L, ""), None);
+        assert_eq!(keysym_to_vim(false, false, Keysym::Shift_R, ""), None);
         assert_eq!(keysym_to_vim(false, false, Keysym::Control_L, ""), None);
-    }
-
-    #[test]
-    fn arrow_keys() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Left, ""),
-            Some("<Left>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Up, ""),
-            Some("<Up>".into())
-        );
+        assert_eq!(keysym_to_vim(false, false, Keysym::Control_R, ""), None);
+        assert_eq!(keysym_to_vim(false, false, Keysym::Alt_L, ""), None);
+        assert_eq!(keysym_to_vim(false, false, Keysym::Super_L, ""), None);
     }
 
     #[test]
@@ -377,6 +454,124 @@ mod tests {
         assert_eq!(
             keysym_to_vim(false, false, Keysym::NoSymbol, "あ"),
             Some("あ".into())
+        );
+    }
+
+    #[test]
+    fn kanji_utf8() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::NoSymbol, "漢"),
+            Some("漢".into())
+        );
+    }
+
+    // ── keysym_to_vim: Ctrl modifier ──
+
+    #[test]
+    fn ctrl_letter() {
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::a, "a"),
+            Some("<C-a>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::z, "z"),
+            Some("<C-z>".into())
+        );
+    }
+
+    #[test]
+    fn ctrl_special_keys() {
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::Return, ""),
+            Some("<C-CR>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::BackSpace, ""),
+            Some("<C-BS>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::Tab, ""),
+            Some("<C-Tab>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::space, ""),
+            Some("<C-Space>".into())
+        );
+    }
+
+    #[test]
+    fn ctrl_non_letter_non_special_returns_none() {
+        // Ctrl+digit: keysym_to_letter returns None, not special → None
+        assert_eq!(keysym_to_vim(true, false, Keysym::_1, "1"), None);
+    }
+
+    // ── keysym_to_vim: Alt modifier ──
+
+    #[test]
+    fn alt_letter() {
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::a, "a"),
+            Some("<A-a>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::z, "z"),
+            Some("<A-z>".into())
+        );
+    }
+
+    #[test]
+    fn alt_special_keys() {
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::Return, ""),
+            Some("<A-CR>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::Escape, ""),
+            Some("<A-Esc>".into())
+        );
+    }
+
+    #[test]
+    fn alt_printable_utf8() {
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::_1, "1"),
+            Some("<A-1>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::NoSymbol, "あ"),
+            Some("<A-あ>".into())
+        );
+    }
+
+    #[test]
+    fn alt_less_than_escaped() {
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::less, "<"),
+            Some("<A-lt>".into())
+        );
+    }
+
+    #[test]
+    fn alt_bare_modifier_returns_none() {
+        assert_eq!(keysym_to_vim(false, true, Keysym::Shift_L, ""), None);
+    }
+
+    // ── keysym_to_vim: Ctrl+Alt (Alt takes priority) ──
+
+    #[test]
+    fn ctrl_alt_letter_alt_wins() {
+        // When both ctrl and alt are true, alt branch is entered first
+        assert_eq!(
+            keysym_to_vim(true, true, Keysym::a, "a"),
+            Some("<A-a>".into())
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_special_key_alt_wins() {
+        assert_eq!(
+            keysym_to_vim(true, true, Keysym::Return, ""),
+            Some("<A-CR>".into())
         );
     }
 }

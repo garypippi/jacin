@@ -146,4 +146,41 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(700));
         assert!(state.should_fire(25, 600).is_none());
     }
+
+    #[test]
+    fn has_key_tracks_lifecycle() {
+        let mut state = KeyRepeatState::new();
+        assert!(!state.has_key());
+
+        state.start(10);
+        assert!(state.has_key());
+
+        state.stop(99); // different key
+        assert!(state.has_key());
+
+        state.stop(10); // tracked key
+        assert!(!state.has_key());
+
+        state.start(20);
+        assert!(state.has_key());
+        state.cancel();
+        assert!(!state.has_key());
+    }
+
+    #[test]
+    fn second_fire_respects_repeat_interval() {
+        let mut state = KeyRepeatState::new();
+        state.start(7);
+
+        // Wait for initial delay and first fire.
+        std::thread::sleep(std::time::Duration::from_millis(620));
+        assert_eq!(state.should_fire(20, 600), Some(7)); // 20Hz => 50ms interval
+
+        // Too early for second fire.
+        assert!(state.should_fire(20, 600).is_none());
+
+        // Past one interval should fire again.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(state.should_fire(20, 600), Some(7));
+    }
 }
