@@ -95,6 +95,10 @@ impl State {
             info.cursor_end,
             info.mode
         );
+        if !self.ime.is_fully_enabled() {
+            log::debug!("[NVIM] Ignoring Preedit (IME not fully enabled)");
+            return;
+        }
         self.ime
             .set_preedit(info.text, info.cursor_begin, info.cursor_end);
         self.keypress.set_vim_mode(&info.mode);
@@ -135,6 +139,9 @@ impl State {
             info.candidates,
             info.selected
         );
+        if !self.ime.is_fully_enabled() {
+            return;
+        }
         if info.candidates.is_empty() {
             self.hide_candidates();
         } else {
@@ -145,6 +152,9 @@ impl State {
 
     fn on_visual_range(&mut self, selection: Option<neovim::VisualSelection>) {
         log::debug!("[NVIM] VisualRange: {:?}", selection);
+        if !self.ime.is_fully_enabled() {
+            return;
+        }
         self.visual_display = selection;
         self.update_popup();
     }
@@ -166,6 +176,9 @@ impl State {
 
     fn on_cmdline_update(&mut self, text: String) {
         log::debug!("[NVIM] CmdlineUpdate: {:?}", text);
+        if !self.ime.is_fully_enabled() {
+            return;
+        }
         self.keypress.accumulated = text;
         self.keypress.visible = true;
         self.keypress.set_vim_mode("c");
@@ -185,6 +198,9 @@ impl State {
 
     fn on_cmdline_message(&mut self, text: String) {
         log::debug!("[NVIM] CmdlineMessage: {:?}", text);
+        if !self.ime.is_fully_enabled() {
+            return;
+        }
         self.keypress.accumulated = text;
         self.keypress.visible = true;
         self.keypress.last_shown = Some(std::time::Instant::now());
@@ -193,6 +209,9 @@ impl State {
 
     fn on_auto_commit(&mut self, text: String) {
         log::debug!("[NVIM] AutoCommit: {:?}", text);
+        if !self.ime.is_fully_enabled() {
+            return;
+        }
         self.wayland.commit_string(&text);
         self.ime.clear_preedit();
         self.ime.clear_candidates();

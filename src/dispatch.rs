@@ -281,6 +281,12 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             if state.ime.complete_enabling(initial_mode)
                                 || state.ime.is_fully_enabled()
                             {
+                                // Set vim_mode for popup display to match initial mode
+                                if state.config.behavior.auto_startinsert {
+                                    state.keypress.set_vim_mode("i");
+                                } else {
+                                    state.keypress.set_vim_mode("n");
+                                }
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
                                     if state.config.behavior.auto_startinsert {
