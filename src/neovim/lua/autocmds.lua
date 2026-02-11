@@ -12,6 +12,11 @@ vim.api.nvim_create_autocmd('ModeChanged', {
         if old_mode and old_mode:match('^i') and new_mode and not new_mode:match('^i') then
             vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
         end
+        -- Push snapshot when entering insert mode (e.g. i, a, A after <Esc>)
+        -- so the mode indicator updates immediately
+        if new_mode and new_mode:match('^i') and old_mode and not old_mode:match('^i') then
+            vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+        end
     end,
 })
 
