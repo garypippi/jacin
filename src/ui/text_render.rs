@@ -8,6 +8,7 @@ use fontdue::{Font, FontSettings};
 use memmap2::MmapMut;
 use std::collections::HashMap;
 use std::os::fd::AsFd;
+use std::sync::Arc;
 use sys::*;
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
 use wayland_client::QueueHandle;
@@ -27,7 +28,7 @@ pub struct TextRenderer {
 #[derive(Clone)]
 struct GlyphData {
     metrics: fontdue::Metrics,
-    bitmap: Vec<u8>,
+    bitmap: Arc<[u8]>,
 }
 
 impl TextRenderer {
@@ -52,7 +53,7 @@ impl TextRenderer {
         // Try primary font
         if self.font.has_glyph(c) {
             let (metrics, bitmap) = self.font.rasterize(c, self.font_size);
-            let data = GlyphData { metrics, bitmap };
+            let data = GlyphData { metrics, bitmap: bitmap.into() };
             self.glyph_cache.insert(c, data.clone());
             return data;
         }
@@ -61,7 +62,7 @@ impl TextRenderer {
         for fb in &self.fallback_fonts {
             if fb.has_glyph(c) {
                 let (metrics, bitmap) = fb.rasterize(c, self.font_size);
-                let data = GlyphData { metrics, bitmap };
+                let data = GlyphData { metrics, bitmap: bitmap.into() };
                 self.glyph_cache.insert(c, data.clone());
                 return data;
             }
@@ -70,7 +71,7 @@ impl TextRenderer {
         // Query fontconfig for a fallback font covering this character
         if let Some(fb) = self.query_fallback_font(c) {
             let (metrics, bitmap) = fb.rasterize(c, self.font_size);
-            let data = GlyphData { metrics, bitmap };
+            let data = GlyphData { metrics, bitmap: bitmap.into() };
             self.glyph_cache.insert(c, data.clone());
             self.fallback_fonts.push(fb);
             return data;
@@ -78,7 +79,7 @@ impl TextRenderer {
 
         // Last resort: primary font's .notdef glyph
         let (metrics, bitmap) = self.font.rasterize(c, self.font_size);
-        let data = GlyphData { metrics, bitmap };
+        let data = GlyphData { metrics, bitmap: bitmap.into() };
         self.glyph_cache.insert(c, data.clone());
         data
     }
