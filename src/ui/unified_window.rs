@@ -30,6 +30,8 @@ const POOL_SIZE: usize = 600 * 450 * 4 * 2;
 struct Buffer {
     buffer: wl_buffer::WlBuffer,
     in_use: bool,
+    width: u32,
+    height: u32,
 }
 
 /// Unified popup window
@@ -201,8 +203,15 @@ impl UnifiedPopup {
         let dest = &mut self.pool_data[offset..offset + buffer_size];
         copy_pixmap_to_shm(&pixmap, dest);
 
-        // Get or create wl_buffer for this slot
-        if self.buffers[buffer_idx].is_none() {
+        // Get or create wl_buffer for this slot (reuse if dimensions match)
+        let needs_new_buffer = match &self.buffers[buffer_idx] {
+            None => true,
+            Some(buf) => buf.width != self.width || buf.height != self.height,
+        };
+        if needs_new_buffer {
+            if let Some(old) = self.buffers[buffer_idx].take() {
+                old.buffer.destroy();
+            }
             let buffer = self.pool.create_buffer(
                 offset as i32,
                 self.width as i32,
@@ -215,20 +224,11 @@ impl UnifiedPopup {
             self.buffers[buffer_idx] = Some(Buffer {
                 buffer,
                 in_use: true,
+                width: self.width,
+                height: self.height,
             });
         } else {
-            let buf = self.buffers[buffer_idx].as_mut().unwrap();
-            buf.buffer.destroy();
-            buf.buffer = self.pool.create_buffer(
-                offset as i32,
-                self.width as i32,
-                self.height as i32,
-                (self.width * 4) as i32,
-                wl_shm::Format::Argb8888,
-                qh,
-                buffer_idx,
-            );
-            buf.in_use = true;
+            self.buffers[buffer_idx].as_mut().unwrap().in_use = true;
         }
 
         // Attach and commit
