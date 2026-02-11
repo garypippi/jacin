@@ -208,54 +208,56 @@ fn main() -> anyhow::Result<()> {
 
         // Insert on-demand repeat timer when a key is held
         if state.repeat.has_key() && state.repeat_timer_token.is_none() {
-            let token = handle
-                .insert_source(
-                    Timer::from_duration(std::time::Duration::from_millis(5)),
-                    |_, _, state| {
-                        if state.ime.is_fully_enabled()
-                            && let Some(key) = state.repeat.should_fire(
-                                state.keyboard.repeat_rate,
-                                state.keyboard.repeat_delay,
-                            )
-                        {
-                            state.handle_key(
-                                key,
-                                wl_keyboard::KeyState::Pressed,
-                                input::KeyOrigin::Repeat,
-                            );
-                        }
-                        if state.repeat.has_key() {
-                            TimeoutAction::ToDuration(std::time::Duration::from_millis(5))
-                        } else {
-                            state.repeat_timer_token = None;
-                            TimeoutAction::Drop
-                        }
-                    },
-                )
-                .expect("Failed to insert repeat timer");
-            state.repeat_timer_token = Some(token);
+            match handle.insert_source(
+                Timer::from_duration(std::time::Duration::from_millis(5)),
+                |_, _, state| {
+                    if state.ime.is_fully_enabled()
+                        && let Some(key) = state
+                            .repeat
+                            .should_fire(state.keyboard.repeat_rate, state.keyboard.repeat_delay)
+                    {
+                        state.handle_key(key, wl_keyboard::KeyState::Pressed);
+                    }
+                    if state.repeat.has_key() {
+                        TimeoutAction::ToDuration(std::time::Duration::from_millis(5))
+                    } else {
+                        state.repeat_timer_token = None;
+                        TimeoutAction::Drop
+                    }
+                },
+            ) {
+                Ok(token) => state.repeat_timer_token = Some(token),
+                Err(e) => {
+                    log::error!("[TIMER] Failed to insert repeat timer: {e}");
+                    state.repeat_timer_token = None;
+                    state.repeat.cancel();
+                }
+            }
         }
 
         // Insert on-demand keypress display timeout timer
         if state.keypress.should_show() && state.keypress_timer_token.is_none() {
-            let token = handle
-                .insert_source(
-                    Timer::from_duration(std::time::Duration::from_millis(100)),
-                    |_, _, state| {
-                        if state.keypress.should_show() && state.keypress.is_timed_out() {
-                            state.hide_keypress();
-                            state.keypress_timer_token = None;
-                            TimeoutAction::Drop
-                        } else if state.keypress.should_show() {
-                            TimeoutAction::ToDuration(std::time::Duration::from_millis(100))
-                        } else {
-                            state.keypress_timer_token = None;
-                            TimeoutAction::Drop
-                        }
-                    },
-                )
-                .expect("Failed to insert keypress timer");
-            state.keypress_timer_token = Some(token);
+            match handle.insert_source(
+                Timer::from_duration(std::time::Duration::from_millis(100)),
+                |_, _, state| {
+                    if state.keypress.should_show() && state.keypress.is_timed_out() {
+                        state.hide_keypress();
+                        state.keypress_timer_token = None;
+                        TimeoutAction::Drop
+                    } else if state.keypress.should_show() {
+                        TimeoutAction::ToDuration(std::time::Duration::from_millis(100))
+                    } else {
+                        state.keypress_timer_token = None;
+                        TimeoutAction::Drop
+                    }
+                },
+            ) {
+                Ok(token) => state.keypress_timer_token = Some(token),
+                Err(e) => {
+                    log::error!("[TIMER] Failed to insert keypress timer: {e}");
+                    state.keypress_timer_token = None;
+                }
+            }
         }
 
         if state.pending_exit

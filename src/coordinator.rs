@@ -5,6 +5,22 @@ use crate::neovim::{self, FromNeovim};
 use crate::ui::PopupContent;
 
 impl State {
+    /// Common cleanup shared by toggle-off, deactivate, and NvimExited:
+    /// cancel timers, clear all display state, release keyboard grab.
+    pub(crate) fn reset_ime_state(&mut self) {
+        self.repeat.cancel();
+        self.repeat_timer_token = None;
+        self.ime.clear_preedit();
+        self.ime.clear_candidates();
+        self.keypress.clear();
+        self.keypress_timer_token = None;
+        self.keypress.recording.clear();
+        self.visual_display = None;
+        self.hide_popup();
+        self.wayland.release_keyboard();
+        self.keyboard.reset_modifiers();
+    }
+
     pub(crate) fn handle_ime_toggle(&mut self) {
         let was_enabled = self.ime.is_enabled();
         log::info!("[IME] Toggle: was_enabled = {}", was_enabled);
@@ -31,30 +47,18 @@ impl State {
                 self.ime.start_enabling();
             }
         } else {
-            // Disable IME - commit preedit text, release keyboard, disable skkeleton
-            log::debug!("[IME] Releasing keyboard");
-            // Cancel any active key repeat
-            self.repeat.cancel();
-            self.repeat_timer_token = None;
-            // Commit any pending preedit text BEFORE releasing keyboard
+            // Disable IME - commit preedit text BEFORE releasing keyboard
             // (must match Commit handler order: commit first, then release)
+            log::debug!("[IME] Releasing keyboard");
             if !self.ime.preedit.is_empty() {
                 self.wayland.commit_string(&self.ime.preedit);
             }
-            self.wayland.release_keyboard();
-            self.keyboard.reset_modifiers();
-            // Clear Neovim buffer.
-            // Must clear here rather than relying on Deactivate handler,
-            // because rapid re-enable can happen before Deactivate fires.
+            self.reset_ime_state();
+            // Clear Neovim buffer (must clear here, not rely on Deactivate —
+            // rapid re-enable can happen before Deactivate fires)
             if let Some(ref nvim) = self.nvim {
                 nvim.send_key("<Esc>ggdG");
             }
-            // Clear preedit and keypress display
-            self.ime.clear_preedit();
-            self.keypress.clear();
-            self.keypress_timer_token = None;
-            self.keypress.recording.clear();
-            self.hide_popup();
             self.ime.disable();
         }
     }
@@ -170,17 +174,9 @@ impl State {
             }
             FromNeovim::NvimExited => {
                 log::info!("[NVIM] Neovim exited, disabling IME");
-                self.repeat.cancel();
-                self.repeat_timer_token = None;
+                // Clear compositor preedit (still active, compositor may show stale text)
                 self.wayland.set_preedit("", 0, 0);
-                self.ime.clear_preedit();
-                self.ime.clear_candidates();
-                self.keypress.clear();
-                self.keypress_timer_token = None;
-                self.keypress.recording.clear();
-                self.hide_popup();
-                self.wayland.release_keyboard();
-                self.keyboard.reset_modifiers();
+                self.reset_ime_state();
                 self.ime.disable();
                 self.nvim = None;
             }

@@ -16,7 +16,6 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 };
 
 use crate::State;
-use crate::input::KeyOrigin;
 use crate::state::VimMode;
 
 // Dispatch for registry (required by registry_queue_init)
@@ -198,15 +197,6 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 log::info!("IME deactivated");
                 state.wayland.pending_deactivate = true;
             }
-            zwp_input_method_v2::Event::SurroundingText { .. } => {
-                // Noisy, don't print
-            }
-            zwp_input_method_v2::Event::TextChangeCause { .. } => {
-                // Noisy, don't print
-            }
-            zwp_input_method_v2::Event::ContentType { .. } => {
-                // Content type info available if needed
-            }
             zwp_input_method_v2::Event::Done => {
                 // Serial must equal the number of Done events received
                 // (required by the commit request protocol)
@@ -219,17 +209,9 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 if pending_deactivate {
                     state.wayland.active = false;
                     if state.ime.is_enabled() {
-                        state.repeat.cancel();
-                        state.repeat_timer_token = None;
-                        state.wayland.release_keyboard();
-                        state.keyboard.reset_modifiers();
-                        // Clear local state (don't send Wayland protocol requests while deactivated,
-                        // the compositor automatically clears preedit on deactivate)
-                        state.ime.clear_preedit();
-                        state.ime.clear_candidates();
-                        state.keypress.clear();
-                        state.keypress_timer_token = None;
-                        state.hide_popup();
+                        // Clear local state (don't send Wayland protocol requests
+                        // while deactivated — compositor clears preedit automatically)
+                        state.reset_ime_state();
                         // Clear Neovim buffer to reset state for next activation
                         if let Some(ref nvim) = state.nvim {
                             nvim.send_key("<Esc>ggdG");
@@ -335,7 +317,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             state.repeat_timer_token = None;
                         }
                     }
-                    state.handle_key(key, ks, KeyOrigin::Physical);
+                    state.handle_key(key, ks);
                 }
             }
             zwp_input_method_keyboard_grab_v2::Event::Modifiers {

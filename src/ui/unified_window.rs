@@ -327,7 +327,14 @@ impl UnifiedPopup {
         let offset = buffer_idx * buffer_size;
 
         // Create pixmap
-        let mut pixmap = Pixmap::new(self.width, self.height).unwrap();
+        let Some(mut pixmap) = Pixmap::new(self.width, self.height) else {
+            log::warn!(
+                "[POPUP] Failed to allocate pixmap ({}x{}), skipping render",
+                self.width,
+                self.height
+            );
+            return;
+        };
 
         // Background
         pixmap.fill(rgba(BG_COLOR));

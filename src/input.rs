@@ -4,88 +4,87 @@ use xkbcommon::xkb;
 use crate::State;
 use crate::neovim::{PendingState, pending_state};
 
-/// Distinguishes physical key presses from repeat events
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyOrigin {
-    Physical,
-    Repeat,
+/// Map keysym to its Vim special-key name (e.g. `Return` → `"CR"`).
+///
+/// Only returns names for keys that need `<>` wrapping in Vim notation.
+/// Returns `None` for letters, digits, and other printable characters.
+fn special_key_name(keysym: xkb::Keysym) -> Option<&'static str> {
+    use xkbcommon::xkb::Keysym;
+
+    match keysym {
+        Keysym::Return | Keysym::KP_Enter => Some("CR"),
+        Keysym::BackSpace => Some("BS"),
+        Keysym::Tab => Some("Tab"),
+        Keysym::Escape => Some("Esc"),
+        Keysym::space => Some("Space"),
+        Keysym::Left => Some("Left"),
+        Keysym::Right => Some("Right"),
+        Keysym::Up => Some("Up"),
+        Keysym::Down => Some("Down"),
+        _ => None,
+    }
+}
+
+/// Map keysym to a lowercase letter (a-z), if applicable.
+fn keysym_to_letter(keysym: xkb::Keysym) -> Option<char> {
+    use xkbcommon::xkb::Keysym;
+
+    if keysym.raw() >= Keysym::a.raw() && keysym.raw() <= Keysym::z.raw() {
+        Some((keysym.raw() - Keysym::a.raw() + b'a' as u32) as u8 as char)
+    } else {
+        None
+    }
+}
+
+/// Returns `true` if `utf8` contains at least one printable (non-control) character.
+fn is_printable(utf8: &str) -> bool {
+    !utf8.is_empty() && !utf8.chars().all(char::is_control)
 }
 
 /// Convert an XKB keysym + modifiers to Vim notation.
 ///
 /// Returns `None` if the key has no Vim representation (e.g. bare modifier keys).
 pub fn keysym_to_vim(ctrl: bool, alt: bool, keysym: xkb::Keysym, utf8: &str) -> Option<String> {
-    use xkbcommon::xkb::Keysym;
-
-    // Get base key representation first
-    let base_key = match keysym {
-        Keysym::Return | Keysym::KP_Enter => Some("CR".to_string()),
-        Keysym::BackSpace => Some("BS".to_string()),
-        Keysym::Tab => Some("Tab".to_string()),
-        Keysym::Escape => Some("Esc".to_string()),
-        Keysym::space => Some("Space".to_string()),
-        Keysym::Left => Some("Left".to_string()),
-        Keysym::Right => Some("Right".to_string()),
-        Keysym::Up => Some("Up".to_string()),
-        Keysym::Down => Some("Down".to_string()),
-        _ if keysym.raw() >= Keysym::a.raw() && keysym.raw() <= Keysym::z.raw() => {
-            // Lowercase letter
-            let c = (keysym.raw() - Keysym::a.raw() + b'a' as u32) as u8 as char;
-            Some(c.to_string())
-        }
-        _ => None,
-    };
-
-    // Handle Alt combinations
+    // Handle Alt combinations: <A-key>
     if alt {
-        if let Some(key) = base_key {
-            return Some(format!("<A-{}>", key));
+        if let Some(name) = special_key_name(keysym) {
+            return Some(format!("<A-{name}>"));
         }
-        if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
+        if let Some(c) = keysym_to_letter(keysym) {
+            return Some(format!("<A-{c}>"));
+        }
+        if is_printable(utf8) {
             let escaped = utf8.replace('<', "lt");
-            return Some(format!("<A-{}>", escaped));
+            return Some(format!("<A-{escaped}>"));
         }
         return None;
     }
 
-    // Handle Ctrl combinations
+    // Handle Ctrl combinations: <C-key>
     if ctrl {
-        if let Some(key) = base_key {
-            return Some(format!("<C-{}>", key));
+        if let Some(name) = special_key_name(keysym) {
+            return Some(format!("<C-{name}>"));
+        }
+        if let Some(c) = keysym_to_letter(keysym) {
+            return Some(format!("<C-{c}>"));
         }
         return None;
     }
 
-    // No modifier: wrap special keys in <>, return letters/printable as-is
-    match keysym {
-        Keysym::Return | Keysym::KP_Enter => Some("<CR>".to_string()),
-        Keysym::BackSpace => Some("<BS>".to_string()),
-        Keysym::Tab => Some("<Tab>".to_string()),
-        Keysym::Escape => Some("<Esc>".to_string()),
-        Keysym::space => Some("<Space>".to_string()),
-        Keysym::Left => Some("<Left>".to_string()),
-        Keysym::Right => Some("<Right>".to_string()),
-        Keysym::Up => Some("<Up>".to_string()),
-        Keysym::Down => Some("<Down>".to_string()),
-        _ => {
-            // Printable characters
-            if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
-                // Escape '<' as '<lt>' for nvim_input (bare '<' starts a key sequence)
-                Some(utf8.replace('<', "<lt>"))
-            } else {
-                None
-            }
-        }
+    // No modifier: special keys get <> wrapper, printable chars returned as-is
+    if let Some(name) = special_key_name(keysym) {
+        return Some(format!("<{name}>"));
+    }
+    if is_printable(utf8) {
+        // Escape '<' as '<lt>' for nvim_input (bare '<' starts a key sequence)
+        Some(utf8.replace('<', "<lt>"))
+    } else {
+        None
     }
 }
 
 impl State {
-    pub(crate) fn handle_key(
-        &mut self,
-        key: u32,
-        key_state: wl_keyboard::KeyState,
-        _origin: KeyOrigin,
-    ) {
+    pub(crate) fn handle_key(&mut self, key: u32, key_state: wl_keyboard::KeyState) {
         let state_str = match key_state {
             wl_keyboard::KeyState::Pressed => "pressed",
             wl_keyboard::KeyState::Released => "released",
@@ -194,7 +193,7 @@ impl State {
                 // In insert mode typing - hide keypress display
                 self.hide_keypress();
             }
-        } else if !utf8.is_empty() && !utf8.chars().all(|c| c.is_control()) {
+        } else if is_printable(&utf8) {
             // Fallback: if no Neovim or no vim key, use local preedit
             if self.nvim.is_none() {
                 self.ime.preedit.push_str(&utf8);

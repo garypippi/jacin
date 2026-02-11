@@ -31,7 +31,6 @@ pub enum PendingState {
 impl PendingState {
     fn from_u8(v: u8) -> Self {
         match v {
-            0 => Self::None,
             1 => Self::Getchar,
             2 => Self::Motion,
             3 => Self::TextObject,

@@ -86,7 +86,7 @@ impl Handler for NvimHandler {
             let words: Vec<String> = get_arr("candidates")
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .filter_map(|item| item.as_str().map(std::string::ToString::to_string))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -112,7 +112,7 @@ impl Handler for NvimHandler {
             let get_str = |field: &str| -> Option<String> {
                 map.iter()
                     .find(|(k, _)| k.as_str() == Some(field))
-                    .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
+                    .and_then(|(_, v)| v.as_str().map(std::string::ToString::to_string))
             };
 
             match get_str("type").as_deref() {
@@ -122,7 +122,7 @@ impl Handler for NvimHandler {
                         let _ = self.tx.send(FromNeovim::CmdlineUpdate(text));
                     }
                 }
-                Some("cancelled") | Some("executed") => {
+                Some("cancelled" | "executed") => {
                     PENDING.clear();
                     log::debug!(
                         "[NVIM] Cmdline left ({})",

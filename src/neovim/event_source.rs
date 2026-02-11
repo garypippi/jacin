@@ -54,12 +54,8 @@ impl NeovimEventSource {
     /// Try to receive all pending messages (non-blocking)
     pub fn drain_messages(&self) -> Vec<FromNeovim> {
         let mut messages = Vec::new();
-        loop {
-            match self.receiver.try_recv() {
-                Ok(msg) => messages.push(msg),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
+        while let Ok(msg) = self.receiver.try_recv() {
+            messages.push(msg);
         }
         messages
     }
