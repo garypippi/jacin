@@ -20,6 +20,7 @@ mod config;
 mod coordinator;
 mod dispatch;
 mod input;
+mod keysym;
 mod neovim;
 mod state;
 mod ui;
