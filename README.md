@@ -1,14 +1,19 @@
 # jacin
 
-Hobby IME toy project bridging Wayland and Neovim (Hyprland/wlroots)
+Hobby IME toy project bridging Wayland and Neovim.\
+No Fcitx/IBus needed.\
+Requires a Wayland compositor that implements.
 
-![DEMO](https://github.com/user-attachments/assets/3084a358-5935-4384-ac12-2ef20227b396)
-![DEMO](https://github.com/user-attachments/assets/d85d7781-2e09-4d32-a9e4-74cf0858f43d)
+- `zwp_input_method_v2`
+- `zwp_virtual_keyboard_v1`
+- `zwp_input_popup_surface_v2`
+
+![DEMO](https://github.com/user-attachments/assets/6219c5cc-f832-4e0c-9f6d-2f0c69e8bf14)
 
 ## Requirements
 
-- A wlroots-based Wayland compositor (Hyprland, Sway, etc.) with `zwp_input_method_v2` support
 - Neovim >= 0.10
+- A Wayland compositor with `zwp_input_method_v2`, `zwp_virtual_keyboard_v1`, and `zwp_input_popup_surface_v2` support
 - A compositor keybind to send `SIGUSR1` to jacin for toggling
 
 ### Hyprland example
@@ -56,11 +61,13 @@ Toggle the IME by sending `SIGUSR1`:
 ```sh
 pkill -SIGUSR1 jacin
 ```
+
 ## Logging
 
 ```sh
 RUST_LOG=debug ./target/release/jacin
 ```
+
 ## Limitations
 
 Preedit is single-line only. Multiline operations (`yy`, `dd`, `cc`, `p`, `P`) are not supported.
