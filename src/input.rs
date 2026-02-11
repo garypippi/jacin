@@ -4,8 +4,37 @@ use crate::State;
 use crate::keysym::{is_printable, keysym_to_vim};
 use crate::neovim::{PendingState, pending_state};
 
+/// Scope guard that logs elapsed time on drop.
+struct PerfGuard {
+    name: &'static str,
+    mode: String,
+    start: std::time::Instant,
+}
+
+impl PerfGuard {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            mode: String::new(),
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for PerfGuard {
+    fn drop(&mut self) {
+        let ms = self.start.elapsed().as_secs_f64() * 1000.0;
+        if self.mode.is_empty() {
+            log::trace!("[PERF] {}: {:.2}ms", self.name, ms);
+        } else {
+            log::trace!("[PERF] {}: {:.2}ms (mode={})", self.name, ms, self.mode);
+        }
+    }
+}
+
 impl State {
     pub(crate) fn handle_key(&mut self, key: u32, key_state: wl_keyboard::KeyState) {
+        let mut _perf = PerfGuard::new("handle_key");
         let state_str = match key_state {
             wl_keyboard::KeyState::Pressed => "pressed",
             wl_keyboard::KeyState::Released => "released",
@@ -127,6 +156,7 @@ impl State {
                 self.keyboard.ctrl_pressed
             );
         }
+        _perf.mode = self.keypress.vim_mode.clone();
     }
 
     pub(crate) fn send_to_nvim(&self, key: &str) {
@@ -136,6 +166,7 @@ impl State {
     }
 
     pub(crate) fn wait_for_nvim_response(&mut self) {
+        let _perf = PerfGuard::new("nvim_rpc");
         if let Some(ref nvim) = self.nvim {
             // Block waiting for response with 200ms timeout
             if let Some(msg) = nvim.recv_timeout(std::time::Duration::from_millis(200)) {

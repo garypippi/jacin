@@ -234,6 +234,7 @@ impl State {
 
     /// Update the unified popup with current state
     pub(crate) fn update_popup(&mut self) {
+        let t = std::time::Instant::now();
         let content = PopupContent {
             preedit: self.ime.preedit.clone(),
             cursor_begin: self.ime.cursor_begin,
@@ -254,6 +255,7 @@ impl State {
             let qh = self.wayland.qh.clone();
             popup.update(&content, &qh);
         }
+        log::trace!("[PERF] update_popup: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
     }
 
     /// Hide the unified popup

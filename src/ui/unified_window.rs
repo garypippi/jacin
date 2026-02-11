@@ -138,6 +138,7 @@ impl UnifiedPopup {
 
     /// Render the popup content
     fn render(&mut self, content: &PopupContent, layout: &Layout, qh: &QueueHandle<State>) {
+        let _perf_start = std::time::Instant::now();
         let buffer_size = (self.width * self.height * 4) as usize;
         if buffer_size * 2 > POOL_SIZE {
             log::warn!(
@@ -238,6 +239,12 @@ impl UnifiedPopup {
         self.surface.commit();
 
         self.current_buffer = buffer_idx;
+        log::trace!(
+            "[PERF] render: {:.2}ms ({}x{})",
+            _perf_start.elapsed().as_secs_f64() * 1000.0,
+            self.width,
+            self.height
+        );
     }
 
     /// Render mode label, recording indicator, and vertical separator in the first row
