@@ -19,7 +19,9 @@ use crate::config::Config;
 pub use event_source::{NeovimEventSource, NeovimPing};
 
 pub use handler::pending_state;
-pub use protocol::{FromNeovim, PendingState, ToNeovim, VisualSelection};
+pub use protocol::{
+    CandidateInfo, FromNeovim, PendingState, PreeditInfo, ToNeovim, VisualSelection,
+};
 
 /// Channel capacity for Neovim communication
 /// This provides backpressure if messages accumulate

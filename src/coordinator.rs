@@ -68,119 +68,143 @@ impl State {
             FromNeovim::Ready => {
                 log::info!("[NVIM] Backend ready!");
             }
-            FromNeovim::Preedit(info) => {
-                log::debug!(
-                    "[NVIM] Preedit: {:?}, cursor: {}..{}, mode: {}",
-                    info.text,
-                    info.cursor_begin,
-                    info.cursor_end,
-                    info.mode
-                );
-                self.ime
-                    .set_preedit(info.text, info.cursor_begin, info.cursor_end);
-                self.keypress.set_vim_mode(&info.mode);
-                self.keypress.recording = info.recording;
-                self.update_preedit();
-            }
-            FromNeovim::Commit(text) => {
-                log::debug!("[NVIM] Commit: {:?}", text);
-                self.ime.clear_preedit();
-                self.ime.clear_candidates();
-                self.wayland.commit_string(&text);
-                self.keypress.clear();
-                self.keypress_timer_token = None;
-                // Consume any pending toggle (e.g., Alt in commit key <A-;> also
-                // triggers SIGUSR1 toggle — don't let it re-enable after commit)
-                self.toggle_flag.store(false, Ordering::SeqCst);
-                // Clear Neovim buffer and stay in insert mode for next input
-                if let Some(ref nvim) = self.nvim {
-                    nvim.send_key("<Esc>ggdGi");
-                }
-                // Keep IME enabled — show icon-only popup
-                self.update_popup();
-            }
+            FromNeovim::Preedit(info) => self.on_preedit(info),
+            FromNeovim::Commit(text) => self.on_commit(text),
             FromNeovim::DeleteSurrounding { before, after } => {
-                log::debug!(
-                    "[NVIM] DeleteSurrounding: before={}, after={}",
-                    before,
-                    after
-                );
-                self.wayland.delete_surrounding(before, after);
+                self.on_delete_surrounding(before, after);
             }
-            FromNeovim::Candidates(info) => {
-                log::debug!(
-                    "[NVIM] Candidates: {:?}, selected={}",
-                    info.candidates,
-                    info.selected
-                );
-                if info.candidates.is_empty() {
-                    self.hide_candidates();
-                } else {
-                    self.ime.set_candidates(info.candidates, info.selected);
-                    self.update_popup();
-                }
-            }
-            FromNeovim::VisualRange(selection) => {
-                log::debug!("[NVIM] VisualRange: {:?}", selection);
-                self.visual_display = selection;
-                self.update_popup();
-            }
-            FromNeovim::PassthroughKey => {
-                // Send the current key through the virtual keyboard to the focused app
-                if let Some(keycode) = self.current_keycode {
-                    self.wayland.send_virtual_key(
-                        keycode,
-                        self.keyboard.mods_depressed,
-                        self.keyboard.mods_latched,
-                        self.keyboard.mods_locked,
-                        self.keyboard.mods_group,
-                    );
-                } else {
-                    log::warn!("[IME] PassthroughKey but no current_keycode");
-                }
-            }
+            FromNeovim::Candidates(info) => self.on_candidates(info),
+            FromNeovim::VisualRange(selection) => self.on_visual_range(selection),
+            FromNeovim::PassthroughKey => self.on_passthrough_key(),
             FromNeovim::KeyProcessed => {
                 // Acknowledgment only — unblocks wait_for_nvim_response
             }
-            FromNeovim::CmdlineUpdate(text) => {
-                log::debug!("[NVIM] CmdlineUpdate: {:?}", text);
-                self.keypress.accumulated = text;
-                self.keypress.visible = true;
-                self.keypress.set_vim_mode("c");
-                self.update_popup();
-            }
-            FromNeovim::CmdlineCancelled => {
-                log::debug!("[NVIM] CmdlineCancelled");
-                self.keypress.clear();
-                self.keypress_timer_token = None;
-                self.update_popup();
-            }
-            FromNeovim::CmdlineMessage(text) => {
-                log::debug!("[NVIM] CmdlineMessage: {:?}", text);
-                self.keypress.accumulated = text;
-                self.keypress.visible = true;
-                self.keypress.last_shown = Some(std::time::Instant::now());
-                self.update_popup();
-            }
-            FromNeovim::AutoCommit(text) => {
-                log::debug!("[NVIM] AutoCommit: {:?}", text);
-                self.wayland.commit_string(&text);
-                self.ime.clear_preedit();
-                self.ime.clear_candidates();
-                self.keypress.clear();
-                self.keypress_timer_token = None;
-                self.visual_display = None;
-                self.update_popup();
-            }
-            FromNeovim::NvimExited => {
-                log::info!("[NVIM] Neovim exited, disabling IME");
-                // Clear compositor preedit (still active, compositor may show stale text)
-                self.wayland.set_preedit("", 0, 0);
-                self.reset_ime_state();
-                self.ime.disable();
-                self.nvim = None;
-            }
+            FromNeovim::CmdlineUpdate(text) => self.on_cmdline_update(text),
+            FromNeovim::CmdlineCancelled => self.on_cmdline_cancelled(),
+            FromNeovim::CmdlineMessage(text) => self.on_cmdline_message(text),
+            FromNeovim::AutoCommit(text) => self.on_auto_commit(text),
+            FromNeovim::NvimExited => self.on_nvim_exited(),
         }
+    }
+
+    fn on_preedit(&mut self, info: neovim::PreeditInfo) {
+        log::debug!(
+            "[NVIM] Preedit: {:?}, cursor: {}..{}, mode: {}",
+            info.text,
+            info.cursor_begin,
+            info.cursor_end,
+            info.mode
+        );
+        self.ime
+            .set_preedit(info.text, info.cursor_begin, info.cursor_end);
+        self.keypress.set_vim_mode(&info.mode);
+        self.keypress.recording = info.recording;
+        self.update_preedit();
+    }
+
+    fn on_commit(&mut self, text: String) {
+        log::debug!("[NVIM] Commit: {:?}", text);
+        self.ime.clear_preedit();
+        self.ime.clear_candidates();
+        self.wayland.commit_string(&text);
+        self.keypress.clear();
+        self.keypress_timer_token = None;
+        // Consume any pending toggle (e.g., Alt in commit key <A-;> also
+        // triggers SIGUSR1 toggle — don't let it re-enable after commit)
+        self.toggle_flag.store(false, Ordering::SeqCst);
+        // Clear Neovim buffer and stay in insert mode for next input
+        if let Some(ref nvim) = self.nvim {
+            nvim.send_key("<Esc>ggdGi");
+        }
+        // Keep IME enabled — show icon-only popup
+        self.update_popup();
+    }
+
+    fn on_delete_surrounding(&mut self, before: u32, after: u32) {
+        log::debug!(
+            "[NVIM] DeleteSurrounding: before={}, after={}",
+            before,
+            after
+        );
+        self.wayland.delete_surrounding(before, after);
+    }
+
+    fn on_candidates(&mut self, info: neovim::CandidateInfo) {
+        log::debug!(
+            "[NVIM] Candidates: {:?}, selected={}",
+            info.candidates,
+            info.selected
+        );
+        if info.candidates.is_empty() {
+            self.hide_candidates();
+        } else {
+            self.ime.set_candidates(info.candidates, info.selected);
+            self.update_popup();
+        }
+    }
+
+    fn on_visual_range(&mut self, selection: Option<neovim::VisualSelection>) {
+        log::debug!("[NVIM] VisualRange: {:?}", selection);
+        self.visual_display = selection;
+        self.update_popup();
+    }
+
+    fn on_passthrough_key(&mut self) {
+        // Send the current key through the virtual keyboard to the focused app
+        if let Some(keycode) = self.current_keycode {
+            self.wayland.send_virtual_key(
+                keycode,
+                self.keyboard.mods_depressed,
+                self.keyboard.mods_latched,
+                self.keyboard.mods_locked,
+                self.keyboard.mods_group,
+            );
+        } else {
+            log::warn!("[IME] PassthroughKey but no current_keycode");
+        }
+    }
+
+    fn on_cmdline_update(&mut self, text: String) {
+        log::debug!("[NVIM] CmdlineUpdate: {:?}", text);
+        self.keypress.accumulated = text;
+        self.keypress.visible = true;
+        self.keypress.set_vim_mode("c");
+        self.update_popup();
+    }
+
+    fn on_cmdline_cancelled(&mut self) {
+        log::debug!("[NVIM] CmdlineCancelled");
+        self.keypress.clear();
+        self.keypress_timer_token = None;
+        self.update_popup();
+    }
+
+    fn on_cmdline_message(&mut self, text: String) {
+        log::debug!("[NVIM] CmdlineMessage: {:?}", text);
+        self.keypress.accumulated = text;
+        self.keypress.visible = true;
+        self.keypress.last_shown = Some(std::time::Instant::now());
+        self.update_popup();
+    }
+
+    fn on_auto_commit(&mut self, text: String) {
+        log::debug!("[NVIM] AutoCommit: {:?}", text);
+        self.wayland.commit_string(&text);
+        self.ime.clear_preedit();
+        self.ime.clear_candidates();
+        self.keypress.clear();
+        self.keypress_timer_token = None;
+        self.visual_display = None;
+        self.update_popup();
+    }
+
+    fn on_nvim_exited(&mut self) {
+        log::info!("[NVIM] Neovim exited, disabling IME");
+        // Clear compositor preedit (still active, compositor may show stale text)
+        self.wayland.set_preedit("", 0, 0);
+        self.reset_ime_state();
+        self.ime.disable();
+        self.nvim = None;
     }
 
     pub(crate) fn update_preedit(&mut self) {
