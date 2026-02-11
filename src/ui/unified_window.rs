@@ -12,10 +12,11 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 };
 
 use super::layout::{
-    Layout, calculate_layout, mode_label, rgba, BG_COLOR, BORDER_COLOR, CURSOR_BG,
-    ICON_SEPARATOR_GAP, ICON_SEPARATOR_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP,
-    MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING, SCROLLBAR_BG, SCROLLBAR_THUMB,
-    SCROLLBAR_WIDTH, SELECTED_BG, TEXT_COLOR, VISUAL_BG,
+    Layout, calculate_layout, mode_label, preedit_scroll_offset, rgba,
+    scrollbar_thumb_geometry, BG_COLOR, BORDER_COLOR, CURSOR_BG, ICON_SEPARATOR_GAP,
+    ICON_SEPARATOR_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR,
+    NUMBER_WIDTH, PADDING, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH, SELECTED_BG,
+    TEXT_COLOR, VISUAL_BG,
 };
 pub use super::layout::PopupContent;
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
@@ -327,24 +328,9 @@ impl UnifiedPopup {
             .get(cursor_char_begin)
             .copied()
             .unwrap_or(preedit_left);
-        let scroll_offset = if total_text_width > visible_width {
-            // Calculate offset to center cursor in visible area, with some margin
-            let margin = visible_width * 0.3; // 30% margin from edges
-            let cursor_rel = cursor_x - preedit_left;
-
-            if cursor_rel < margin {
-                // Cursor near start - no scroll
-                0.0
-            } else if cursor_rel > total_text_width - margin {
-                // Cursor near end - scroll to show end
-                (total_text_width - visible_width).max(0.0)
-            } else {
-                // Center cursor in visible area
-                (cursor_rel - visible_width / 2.0).clamp(0.0, total_text_width - visible_width)
-            }
-        } else {
-            0.0
-        };
+        let cursor_rel = cursor_x - preedit_left;
+        let scroll_offset =
+            preedit_scroll_offset(total_text_width, visible_width, cursor_rel);
 
         if is_normal_mode && cursor_char_begin <= chars.len() {
             // Convert visual selection byte offsets to char positions
@@ -539,19 +525,15 @@ impl UnifiedPopup {
             }
 
             // Scrollbar thumb
-            let thumb_height =
-                (layout.visible_count as f32 / total_count as f32) * scrollbar_height;
-            let thumb_height = thumb_height.max(20.0);
-            let scroll_range = total_count - layout.visible_count;
-            let thumb_y = if scroll_range > 0 {
-                layout.candidates_y
-                    + (self.scroll_offset as f32 / scroll_range as f32)
-                        * (scrollbar_height - thumb_height)
-            } else {
-                layout.candidates_y
-            };
+            let thumb = scrollbar_thumb_geometry(
+                layout.visible_count,
+                total_count,
+                scrollbar_height,
+                self.scroll_offset,
+                layout.candidates_y,
+            );
 
-            if let Some(rect) = Rect::from_xywh(scrollbar_x, thumb_y, SCROLLBAR_WIDTH, thumb_height)
+            if let Some(rect) = Rect::from_xywh(scrollbar_x, thumb.y, SCROLLBAR_WIDTH, thumb.height)
             {
                 let mut paint = Paint::default();
                 paint.set_color(scrollbar_thumb);

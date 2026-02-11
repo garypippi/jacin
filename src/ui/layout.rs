@@ -104,6 +104,57 @@ pub(crate) struct Layout {
     pub has_scrollbar: bool,
 }
 
+/// Calculate preedit scroll offset to keep cursor visible with center-biased scrolling.
+///
+/// Returns a pixel offset to subtract from each character's x position.
+pub(crate) fn preedit_scroll_offset(
+    total_text_width: f32,
+    visible_width: f32,
+    cursor_rel: f32,
+) -> f32 {
+    if total_text_width <= visible_width {
+        return 0.0;
+    }
+    let margin = visible_width * 0.3;
+    if cursor_rel < margin {
+        0.0
+    } else if cursor_rel > total_text_width - margin {
+        (total_text_width - visible_width).max(0.0)
+    } else {
+        (cursor_rel - visible_width / 2.0).clamp(0.0, total_text_width - visible_width)
+    }
+}
+
+/// Scrollbar thumb geometry for candidate list.
+pub(crate) struct ScrollbarThumb {
+    pub height: f32,
+    pub y: f32,
+}
+
+/// Calculate scrollbar thumb position and size.
+pub(crate) fn scrollbar_thumb_geometry(
+    visible_count: usize,
+    total_count: usize,
+    scrollbar_height: f32,
+    scroll_offset: usize,
+    candidates_y: f32,
+) -> ScrollbarThumb {
+    debug_assert!(total_count > 0 && visible_count <= total_count);
+    let thumb_height =
+        ((visible_count as f32 / total_count as f32) * scrollbar_height).max(20.0);
+    let scroll_range = total_count - visible_count;
+    let y = if scroll_range > 0 {
+        candidates_y
+            + (scroll_offset as f32 / scroll_range as f32) * (scrollbar_height - thumb_height)
+    } else {
+        candidates_y
+    };
+    ScrollbarThumb {
+        height: thumb_height,
+        y,
+    }
+}
+
 /// Calculate layout dimensions and section positions
 pub(crate) fn calculate_layout(content: &PopupContent, renderer: &mut TextRenderer) -> Layout {
     let has_preedit = !content.preedit.is_empty();
@@ -202,5 +253,110 @@ pub(crate) fn calculate_layout(content: &PopupContent, renderer: &mut TextRender
         candidates_y,
         visible_count,
         has_scrollbar,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- preedit_scroll_offset ---
+
+    #[test]
+    fn scroll_offset_short_text_returns_zero() {
+        // Text fits in visible area — no scrolling
+        assert_eq!(preedit_scroll_offset(100.0, 200.0, 50.0), 0.0);
+    }
+
+    #[test]
+    fn scroll_offset_cursor_near_start() {
+        // Cursor within 30% margin from left — no scrolling
+        assert_eq!(preedit_scroll_offset(500.0, 200.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn scroll_offset_cursor_near_end() {
+        // Cursor near end — scroll to show end of text
+        let offset = preedit_scroll_offset(500.0, 200.0, 480.0);
+        assert_eq!(offset, 300.0); // total - visible
+    }
+
+    #[test]
+    fn scroll_offset_cursor_in_middle() {
+        // Cursor in middle — centers cursor in visible area
+        let offset = preedit_scroll_offset(500.0, 200.0, 250.0);
+        // cursor_rel - visible/2 = 250 - 100 = 150, clamped to [0, 300]
+        assert_eq!(offset, 150.0);
+    }
+
+    // --- scrollbar_thumb_geometry ---
+
+    #[test]
+    fn thumb_no_scroll_range() {
+        // All items visible (visible == total)
+        let thumb = scrollbar_thumb_geometry(10, 10, 200.0, 0, 50.0);
+        assert_eq!(thumb.y, 50.0);
+        // thumb_height = (10/10)*200 = 200, but min 20
+        assert_eq!(thumb.height, 200.0);
+    }
+
+    #[test]
+    fn thumb_at_top() {
+        let thumb = scrollbar_thumb_geometry(5, 20, 100.0, 0, 50.0);
+        assert_eq!(thumb.y, 50.0); // scroll_offset=0, at top
+        assert!(thumb.height >= 20.0);
+    }
+
+    #[test]
+    fn thumb_at_bottom() {
+        let thumb = scrollbar_thumb_geometry(5, 20, 100.0, 15, 50.0);
+        // scroll_offset=15 = scroll_range=15, so ratio=1.0
+        let expected_y = 50.0 + (100.0 - thumb.height);
+        assert!((thumb.y - expected_y).abs() < 0.01);
+    }
+
+    #[test]
+    fn thumb_minimum_height() {
+        // With many items, thumb proportion would be tiny — clamped to 20
+        let thumb = scrollbar_thumb_geometry(1, 100, 100.0, 0, 0.0);
+        assert_eq!(thumb.height, 20.0);
+    }
+
+    // --- mode_label ---
+
+    #[test]
+    fn mode_label_insert() {
+        let (label, color) = mode_label("i");
+        assert_eq!(label, "INS");
+        assert_eq!(color, MODE_INSERT_COLOR);
+    }
+
+    #[test]
+    fn mode_label_normal() {
+        let (label, color) = mode_label("n");
+        assert_eq!(label, "NOR");
+        assert_eq!(color, MODE_NORMAL_COLOR);
+    }
+
+    #[test]
+    fn mode_label_visual() {
+        assert_eq!(mode_label("v").0, "VIS");
+        assert_eq!(mode_label("V").0, "VIS");
+        assert_eq!(mode_label("\x16").0, "VIS");
+        // v-prefix
+        assert_eq!(mode_label("vs").0, "VIS");
+    }
+
+    #[test]
+    fn mode_label_operator_pending() {
+        assert_eq!(mode_label("no").0, "OP");
+        assert_eq!(mode_label("nov").0, "OP");
+    }
+
+    #[test]
+    fn mode_label_command() {
+        let (label, color) = mode_label("c");
+        assert_eq!(label, "CMD");
+        assert_eq!(color, MODE_CMD_COLOR);
     }
 }
