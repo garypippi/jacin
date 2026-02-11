@@ -11,93 +11,19 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_v2, zwp_input_popup_surface_v2,
 };
 
+use super::layout::{
+    Layout, calculate_layout, mode_label, rgba, BG_COLOR, BORDER_COLOR, CURSOR_BG,
+    ICON_SEPARATOR_GAP, ICON_SEPARATOR_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP,
+    MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING, SCROLLBAR_BG, SCROLLBAR_THUMB,
+    SCROLLBAR_WIDTH, SELECTED_BG, TEXT_COLOR, VISUAL_BG,
+};
+pub use super::layout::PopupContent;
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
 use crate::neovim::VisualSelection;
 
-/// RGBA color as (r, g, b, a) tuple — converted to Color at use via `rgba()`.
-type Rgba = (u8, u8, u8, u8);
-
-fn rgba(c: Rgba) -> Color {
-    Color::from_rgba8(c.0, c.1, c.2, c.3)
-}
-
-// Colors (matching existing windows)
-const BG_COLOR: Rgba = (40, 44, 52, 240);
-const TEXT_COLOR: Rgba = (220, 223, 228, 255);
-const BORDER_COLOR: Rgba = (80, 84, 92, 255);
-const SELECTED_BG: Rgba = (61, 89, 161, 255);
-const CURSOR_BG: Rgba = (97, 175, 239, 255);
-const VISUAL_BG: Rgba = (61, 89, 161, 200);
-const NUMBER_COLOR: Rgba = (152, 195, 121, 255);
-const SCROLLBAR_BG: Rgba = (60, 64, 72, 255);
-const SCROLLBAR_THUMB: Rgba = (100, 104, 112, 255);
-
-const PADDING: f32 = 8.0;
-const MAX_VISIBLE_CANDIDATES: usize = 9;
-const SCROLLBAR_WIDTH: f32 = 8.0;
-const NUMBER_WIDTH: f32 = 24.0;
-const SECTION_SEPARATOR_HEIGHT: f32 = 1.0;
-const MAX_PREEDIT_WIDTH: f32 = 400.0;
-
-const ICON_SEPARATOR_WIDTH: f32 = 1.0;
-const ICON_SEPARATOR_GAP: f32 = 6.0;
-const MODE_GAP: f32 = 4.0;
-
-// Mode indicator colors
-const MODE_INSERT_COLOR: Rgba = (152, 195, 121, 255); // Green
-const MODE_NORMAL_COLOR: Rgba = (97, 175, 239, 255); // Blue
-const MODE_VISUAL_COLOR: Rgba = (198, 120, 221, 255); // Purple
-const MODE_OP_COLOR: Rgba = (229, 192, 123, 255); // Yellow
-const MODE_CMD_COLOR: Rgba = (224, 108, 117, 255); // Red
-const MODE_RECORDING_COLOR: Rgba = (224, 108, 117, 255); // Red
-
 /// Pool size: 600×450×4×2 bytes for double buffering (~2MB)
 const POOL_SIZE: usize = 600 * 450 * 4 * 2;
-
-/// Get mode label text and color from vim_mode string
-fn mode_label(vim_mode: &str) -> (&'static str, Rgba) {
-    if vim_mode.starts_with("no") {
-        ("OP", MODE_OP_COLOR)
-    } else {
-        match vim_mode {
-            "n" => ("NOR", MODE_NORMAL_COLOR),
-            "v" | "V" | "\x16" => ("VIS", MODE_VISUAL_COLOR),
-            "c" => ("CMD", MODE_CMD_COLOR),
-            _ => {
-                if vim_mode.starts_with('v') || vim_mode.starts_with('V') {
-                    ("VIS", MODE_VISUAL_COLOR)
-                } else {
-                    ("INS", MODE_INSERT_COLOR)
-                }
-            }
-        }
-    }
-}
-
-/// Content to display in the unified popup
-#[derive(Default, Clone)]
-pub struct PopupContent {
-    pub preedit: String,
-    pub cursor_begin: usize,
-    pub cursor_end: usize,
-    pub vim_mode: String,
-    pub keypress: String,
-    pub candidates: Vec<String>,
-    pub selected: usize,
-    pub visual_selection: Option<VisualSelection>,
-    pub ime_enabled: bool,
-    pub recording: String,
-}
-
-impl PopupContent {
-    pub fn is_empty(&self) -> bool {
-        !self.ime_enabled
-            && self.preedit.is_empty()
-            && self.keypress.is_empty()
-            && self.candidates.is_empty()
-    }
-}
 
 /// Double buffer state
 struct Buffer {
@@ -173,7 +99,7 @@ impl UnifiedPopup {
         }
 
         // Calculate layout and size
-        let layout = self.calculate_layout(content);
+        let layout = calculate_layout(content, &mut self.renderer);
         self.width = layout.width;
         self.height = layout.height;
 
@@ -207,107 +133,6 @@ impl UnifiedPopup {
         self.popup_surface.destroy();
         self.surface.destroy();
         self.pool.destroy();
-    }
-
-    /// Calculate layout dimensions and section positions
-    fn calculate_layout(&mut self, content: &PopupContent) -> Layout {
-        let has_preedit = !content.preedit.is_empty();
-        // Hide keypress when candidates are shown
-        let has_keypress = !content.keypress.is_empty() && content.candidates.is_empty();
-        let has_candidates = !content.candidates.is_empty();
-
-        let line_height = self.renderer.line_height();
-        let mut y = PADDING;
-        let mut max_width: f32 = 0.0;
-
-        // Icon area width: PADDING + mode_label + [gap + recording] + gap + separator + gap
-        let (mode_text, _) = mode_label(&content.vim_mode);
-        let mode_text_width = self.renderer.measure_text(mode_text);
-        let recording_width = if !content.recording.is_empty() {
-            let rec_label = format!("REC @{}", content.recording);
-            MODE_GAP + self.renderer.measure_text(&rec_label)
-        } else {
-            0.0
-        };
-        let icon_area_width = PADDING
-            + mode_text_width
-            + recording_width
-            + ICON_SEPARATOR_GAP
-            + ICON_SEPARATOR_WIDTH
-            + ICON_SEPARATOR_GAP;
-
-        // First row is always present (icon + optional preedit)
-        let preedit_y = y;
-        if has_preedit {
-            let text_width = self.renderer.measure_text(&content.preedit);
-            let preedit_width = (icon_area_width + text_width + PADDING + 4.0)
-                .min(MAX_PREEDIT_WIDTH + icon_area_width);
-            max_width = max_width.max(preedit_width);
-        }
-        // Minimum width: icon area + right padding
-        max_width = max_width.max(icon_area_width + PADDING);
-        y += line_height;
-        if has_keypress || has_candidates {
-            y += SECTION_SEPARATOR_HEIGHT;
-        }
-
-        // Keypress section
-        let keypress_y = if has_keypress { y } else { 0.0 };
-        if has_keypress {
-            let text_width = self.renderer.measure_text(&content.keypress);
-            max_width = max_width.max(text_width + PADDING * 2.0);
-            y += line_height;
-            if has_candidates {
-                y += SECTION_SEPARATOR_HEIGHT;
-            }
-        }
-
-        // Candidates section
-        let candidates_y = if has_candidates { y } else { 0.0 };
-        let visible_count = if has_candidates {
-            MAX_VISIBLE_CANDIDATES.min(content.candidates.len())
-        } else {
-            0
-        };
-        let has_scrollbar = content.candidates.len() > MAX_VISIBLE_CANDIDATES;
-
-        if has_candidates {
-            let scrollbar_space = if has_scrollbar {
-                SCROLLBAR_WIDTH + 4.0
-            } else {
-                0.0
-            };
-
-            // Calculate max candidate width
-            for candidate in content.candidates.iter().take(MAX_VISIBLE_CANDIDATES) {
-                let text_width = self.renderer.measure_text(candidate);
-                max_width =
-                    max_width.max(text_width + NUMBER_WIDTH + PADDING * 2.0 + scrollbar_space);
-            }
-
-            y += visible_count as f32 * line_height;
-        }
-
-        y += PADDING;
-
-        // Align width to 4 bytes for wl_shm
-        let width = ((max_width.ceil() as u32) + 3) & !3;
-        let width = width.clamp(100, 580);
-        let height = (y.ceil() as u32).clamp(30, 450);
-
-        Layout {
-            width,
-            height,
-            icon_area_width,
-            has_preedit,
-            has_keypress,
-            has_candidates,
-            preedit_y,
-            keypress_y,
-            candidates_y,
-            visible_count,
-            has_scrollbar,
-        }
     }
 
     /// Render the popup content
@@ -747,19 +572,4 @@ impl UnifiedPopup {
         }
         self.current_buffer
     }
-}
-
-/// Layout information for rendering
-struct Layout {
-    width: u32,
-    height: u32,
-    icon_area_width: f32,
-    has_preedit: bool,
-    has_keypress: bool,
-    has_candidates: bool,
-    preedit_y: f32,
-    keypress_y: f32,
-    candidates_y: f32,
-    visible_count: usize,
-    has_scrollbar: bool,
 }
