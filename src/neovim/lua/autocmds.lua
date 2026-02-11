@@ -10,11 +10,25 @@ vim.api.nvim_create_autocmd('ModeChanged', {
 })
 
 -- Insert mode changes (text edits, cursor movement)
+-- Deduplicate: TextChangedI and CursorMovedI both fire per keystroke;
+-- coalesce into a single snapshot via vim.schedule().
+local snapshot_pending = false
 vim.api.nvim_create_autocmd({'TextChangedI', 'CursorMovedI'}, {
     callback = function()
         if ime_context.clearing then return end
         check_line_added()
-        vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+        if not snapshot_pending then
+            snapshot_pending = true
+            vim.schedule(function()
+                local ok, err = pcall(function()
+                    vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+                end)
+                snapshot_pending = false
+                if not ok then
+                    vim.notify('[jacin] snapshot error: ' .. tostring(err), vim.log.levels.ERROR)
+                end
+            end)
+        end
     end,
 })
 
