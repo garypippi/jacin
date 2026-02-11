@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::{error::Error, fmt};
 
 use async_trait::async_trait;
 use crossbeam_channel::{Receiver, Sender};
@@ -27,6 +28,46 @@ pub fn pending_state() -> &'static AtomicPendingState {
 }
 
 type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
+type NvimResult<T> = Result<T, NvimError>;
+
+#[derive(Debug)]
+enum NvimError {
+    RuntimeInit(std::io::Error),
+    Backend(anyhow::Error),
+    SnapshotParse(&'static str),
+}
+
+impl fmt::Display for NvimError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NvimError::RuntimeInit(e) => write!(f, "runtime init failed: {e}"),
+            NvimError::Backend(e) => write!(f, "backend error: {e}"),
+            NvimError::SnapshotParse(msg) => write!(f, "snapshot parse failed: {msg}"),
+        }
+    }
+}
+
+impl Error for NvimError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            NvimError::RuntimeInit(e) => Some(e),
+            NvimError::Backend(e) => Some(e.root_cause()),
+            NvimError::SnapshotParse(_) => None,
+        }
+    }
+}
+
+impl From<anyhow::Error> for NvimError {
+    fn from(value: anyhow::Error) -> Self {
+        NvimError::Backend(value)
+    }
+}
+
+fn send_msg(tx: &Sender<FromNeovim>, msg: FromNeovim) {
+    if let Err(e) = tx.send(msg) {
+        log::warn!("[NVIM] Failed to send message to main thread: {}", e);
+    }
+}
 
 /// Handler for Neovim RPC notifications.
 /// Receives push notifications (e.g., ime_snapshot from autocmds) and
@@ -57,12 +98,11 @@ impl Handler for NvimHandler {
                         snapshot.preedit
                     );
 
-                    let _ = self
-                        .tx
-                        .send(FromNeovim::Preedit(snapshot.to_preedit_info()));
-                    let _ = self
-                        .tx
-                        .send(FromNeovim::VisualRange(snapshot.to_visual_selection()));
+                    send_msg(&self.tx, FromNeovim::Preedit(snapshot.to_preedit_info()));
+                    send_msg(
+                        &self.tx,
+                        FromNeovim::VisualRange(snapshot.to_visual_selection()),
+                    );
                 }
                 Err(e) => {
                     log::error!("[NVIM] Failed to parse push snapshot: {}", e);
@@ -93,17 +133,17 @@ impl Handler for NvimHandler {
             let selected = get_i64("selected").unwrap_or(-1);
 
             if words.is_empty() {
-                let _ = self.tx.send(FromNeovim::Candidates(CandidateInfo::empty()));
+                send_msg(&self.tx, FromNeovim::Candidates(CandidateInfo::empty()));
             } else {
                 let sel = selected.max(0) as usize;
                 let mut info = CandidateInfo::new(words, sel);
                 info.selected = info.selected.min(info.candidates.len().saturating_sub(1));
-                let _ = self.tx.send(FromNeovim::Candidates(info));
+                send_msg(&self.tx, FromNeovim::Candidates(info));
             }
         } else if name == "ime_auto_commit" {
             if let Some(text) = args.first().and_then(|v| v.as_str()) {
                 log::debug!("[NVIM] Auto-commit: {:?}", text);
-                let _ = self.tx.send(FromNeovim::AutoCommit(text.to_string()));
+                send_msg(&self.tx, FromNeovim::AutoCommit(text.to_string()));
             }
         } else if name == "ime_cmdline"
             && let Some(value) = args.first()
@@ -119,7 +159,7 @@ impl Handler for NvimHandler {
                 Some("update") => {
                     if let Some(text) = get_str("text") {
                         log::debug!("[NVIM] Cmdline update: {:?}", text);
-                        let _ = self.tx.send(FromNeovim::CmdlineUpdate(text));
+                        send_msg(&self.tx, FromNeovim::CmdlineUpdate(text));
                     }
                 }
                 Some("cancelled" | "executed") => {
@@ -128,12 +168,12 @@ impl Handler for NvimHandler {
                         "[NVIM] Cmdline left ({})",
                         get_str("type").unwrap_or_default()
                     );
-                    let _ = self.tx.send(FromNeovim::CmdlineCancelled);
+                    send_msg(&self.tx, FromNeovim::CmdlineCancelled);
                 }
                 Some("message") => {
                     if let Some(text) = get_str("text") {
                         log::debug!("[NVIM] Cmdline message: {:?}", text);
-                        let _ = self.tx.send(FromNeovim::CmdlineMessage(text));
+                        send_msg(&self.tx, FromNeovim::CmdlineMessage(text));
                     }
                 }
                 other => {
@@ -146,7 +186,14 @@ impl Handler for NvimHandler {
 
 /// Run the Neovim event loop in a blocking manner
 pub fn run_blocking(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: Config) {
-    let rt = Runtime::new().expect("Failed to create tokio runtime");
+    let rt = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            let err = NvimError::RuntimeInit(e);
+            log::error!("[NVIM] {}", err);
+            return;
+        }
+    };
     rt.block_on(async move {
         if let Err(e) = run_neovim(rx, tx, &config).await {
             log::error!("[NVIM] Error: {}", e);
@@ -158,7 +205,7 @@ async fn run_neovim(
     rx: Receiver<ToNeovim>,
     tx: Sender<FromNeovim>,
     config: &Config,
-) -> anyhow::Result<()> {
+) -> NvimResult<()> {
     log::info!("[NVIM] Starting Neovim...");
 
     // Start Neovim in embedded mode
@@ -169,14 +216,16 @@ async fn run_neovim(
     }
 
     let handler = NvimHandler { tx: tx.clone() };
-    let (nvim, io_handler, _child) = new_child_cmd(&mut cmd, handler).await?;
+    let (nvim, io_handler, _child) = new_child_cmd(&mut cmd, handler)
+        .await
+        .map_err(|e| NvimError::Backend(e.into()))?;
 
     log::info!("[NVIM] Connected to Neovim");
 
     // Initialize
-    init_neovim(&nvim, config).await?;
+    init_neovim(&nvim, config).await.map_err(NvimError::from)?;
 
-    let _ = tx.send(FromNeovim::Ready);
+    send_msg(&tx, FromNeovim::Ready);
 
     // Track whether Neovim has exited (e.g., via :q) to avoid sending qa! to dead process.
     let exited = Arc::new(AtomicBool::new(false));
@@ -190,7 +239,7 @@ async fn run_neovim(
                 Err(e) => log::error!("[NVIM] I/O task panicked: {}", e),
             }
             exited.store(true, Ordering::SeqCst);
-            let _ = tx.send(FromNeovim::NvimExited);
+            send_msg(&tx, FromNeovim::NvimExited);
         });
     }
 
@@ -336,7 +385,7 @@ async fn handle_key(
             PENDING.store(PendingState::Getchar);
             log::debug!("[NVIM] Insert-mode key {} triggered blocking state", key);
         }
-        let _ = tx.send(FromNeovim::KeyProcessed);
+        send_msg(tx, FromNeovim::KeyProcessed);
         return Ok(());
     }
 
@@ -344,7 +393,7 @@ async fn handle_key(
     if key == ":" && last_mode.as_str() == "n" {
         PENDING.store(PendingState::CommandLine);
         log::debug!("[NVIM] Entered command-line mode");
-        let _ = tx.send(FromNeovim::CmdlineUpdate(":".to_string()));
+        send_msg(tx, FromNeovim::CmdlineUpdate(":".to_string()));
         return Ok(());
     }
 
@@ -352,7 +401,7 @@ async fn handle_key(
     if is_blocked(nvim).await? {
         PENDING.store(PendingState::Getchar);
         log::debug!("[NVIM] Blocked in getchar, waiting for next key");
-        let _ = tx.send(FromNeovim::KeyProcessed);
+        send_msg(tx, FromNeovim::KeyProcessed);
         return Ok(());
     }
 
@@ -372,7 +421,7 @@ async fn handle_commandline_mode(
     }
     log::debug!("[NVIM] CommandLine mode, forwarding key: {}", key);
     let _ = nvim.input(key).await;
-    let _ = tx.send(FromNeovim::KeyProcessed);
+    send_msg(tx, FromNeovim::KeyProcessed);
     Ok(true)
 }
 
@@ -392,7 +441,7 @@ async fn handle_getchar_pending(
     if is_blocked(nvim).await? {
         PENDING.store(PendingState::Getchar);
         log::debug!("[NVIM] Still blocked in getchar after key: {}", key);
-        let _ = tx.send(FromNeovim::KeyProcessed);
+        send_msg(tx, FromNeovim::KeyProcessed);
         return Ok(true);
     }
     let snapshot = query_snapshot(nvim, tx).await?;
@@ -422,12 +471,12 @@ async fn handle_commit_key(
     let result = nvim.exec_lua("return ime_handle_commit()", vec![]).await?;
     if get_map_str(&result, "type") == Some("commit") {
         if let Some(text) = get_map_str(&result, "text") {
-            let _ = tx.send(FromNeovim::Commit(text.to_string()));
+            send_msg(tx, FromNeovim::Commit(text.to_string()));
         }
-        let _ = tx.send(FromNeovim::Preedit(PreeditInfo::empty()));
+        send_msg(tx, FromNeovim::Preedit(PreeditInfo::empty()));
     } else {
         // Empty buffer — passthrough so the app receives the key (e.g., Ctrl+Enter to send)
-        let _ = tx.send(FromNeovim::PassthroughKey);
+        send_msg(tx, FromNeovim::PassthroughKey);
     }
     *last_mode = String::from("i");
     Ok(true)
@@ -445,12 +494,12 @@ async fn handle_backspace(
     }
     let result = nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
     if get_map_str(&result, "type") == Some("delete_surrounding") {
-        let _ = tx.send(FromNeovim::DeleteSurrounding {
+        send_msg(tx, FromNeovim::DeleteSurrounding {
             before: 1,
             after: 0,
         });
     } else {
-        let _ = tx.send(FromNeovim::KeyProcessed);
+        send_msg(tx, FromNeovim::KeyProcessed);
     }
     Ok(true)
 }
@@ -468,9 +517,9 @@ async fn handle_enter(
     }
     let result = nvim.exec_lua("return ime_handle_enter()", vec![]).await?;
     if get_map_str(&result, "type") == Some("passthrough") {
-        let _ = tx.send(FromNeovim::PassthroughKey);
+        send_msg(tx, FromNeovim::PassthroughKey);
     } else {
-        let _ = tx.send(FromNeovim::KeyProcessed);
+        send_msg(tx, FromNeovim::KeyProcessed);
     }
     Ok(true)
 }
@@ -491,7 +540,7 @@ async fn handle_insert_register(
     let _ = nvim.input(key).await;
     PENDING.store(PendingState::InsertRegister);
     log::debug!("[NVIM] Sent <C-r>, waiting for register name (insert mode)");
-    let _ = tx.send(FromNeovim::KeyProcessed);
+    send_msg(tx, FromNeovim::KeyProcessed);
     Ok(true)
 }
 
@@ -512,7 +561,7 @@ async fn handle_normal_register(
     let _ = nvim.input(key).await;
     PENDING.store(PendingState::NormalRegister);
     log::debug!("[NVIM] Sent \", waiting for register name ({} mode)", mode);
-    let _ = tx.send(FromNeovim::KeyProcessed);
+    send_msg(tx, FromNeovim::KeyProcessed);
     Ok(true)
 }
 
@@ -540,7 +589,7 @@ async fn handle_register_pending(
         if key == "<C-r>" {
             // <C-r><C-r> = insert register literally — still waiting for name
             log::debug!("[NVIM] Literal register insert mode, still waiting for register name");
-            let _ = tx.send(FromNeovim::KeyProcessed);
+            send_msg(tx, FromNeovim::KeyProcessed);
             return Ok(Some(false));
         }
         PENDING.clear();
@@ -549,7 +598,7 @@ async fn handle_register_pending(
         // Normal mode " — register selected, waiting for operator
         PENDING.clear();
         log::debug!("[NVIM] Register '{}' selected, waiting for operator", key);
-        let _ = tx.send(FromNeovim::KeyProcessed);
+        send_msg(tx, FromNeovim::KeyProcessed);
         Ok(Some(false))
     }
 }
@@ -588,7 +637,7 @@ async fn handle_motion_pending(
     if blocking || mode.starts_with("no") {
         // Still pending: either blocked in getchar (e.g., f/t waiting for char)
         // or still in operator-pending (e.g., "di" waiting for text object name).
-        let _ = tx.send(FromNeovim::KeyProcessed);
+        send_msg(tx, FromNeovim::KeyProcessed);
         return Ok(false);
     }
 
@@ -645,7 +694,7 @@ async fn query_snapshot(
     tx: &Sender<FromNeovim>,
 ) -> anyhow::Result<Snapshot> {
     let result = nvim.exec_lua("return collect_snapshot()", vec![]).await?;
-    let snapshot = parse_snapshot(&result)?;
+    let snapshot = parse_snapshot(&result).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let preedit = snapshot.to_preedit_info();
     log::debug!(
@@ -659,17 +708,17 @@ async fn query_snapshot(
         snapshot.visual_end
     );
 
-    let _ = tx.send(FromNeovim::Preedit(preedit));
-    let _ = tx.send(FromNeovim::VisualRange(snapshot.to_visual_selection()));
+    send_msg(tx, FromNeovim::Preedit(preedit));
+    send_msg(tx, FromNeovim::VisualRange(snapshot.to_visual_selection()));
 
     Ok(snapshot)
 }
 
 /// Parse a msgpack Value (Lua table) into a Snapshot struct.
-fn parse_snapshot(value: &nvim_rs::Value) -> anyhow::Result<Snapshot> {
+fn parse_snapshot(value: &nvim_rs::Value) -> NvimResult<Snapshot> {
     let map = value
         .as_map()
-        .ok_or_else(|| anyhow::anyhow!("snapshot: expected map"))?;
+        .ok_or(NvimError::SnapshotParse("expected map"))?;
 
     let mut snapshot = Snapshot {
         preedit: String::new(),
