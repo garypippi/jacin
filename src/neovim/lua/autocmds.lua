@@ -1,10 +1,16 @@
--- Detect line addition on insert entry (for o/O from normal mode)
+-- Detect line addition on insert entry, and push snapshot on insert→non-insert
+-- transition so the mode indicator updates immediately on <Esc>.
 vim.api.nvim_create_autocmd('ModeChanged', {
     callback = function(args)
         if ime_context.clearing then return end
+        local old_mode = args.match:match('^(.+):')
         local new_mode = args.match:match(':(.+)$')
         if new_mode and new_mode:match('^i') then
             check_line_added()
+        end
+        -- Push snapshot when leaving insert mode (e.g. <Esc> in insert mode)
+        if old_mode and old_mode:match('^i') and new_mode and not new_mode:match('^i') then
+            vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
         end
     end,
 })
