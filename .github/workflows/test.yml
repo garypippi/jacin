@@ -18,8 +18,12 @@ jobs:
           sudo apt-get install -y \
             libwayland-dev \
             libxkbcommon-dev \
-            libfontconfig1-dev \
-            neovim
+            libfontconfig1-dev
+
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
 
       - uses: dtolnay/rust-toolchain@stable
 
