@@ -1,0 +1,20 @@
+{
+  "description": "Type 'hello' in insert mode, then commit",
+  "messages": [
+    { "Preedit": { "text": "h", "cursor_begin": 1, "cursor_end": 1, "mode": "i", "recording": "" } },
+    { "Preedit": { "text": "he", "cursor_begin": 2, "cursor_end": 2, "mode": "i", "recording": "" } },
+    { "Preedit": { "text": "hel", "cursor_begin": 3, "cursor_end": 3, "mode": "i", "recording": "" } },
+    { "Preedit": { "text": "hell", "cursor_begin": 4, "cursor_end": 4, "mode": "i", "recording": "" } },
+    { "Preedit": { "text": "hello", "cursor_begin": 5, "cursor_end": 5, "mode": "i", "recording": "" } },
+    { "Commit": "hello" }
+  ],
+  "expect": {
+    "preedit": "",
+    "cursor_begin": 0,
+    "cursor_end": 0,
+    "vim_mode": "i",
+    "candidates_count": 0,
+    "committed": ["hello"],
+    "exited": false
+  }
+}

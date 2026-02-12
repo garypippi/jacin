@@ -1,0 +1,16 @@
+{
+  "description": "Neovim exits (:q), IME should be disabled",
+  "messages": [
+    { "Preedit": { "text": "test", "cursor_begin": 4, "cursor_end": 4, "mode": "i", "recording": "" } },
+    "NvimExited"
+  ],
+  "expect": {
+    "preedit": "",
+    "cursor_begin": 0,
+    "cursor_end": 0,
+    "vim_mode": "i",
+    "candidates_count": 0,
+    "committed": [],
+    "exited": true
+  }
+}

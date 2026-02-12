@@ -1,0 +1,19 @@
+{
+  "description": "Type, see candidates, select one, then commit",
+  "messages": [
+    { "Preedit": { "text": "かん", "cursor_begin": 6, "cursor_end": 6, "mode": "i", "recording": "" } },
+    { "Candidates": { "candidates": ["漢字", "感じ", "幹事"], "selected": 0 } },
+    { "Candidates": { "candidates": ["漢字", "感じ", "幹事"], "selected": 1 } },
+    { "Preedit": { "text": "感じ", "cursor_begin": 6, "cursor_end": 6, "mode": "i", "recording": "" } },
+    { "Commit": "感じ" }
+  ],
+  "expect": {
+    "preedit": "",
+    "cursor_begin": 0,
+    "cursor_end": 0,
+    "vim_mode": "i",
+    "candidates_count": 0,
+    "committed": ["感じ"],
+    "exited": false
+  }
+}

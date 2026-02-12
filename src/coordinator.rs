@@ -293,3 +293,169 @@ impl State {
         self.update_popup();
     }
 }
+
+#[cfg(test)]
+mod replay_tests {
+    use serde::Deserialize;
+
+    use crate::neovim::{FromNeovim, VisualSelection};
+    use crate::state::{ImeState, KeypressState, VimMode};
+
+    /// Minimal state for replaying FromNeovim messages without Wayland/popup.
+    struct ReplayState {
+        ime: ImeState,
+        keypress: KeypressState,
+        visual_display: Option<VisualSelection>,
+        committed: Vec<String>,
+        exited: bool,
+    }
+
+    impl ReplayState {
+        fn new() -> Self {
+            let mut ime = ImeState::new();
+            // Start as fully enabled (most replay scenarios assume enabled IME)
+            ime.start_enabling();
+            ime.complete_enabling(VimMode::Insert);
+            Self {
+                ime,
+                keypress: KeypressState::new(),
+                visual_display: None,
+                committed: Vec::new(),
+                exited: false,
+            }
+        }
+
+        fn apply(&mut self, msg: FromNeovim) {
+            match msg {
+                FromNeovim::Ready | FromNeovim::KeyProcessed | FromNeovim::PassthroughKey => {}
+                FromNeovim::DeleteSurrounding { .. } => {}
+                FromNeovim::Preedit(info) => {
+                    if self.ime.is_fully_enabled() {
+                        self.ime
+                            .set_preedit(info.text, info.cursor_begin, info.cursor_end);
+                        self.keypress.set_vim_mode(&info.mode);
+                        self.keypress.recording = info.recording;
+                    }
+                }
+                FromNeovim::Commit(text) => {
+                    self.committed.push(text);
+                    self.ime.clear_preedit();
+                    self.ime.clear_candidates();
+                    self.keypress.clear();
+                }
+                FromNeovim::Candidates(info) => {
+                    if self.ime.is_fully_enabled() {
+                        if info.candidates.is_empty() {
+                            self.ime.clear_candidates();
+                        } else {
+                            self.ime.set_candidates(info.candidates, info.selected);
+                        }
+                    }
+                }
+                FromNeovim::VisualRange(selection) => {
+                    if self.ime.is_fully_enabled() {
+                        self.visual_display = selection;
+                    }
+                }
+                FromNeovim::CmdlineUpdate(text) => {
+                    if self.ime.is_fully_enabled() {
+                        self.keypress.accumulated = text;
+                        self.keypress.visible = true;
+                        self.keypress.set_vim_mode("c");
+                    }
+                }
+                FromNeovim::CmdlineCancelled => {
+                    self.keypress.clear();
+                    self.keypress.set_vim_mode("n");
+                }
+                FromNeovim::CmdlineMessage(text) => {
+                    if self.ime.is_fully_enabled() {
+                        self.keypress.accumulated = text;
+                        self.keypress.visible = true;
+                        self.keypress.last_shown = Some(std::time::Instant::now());
+                    }
+                }
+                FromNeovim::AutoCommit(text) => {
+                    if self.ime.is_fully_enabled() {
+                        self.committed.push(text);
+                        self.ime.clear_preedit();
+                        self.ime.clear_candidates();
+                        self.keypress.clear();
+                        self.visual_display = None;
+                    }
+                }
+                FromNeovim::NvimExited => {
+                    self.ime.clear_preedit();
+                    self.ime.clear_candidates();
+                    self.keypress.clear();
+                    self.keypress.recording.clear();
+                    self.visual_display = None;
+                    self.ime.disable();
+                    self.exited = true;
+                }
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct Fixture {
+        #[allow(dead_code)]
+        description: String,
+        messages: Vec<serde_json::Value>,
+        expect: Expected,
+    }
+
+    #[derive(Deserialize)]
+    struct Expected {
+        preedit: String,
+        cursor_begin: usize,
+        cursor_end: usize,
+        vim_mode: String,
+        candidates_count: usize,
+        committed: Vec<String>,
+        exited: bool,
+    }
+
+    fn run_fixture(path: &str) {
+        let content = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read fixture {path}: {e}"));
+        let fixture: Fixture = serde_json::from_str(&content)
+            .unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"));
+
+        let mut state = ReplayState::new();
+        for (i, value) in fixture.messages.iter().enumerate() {
+            let msg: FromNeovim = serde_json::from_value(value.clone())
+                .unwrap_or_else(|e| panic!("failed to parse message {i} in {path}: {e}"));
+            state.apply(msg);
+        }
+
+        let expect = &fixture.expect;
+        assert_eq!(state.ime.preedit, expect.preedit, "preedit mismatch in {path}");
+        assert_eq!(state.ime.cursor_begin, expect.cursor_begin, "cursor_begin mismatch in {path}");
+        assert_eq!(state.ime.cursor_end, expect.cursor_end, "cursor_end mismatch in {path}");
+        assert_eq!(state.keypress.vim_mode, expect.vim_mode, "vim_mode mismatch in {path}");
+        assert_eq!(state.ime.candidates.len(), expect.candidates_count, "candidates_count mismatch in {path}");
+        assert_eq!(state.committed, expect.committed, "committed mismatch in {path}");
+        assert_eq!(state.exited, expect.exited, "exited mismatch in {path}");
+    }
+
+    #[test]
+    fn replay_insert_and_commit() {
+        run_fixture("tests/fixtures/insert_and_commit.json");
+    }
+
+    #[test]
+    fn replay_candidates_and_select() {
+        run_fixture("tests/fixtures/candidates_and_select.json");
+    }
+
+    #[test]
+    fn replay_cmdline_and_cancel() {
+        run_fixture("tests/fixtures/cmdline_and_cancel.json");
+    }
+
+    #[test]
+    fn replay_nvim_exit() {
+        run_fixture("tests/fixtures/nvim_exit.json");
+    }
+}
