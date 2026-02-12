@@ -4,7 +4,8 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle, WEnum,
     globals::GlobalListContents,
     protocol::{
-        wl_buffer, wl_compositor, wl_keyboard, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+        wl_buffer, wl_compositor, wl_keyboard, wl_region, wl_registry, wl_shm, wl_shm_pool,
+        wl_surface,
     },
 };
 use wayland_protocols_misc::zwp_input_method_v2::client::{
@@ -87,6 +88,19 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
         _qh: &QueueHandle<Self>,
     ) {
         // Pool has no events
+    }
+}
+
+// Dispatch for region (no events)
+impl Dispatch<wl_region::WlRegion, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _region: &wl_region::WlRegion,
+        _event: wl_region::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }
 

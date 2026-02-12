@@ -61,6 +61,14 @@ impl UnifiedPopup {
         // Create surface
         let surface = compositor.create_surface(qh, ());
 
+        // Set empty input region so compositor ignores mouse events on the popup.
+        // Without this, compositors may crash trying to route input to a popup
+        // surface that has no associated window (e.g. Hyprland SEGV in
+        // getWindowFromSurface on mouse wheel).
+        let empty_region = compositor.create_region(qh, ());
+        surface.set_input_region(Some(&empty_region));
+        empty_region.destroy();
+
         // Create input popup surface - compositor positions this near cursor
         let popup_surface = input_method.get_input_popup_surface(&surface, qh, ());
 
