@@ -100,3 +100,121 @@ impl Default for KeypressState {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_state_is_hidden_and_empty() {
+        let state = KeypressState::new();
+        assert!(state.accumulated.is_empty());
+        assert!(!state.visible);
+        assert_eq!(state.pending_type, PendingState::None);
+        assert!(state.vim_mode.is_empty());
+        assert_eq!(state.last_shown, None);
+        assert!(!state.should_show());
+        assert!(!state.is_timed_out());
+    }
+
+    #[test]
+    fn push_key_accumulates_and_shows_display() {
+        let mut state = KeypressState::new();
+        state.push_key("d");
+        state.push_key("i");
+        state.push_key("w");
+
+        assert_eq!(state.accumulated, "diw");
+        assert!(state.visible);
+        assert!(state.last_shown.is_some());
+        assert!(state.should_show());
+    }
+
+    #[test]
+    fn clear_resets_display_state_but_keeps_recording() {
+        let mut state = KeypressState::new();
+        state.push_key("a");
+        state.set_pending(PendingState::Motion);
+        state.recording = "q".to_string();
+
+        state.clear();
+
+        assert_eq!(state.accumulated, "");
+        assert!(!state.visible);
+        assert_eq!(state.pending_type, PendingState::None);
+        assert_eq!(state.last_shown, None);
+        assert_eq!(state.recording, "q");
+        assert!(!state.should_show());
+    }
+
+    #[test]
+    fn mode_classification_normal_mode() {
+        let mut state = KeypressState::new();
+
+        state.set_vim_mode("n");
+        assert!(state.is_normal_mode());
+
+        state.set_vim_mode("no");
+        assert!(state.is_normal_mode());
+
+        state.set_vim_mode("nov");
+        assert!(state.is_normal_mode());
+
+        state.set_vim_mode("i");
+        assert!(!state.is_normal_mode());
+    }
+
+    #[test]
+    fn mode_classification_visual_mode() {
+        let mut state = KeypressState::new();
+
+        state.set_vim_mode("v");
+        assert!(state.is_visual_mode());
+
+        state.set_vim_mode("vs");
+        assert!(state.is_visual_mode());
+
+        state.set_vim_mode("V");
+        assert!(!state.is_visual_mode());
+
+        state.set_vim_mode("n");
+        assert!(!state.is_visual_mode());
+    }
+
+    #[test]
+    fn should_show_requires_visible_and_non_empty() {
+        let mut state = KeypressState::new();
+        assert!(!state.should_show());
+
+        state.visible = true;
+        assert!(!state.should_show());
+
+        state.accumulated = "x".to_string();
+        assert!(state.should_show());
+
+        state.visible = false;
+        assert!(!state.should_show());
+    }
+
+    #[test]
+    fn timeout_depends_on_elapsed_duration() {
+        let mut state = KeypressState::new();
+        state.set_vim_mode("n");
+        state.last_shown = Some(Instant::now() - KEYPRESS_DISPLAY_DURATION - Duration::from_millis(1));
+        assert!(state.is_timed_out());
+
+        state.last_shown = Some(Instant::now());
+        assert!(!state.is_timed_out());
+
+        state.last_shown = None;
+        assert!(!state.is_timed_out());
+    }
+
+    #[test]
+    fn command_line_mode_never_times_out() {
+        let mut state = KeypressState::new();
+        state.set_vim_mode("c");
+        state.last_shown = Some(Instant::now() - KEYPRESS_DISPLAY_DURATION - Duration::from_secs(1));
+        assert!(!state.is_timed_out());
+    }
+}

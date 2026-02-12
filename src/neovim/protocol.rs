@@ -353,4 +353,204 @@ mod tests {
         let snap = make_snapshot(1, 0, "n");
         assert!(snap.to_visual_selection().is_none());
     }
+
+    // --- Serde roundtrip tests ---
+
+    fn roundtrip_from_neovim(msg: &FromNeovim) -> FromNeovim {
+        let json = serde_json::to_string(msg).unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn from_neovim_ready_roundtrip() {
+        let msg = FromNeovim::Ready;
+        let rt = roundtrip_from_neovim(&msg);
+        assert!(matches!(rt, FromNeovim::Ready));
+    }
+
+    #[test]
+    fn from_neovim_preedit_roundtrip() {
+        let msg = FromNeovim::Preedit(PreeditInfo::new(
+            "こんにちは".into(),
+            3,
+            6,
+            "i".into(),
+            String::new(),
+        ));
+        let rt = roundtrip_from_neovim(&msg);
+        match rt {
+            FromNeovim::Preedit(info) => {
+                assert_eq!(info.text, "こんにちは");
+                assert_eq!(info.cursor_begin, 3);
+                assert_eq!(info.cursor_end, 6);
+                assert_eq!(info.mode, "i");
+            }
+            _ => panic!("expected Preedit"),
+        }
+    }
+
+    #[test]
+    fn from_neovim_commit_roundtrip() {
+        let msg = FromNeovim::Commit("確定".into());
+        let rt = roundtrip_from_neovim(&msg);
+        match rt {
+            FromNeovim::Commit(text) => assert_eq!(text, "確定"),
+            _ => panic!("expected Commit"),
+        }
+    }
+
+    #[test]
+    fn from_neovim_delete_surrounding_roundtrip() {
+        let msg = FromNeovim::DeleteSurrounding {
+            before: 3,
+            after: 0,
+        };
+        let rt = roundtrip_from_neovim(&msg);
+        match rt {
+            FromNeovim::DeleteSurrounding { before, after } => {
+                assert_eq!(before, 3);
+                assert_eq!(after, 0);
+            }
+            _ => panic!("expected DeleteSurrounding"),
+        }
+    }
+
+    #[test]
+    fn from_neovim_candidates_roundtrip() {
+        let msg = FromNeovim::Candidates(CandidateInfo::new(
+            vec!["漢字".into(), "感じ".into(), "幹事".into()],
+            1,
+        ));
+        let rt = roundtrip_from_neovim(&msg);
+        match rt {
+            FromNeovim::Candidates(info) => {
+                assert_eq!(info.candidates.len(), 3);
+                assert_eq!(info.selected, 1);
+            }
+            _ => panic!("expected Candidates"),
+        }
+    }
+
+    #[test]
+    fn from_neovim_visual_range_some_roundtrip() {
+        let msg = FromNeovim::VisualRange(Some(VisualSelection::Charwise {
+            begin: 2,
+            end: 8,
+        }));
+        let rt = roundtrip_from_neovim(&msg);
+        match rt {
+            FromNeovim::VisualRange(Some(VisualSelection::Charwise { begin, end })) => {
+                assert_eq!(begin, 2);
+                assert_eq!(end, 8);
+            }
+            _ => panic!("expected VisualRange(Some)"),
+        }
+    }
+
+    #[test]
+    fn from_neovim_visual_range_none_roundtrip() {
+        let msg = FromNeovim::VisualRange(None);
+        let rt = roundtrip_from_neovim(&msg);
+        assert!(matches!(rt, FromNeovim::VisualRange(None)));
+    }
+
+    #[test]
+    fn from_neovim_simple_variants_roundtrip() {
+        // Test all data-less or simple variants
+        for msg in [
+            FromNeovim::KeyProcessed,
+            FromNeovim::PassthroughKey,
+            FromNeovim::NvimExited,
+            FromNeovim::CmdlineUpdate(":s/foo/bar/g".into()),
+            FromNeovim::CmdlineCancelled,
+            FromNeovim::CmdlineMessage("3 substitutions".into()),
+            FromNeovim::AutoCommit("自動確定".into()),
+        ] {
+            let json = serde_json::to_string(&msg).unwrap();
+            let rt: FromNeovim = serde_json::from_str(&json).unwrap();
+            // Just verify it doesn't panic — variant matching would be verbose
+            let _ = rt;
+        }
+    }
+
+    #[test]
+    fn to_neovim_roundtrip() {
+        let key = ToNeovim::Key("<C-r>a".into());
+        let json = serde_json::to_string(&key).unwrap();
+        let rt: ToNeovim = serde_json::from_str(&json).unwrap();
+        match rt {
+            ToNeovim::Key(k) => assert_eq!(k, "<C-r>a"),
+            _ => panic!("expected Key"),
+        }
+
+        let shutdown = ToNeovim::Shutdown;
+        let json = serde_json::to_string(&shutdown).unwrap();
+        let rt: ToNeovim = serde_json::from_str(&json).unwrap();
+        assert!(matches!(rt, ToNeovim::Shutdown));
+    }
+
+    #[test]
+    fn snapshot_deser_minimal_fields() {
+        // Snapshot with only required fields — optional fields default
+        let json = r#"{
+            "preedit": "",
+            "cursor_byte": 1,
+            "mode": "i",
+            "blocking": false
+        }"#;
+        let snap: Snapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snap.preedit, "");
+        assert_eq!(snap.cursor_byte, 1);
+        assert_eq!(snap.char_width, 0);
+        assert!(snap.visual_begin.is_none());
+        assert!(snap.visual_end.is_none());
+        assert_eq!(snap.recording, "");
+    }
+
+    #[test]
+    fn snapshot_deser_all_fields() {
+        let json = r#"{
+            "preedit": "テスト",
+            "cursor_byte": 4,
+            "mode": "v",
+            "blocking": false,
+            "char_width": 3,
+            "visual_begin": 1,
+            "visual_end": 7,
+            "recording": "q"
+        }"#;
+        let snap: Snapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snap.preedit, "テスト");
+        assert_eq!(snap.cursor_byte, 4);
+        assert_eq!(snap.char_width, 3);
+        assert_eq!(snap.visual_begin, Some(1));
+        assert_eq!(snap.visual_end, Some(7));
+        assert_eq!(snap.recording, "q");
+    }
+
+    #[test]
+    fn snapshot_cursor_byte_zero_saturates() {
+        // cursor_byte=0 should not underflow
+        let snap = make_snapshot(0, 0, "i");
+        let info = snap.to_preedit_info();
+        assert_eq!(info.cursor_begin, 0);
+        assert_eq!(info.cursor_end, 0);
+    }
+
+    #[test]
+    fn preedit_info_empty() {
+        let info = PreeditInfo::empty();
+        assert!(info.text.is_empty());
+        assert_eq!(info.cursor_begin, 0);
+        assert_eq!(info.cursor_end, 0);
+        assert!(info.mode.is_empty());
+        assert!(info.recording.is_empty());
+    }
+
+    #[test]
+    fn candidate_info_empty() {
+        let info = CandidateInfo::empty();
+        assert!(info.candidates.is_empty());
+        assert_eq!(info.selected, 0);
+    }
 }

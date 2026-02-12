@@ -92,3 +92,132 @@ impl Config {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_values() {
+        let config = Config::default();
+        assert_eq!(config.keybinds.commit, "<C-CR>");
+        assert_eq!(config.completion.adapter, "native");
+        assert!(!config.behavior.auto_startinsert);
+        assert!(!config.clean);
+    }
+
+    #[test]
+    fn empty_toml_uses_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.keybinds.commit, "<C-CR>");
+        assert_eq!(config.completion.adapter, "native");
+        assert!(!config.behavior.auto_startinsert);
+    }
+
+    #[test]
+    fn partial_toml_keybinds_only() {
+        let config: Config = toml::from_str(
+            r#"
+            [keybinds]
+            commit = "<A-;>"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.keybinds.commit, "<A-;>");
+        // Other sections use defaults
+        assert_eq!(config.completion.adapter, "native");
+        assert!(!config.behavior.auto_startinsert);
+    }
+
+    #[test]
+    fn partial_toml_completion_only() {
+        let config: Config = toml::from_str(
+            r#"
+            [completion]
+            adapter = "cmp"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.completion.adapter, "cmp");
+        assert_eq!(config.keybinds.commit, "<C-CR>");
+    }
+
+    #[test]
+    fn partial_toml_behavior_only() {
+        let config: Config = toml::from_str(
+            r#"
+            [behavior]
+            auto_startinsert = true
+            "#,
+        )
+        .unwrap();
+        assert!(config.behavior.auto_startinsert);
+        assert_eq!(config.keybinds.commit, "<C-CR>");
+    }
+
+    #[test]
+    fn full_toml() {
+        let config: Config = toml::from_str(
+            r#"
+            [keybinds]
+            commit = "<C-;>"
+
+            [completion]
+            adapter = "cmp"
+
+            [behavior]
+            auto_startinsert = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.keybinds.commit, "<C-;>");
+        assert_eq!(config.completion.adapter, "cmp");
+        assert!(config.behavior.auto_startinsert);
+    }
+
+    #[test]
+    fn unknown_keys_ignored() {
+        let config: Config = toml::from_str(
+            r#"
+            [keybinds]
+            commit = "<C-CR>"
+            unknown_key = "value"
+
+            [unknown_section]
+            foo = "bar"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.keybinds.commit, "<C-CR>");
+    }
+
+    #[test]
+    fn clean_field_skipped_by_serde() {
+        // clean is #[serde(skip)], so even if present in TOML it stays false
+        let config: Config = toml::from_str(
+            r#"
+            clean = true
+            "#,
+        )
+        .unwrap();
+        assert!(!config.clean);
+    }
+
+    #[test]
+    fn invalid_toml_is_err() {
+        let result: Result<Config, _> = toml::from_str("{{invalid}}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_from_str() {
+        let config: Config = toml::from_str(
+            r#"
+            [keybinds]
+            commit = "<A-CR>"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.keybinds.commit, "<A-CR>");
+    }
+}
