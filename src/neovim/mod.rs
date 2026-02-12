@@ -5,6 +5,8 @@
 
 mod event_source;
 mod handler;
+#[cfg(test)]
+mod integration_tests;
 pub mod protocol;
 
 use std::thread;
