@@ -158,6 +158,11 @@ impl Handler for NvimHandler {
             match get_str("type").as_deref() {
                 Some("update") => {
                     if let Some(text) = get_str("text") {
+                        // Set CommandLine pending from the notification side so that
+                        // plugin-triggered command-line mode (e.g., input() from
+                        // skkeleton dictionary registration) also suppresses the
+                        // c-mode recovery in handle_snapshot_response.
+                        PENDING.store(PendingState::CommandLine);
                         log::debug!("[NVIM] Cmdline update: {:?}", text);
                         send_msg(&self.tx, FromNeovim::CmdlineUpdate(text));
                     }
