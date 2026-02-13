@@ -79,9 +79,11 @@ impl State {
             FromNeovim::KeyProcessed => {
                 // Acknowledgment only — unblocks wait_for_nvim_response
             }
-            FromNeovim::CmdlineUpdate(text) => self.on_cmdline_update(text),
-            FromNeovim::CmdlineCancelled => self.on_cmdline_cancelled(),
-            FromNeovim::CmdlineMessage(text) => self.on_cmdline_message(text),
+            FromNeovim::CmdlineUpdate { text, cmdtype } => self.on_cmdline_update(text, cmdtype),
+            FromNeovim::CmdlineCancelled { cmdtype, executed } => {
+                self.on_cmdline_cancelled(cmdtype, executed)
+            }
+            FromNeovim::CmdlineMessage { text, cmdtype } => self.on_cmdline_message(text, cmdtype),
             FromNeovim::AutoCommit(text) => self.on_auto_commit(text),
             FromNeovim::NvimExited => self.on_nvim_exited(),
         }
@@ -174,29 +176,34 @@ impl State {
         }
     }
 
-    fn on_cmdline_update(&mut self, text: String) {
-        log::debug!("[NVIM] CmdlineUpdate: {:?}", text);
+    fn on_cmdline_update(&mut self, text: String, cmdtype: String) {
+        log::debug!("[NVIM] CmdlineUpdate ({}): {:?}", cmdtype, text);
         if !self.ime.is_fully_enabled() {
             return;
         }
-        self.keypress.set_display_text(text);
+        let display_text = if cmdtype == "@" && !text.starts_with('@') {
+            format!("@{}", text)
+        } else {
+            text
+        };
+        self.keypress.set_display_text(display_text);
         self.keypress.set_vim_mode("c");
         self.update_popup();
     }
 
-    fn on_cmdline_cancelled(&mut self) {
-        log::debug!("[NVIM] CmdlineCancelled");
+    fn on_cmdline_cancelled(&mut self, cmdtype: String, executed: bool) {
+        log::debug!("[NVIM] CmdlineCancelled ({}, executed={})", cmdtype, executed);
         self.keypress.clear();
-        // Restore vim_mode — for `:` commands the mode returns to `n`, for `@`
-        // (input() prompts) it returns to `i`.  We set `n` here as a safe
-        // default; the ModeChanged autocmd will push the correct mode shortly.
-        self.keypress.set_vim_mode("n");
+        // ':' commands usually return to normal mode; '@' input() prompts return
+        // to insert mode. ModeChanged snapshot will still correct this if needed.
+        self.keypress
+            .set_vim_mode(if cmdtype == "@" { "i" } else { "n" });
         self.keypress_timer_token = None;
         self.update_popup();
     }
 
-    fn on_cmdline_message(&mut self, text: String) {
-        log::debug!("[NVIM] CmdlineMessage: {:?}", text);
+    fn on_cmdline_message(&mut self, text: String, cmdtype: String) {
+        log::debug!("[NVIM] CmdlineMessage ({}): {:?}", cmdtype, text);
         if !self.ime.is_fully_enabled() {
             return;
         }
@@ -363,17 +370,23 @@ mod replay_tests {
                         self.visual_display = selection;
                     }
                 }
-                FromNeovim::CmdlineUpdate(text) => {
+                FromNeovim::CmdlineUpdate { text, cmdtype } => {
                     if self.ime.is_fully_enabled() {
-                        self.keypress.set_display_text(text);
+                        let display_text = if cmdtype == "@" && !text.starts_with('@') {
+                            format!("@{}", text)
+                        } else {
+                            text
+                        };
+                        self.keypress.set_display_text(display_text);
                         self.keypress.set_vim_mode("c");
                     }
                 }
-                FromNeovim::CmdlineCancelled => {
+                FromNeovim::CmdlineCancelled { cmdtype, .. } => {
                     self.keypress.clear();
-                    self.keypress.set_vim_mode("n");
+                    self.keypress
+                        .set_vim_mode(if cmdtype == "@" { "i" } else { "n" });
                 }
-                FromNeovim::CmdlineMessage(text) => {
+                FromNeovim::CmdlineMessage { text, .. } => {
                     if self.ime.is_fully_enabled() {
                         self.keypress.set_display_text(text);
                     }

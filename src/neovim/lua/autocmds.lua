@@ -50,11 +50,13 @@ vim.api.nvim_create_autocmd('CmdlineChanged', {
         if cmdtype == ':' then
             vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
                 type = 'update',
+                cmdtype = ':',
                 text = ':' .. vim.fn.getcmdline()
             })
         elseif cmdtype == '@' then
             vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
                 type = 'update',
+                cmdtype = '@',
                 text = vim.fn.getcmdline()
             })
         end
@@ -69,6 +71,7 @@ vim.api.nvim_create_autocmd('CmdlineEnter', {
         if vim.fn.getcmdtype() == '@' then
             vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
                 type = 'update',
+                cmdtype = '@',
                 text = vim.fn.getcmdline()
             })
         end
@@ -81,23 +84,23 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
         local cmdtype = vim.fn.getcmdtype()
         if cmdtype == '@' then
             -- input() prompt ended (confirmed or cancelled)
-            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'cancelled' })
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'cancelled', cmdtype = '@' })
             return
         end
         if cmdtype ~= ':' then return end
         if vim.v.event.abort then
-            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'cancelled' })
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'cancelled', cmdtype = ':' })
         else
             -- Snapshot last message before command executes
             local old_msg = vim.fn.execute('1messages')
-            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'executed' })
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'executed', cmdtype = ':' })
             vim.schedule(function()
                 -- Check if command produced a new message
                 local new_msg = vim.fn.execute('1messages')
                 if new_msg ~= old_msg and new_msg ~= '' then
                     local text = vim.trim(new_msg)
                     if text ~= '' then
-                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'message', text = text })
+                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'message', cmdtype = ':', text = text })
                     end
                 end
                 if vim.g.ime_auto_startinsert then

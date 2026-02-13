@@ -158,27 +158,38 @@ impl Handler for NvimHandler {
             match get_str("type").as_deref() {
                 Some("update") => {
                     if let Some(text) = get_str("text") {
+                        let cmdtype = get_str("cmdtype").unwrap_or_else(|| {
+                            if text.starts_with(':') {
+                                ":".to_string()
+                            } else {
+                                "@".to_string()
+                            }
+                        });
                         // Set CommandLine pending from the notification side so that
                         // plugin-triggered command-line mode (e.g., input() from
                         // skkeleton dictionary registration) also suppresses the
                         // c-mode recovery in handle_snapshot_response.
                         PENDING.store(PendingState::CommandLine);
-                        log::debug!("[NVIM] Cmdline update: {:?}", text);
-                        send_msg(&self.tx, FromNeovim::CmdlineUpdate(text));
+                        log::debug!("[NVIM] Cmdline update ({}): {:?}", cmdtype, text);
+                        send_msg(&self.tx, FromNeovim::CmdlineUpdate { text, cmdtype });
                     }
                 }
                 Some("cancelled" | "executed") => {
+                    let event = get_str("type").unwrap_or_default();
+                    let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
+                    let executed = event == "executed";
                     PENDING.clear();
-                    log::debug!(
-                        "[NVIM] Cmdline left ({})",
-                        get_str("type").unwrap_or_default()
+                    log::debug!("[NVIM] Cmdline left ({}, cmdtype={})", event, cmdtype);
+                    send_msg(
+                        &self.tx,
+                        FromNeovim::CmdlineCancelled { cmdtype, executed },
                     );
-                    send_msg(&self.tx, FromNeovim::CmdlineCancelled);
                 }
                 Some("message") => {
                     if let Some(text) = get_str("text") {
-                        log::debug!("[NVIM] Cmdline message: {:?}", text);
-                        send_msg(&self.tx, FromNeovim::CmdlineMessage(text));
+                        let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
+                        log::debug!("[NVIM] Cmdline message ({}): {:?}", cmdtype, text);
+                        send_msg(&self.tx, FromNeovim::CmdlineMessage { text, cmdtype });
                     }
                 }
                 other => {
@@ -410,7 +421,13 @@ async fn handle_key(
     if key == ":" && last_mode.as_str() == "n" {
         PENDING.store(PendingState::CommandLine);
         log::debug!("[NVIM] Entered command-line mode");
-        send_msg(tx, FromNeovim::CmdlineUpdate(":".to_string()));
+        send_msg(
+            tx,
+            FromNeovim::CmdlineUpdate {
+                text: ":".to_string(),
+                cmdtype: ":".to_string(),
+            },
+        );
         return Ok(());
     }
 

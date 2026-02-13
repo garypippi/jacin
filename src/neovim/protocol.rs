@@ -116,13 +116,13 @@ pub enum FromNeovim {
     /// Key was processed (acknowledgment for paths that send no data)
     KeyProcessed,
     /// Command-line text update (display in keypress area)
-    CmdlineUpdate(String),
+    CmdlineUpdate { text: String, cmdtype: String },
     /// Command-line left (executed or cancelled)
-    CmdlineCancelled,
+    CmdlineCancelled { cmdtype: String, executed: bool },
     /// Text auto-committed due to line addition (context break)
     AutoCommit(String),
     /// Command output message (e.g., from :s/foo/bar/g)
-    CmdlineMessage(String),
+    CmdlineMessage { text: String, cmdtype: String },
     /// Key should be passed through to the application via virtual keyboard
     PassthroughKey,
     /// Neovim process exited (e.g., :q)
@@ -458,9 +458,18 @@ mod tests {
             FromNeovim::KeyProcessed,
             FromNeovim::PassthroughKey,
             FromNeovim::NvimExited,
-            FromNeovim::CmdlineUpdate(":s/foo/bar/g".into()),
-            FromNeovim::CmdlineCancelled,
-            FromNeovim::CmdlineMessage("3 substitutions".into()),
+            FromNeovim::CmdlineUpdate {
+                text: ":s/foo/bar/g".into(),
+                cmdtype: ":".into(),
+            },
+            FromNeovim::CmdlineCancelled {
+                cmdtype: ":".into(),
+                executed: false,
+            },
+            FromNeovim::CmdlineMessage {
+                text: "3 substitutions".into(),
+                cmdtype: ":".into(),
+            },
             FromNeovim::AutoCommit("自動確定".into()),
         ] {
             let json = serde_json::to_string(&msg).unwrap();
