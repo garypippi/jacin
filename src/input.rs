@@ -98,20 +98,20 @@ impl State {
                 return;
             }
 
-            // Keypress display: show everything except insert-mode printable typing
-            let is_insert_printable_typing = self.keypress.vim_mode == "i"
-                && !self.keyboard.ctrl_pressed
-                && !self.keyboard.alt_pressed
-                && is_printable(&utf8);
+            // Keypress display: in insert mode, only show Ctrl/Alt modified keys
+            // (e.g., <C-r>a, <C-w>) and pending register names (key after <C-r>);
+            // suppress normal typing, <BS>, <CR>, etc.
+            let should_show_keypress = !self.keypress.vim_mode.starts_with('i')
+                || self.keyboard.ctrl_pressed
+                || self.keyboard.alt_pressed
+                || self.keypress.pending_type == PendingState::InsertRegister;
 
-            if !is_insert_printable_typing {
+            if should_show_keypress {
                 self.keypress.push_key(vim_key);
                 self.update_popup();
             }
 
-            if after.is_pending() {
-                self.keypress.set_pending(after);
-            }
+            self.keypress.set_pending(after);
         } else if is_printable(&utf8) {
             // Fallback: if no Neovim or no vim key, use local preedit
             if self.nvim.is_none() {
