@@ -6,24 +6,25 @@ use std::time::{Duration, Instant};
 
 use crate::neovim::PendingState;
 
-/// Duration to show each keypress entry before auto-hide
+/// Duration of inactivity before all keypress entries are cleared
 pub const KEYPRESS_DISPLAY_DURATION: Duration = Duration::from_millis(1500);
 
 /// Maximum number of display entries kept
 const MAX_DISPLAY_ENTRIES: usize = 20;
 
-/// A single keypress display entry with its timestamp
+/// A single keypress display entry
 #[derive(Debug, Clone)]
-struct KeypressEntry {
-    text: String,
-    added_at: Instant,
+pub struct KeypressEntry {
+    pub text: String,
 }
 
 /// State for keypress display window
 #[derive(Debug)]
 pub struct KeypressState {
-    /// Individual keypress entries with timestamps
+    /// Individual keypress entries
     entries: Vec<KeypressEntry>,
+    /// Timestamp of the last entry addition (None when empty)
+    last_added_at: Option<Instant>,
     /// Pending mode type
     pub pending_type: PendingState,
     /// Current vim mode string (i, n, v, no, etc.)
@@ -37,6 +38,7 @@ impl KeypressState {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            last_added_at: None,
             pending_type: PendingState::None,
             vim_mode: String::new(),
             recording: String::new(),
@@ -47,8 +49,8 @@ impl KeypressState {
     pub fn push_key(&mut self, key: &str) {
         self.entries.push(KeypressEntry {
             text: key.to_string(),
-            added_at: Instant::now(),
         });
+        self.last_added_at = Some(Instant::now());
         // Trim oldest entries if over limit
         if self.entries.len() > MAX_DISPLAY_ENTRIES {
             let excess = self.entries.len() - MAX_DISPLAY_ENTRIES;
@@ -59,6 +61,7 @@ impl KeypressState {
     /// Clear all entries and hide display
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.last_added_at = None;
         self.pending_type = PendingState::None;
         // NOTE: recording is NOT cleared here — it's driven by Neovim snapshots,
         // not by keypress display lifecycle. Cleared explicitly on disable/exit.
@@ -88,13 +91,21 @@ impl KeypressState {
             || self.vim_mode.starts_with('V')
     }
 
-    /// Remove entries older than KEYPRESS_DISPLAY_DURATION.
-    /// Returns true if any entries were removed.
-    pub fn cleanup_expired(&mut self) -> bool {
-        let before = self.entries.len();
-        self.entries
-            .retain(|e| e.added_at.elapsed() < KEYPRESS_DISPLAY_DURATION);
-        self.entries.len() != before
+    /// Clear all entries if no new entries have been added within KEYPRESS_DISPLAY_DURATION.
+    /// Skips clearing in command-line mode (display is managed by CmdlineUpdate).
+    /// Returns true if entries were cleared.
+    pub fn cleanup_inactive(&mut self) -> bool {
+        if self.vim_mode.starts_with('c') {
+            return false;
+        }
+        if let Some(last) = self.last_added_at {
+            if last.elapsed() >= KEYPRESS_DISPLAY_DURATION && !self.entries.is_empty() {
+                self.entries.clear();
+                self.last_added_at = None;
+                return true;
+            }
+        }
+        false
     }
 
     /// Check if we should show the keypress display
@@ -102,7 +113,13 @@ impl KeypressState {
         !self.entries.is_empty()
     }
 
-    /// Build display text from all current entries
+    /// Get entries for rendering
+    pub fn entries(&self) -> &[KeypressEntry] {
+        &self.entries
+    }
+
+    /// Build display text from all current entries (for tests)
+    #[cfg(test)]
     pub fn display_text(&self) -> String {
         let mut s = String::new();
         for entry in &self.entries {
@@ -114,10 +131,8 @@ impl KeypressState {
     /// Set entries directly from text (for CmdlineUpdate/CmdlineMessage)
     pub fn set_display_text(&mut self, text: String) {
         self.entries.clear();
-        self.entries.push(KeypressEntry {
-            text,
-            added_at: Instant::now(),
-        });
+        self.entries.push(KeypressEntry { text });
+        self.last_added_at = Some(Instant::now());
     }
 }
 
@@ -216,20 +231,27 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_expired_removes_old_entries() {
+    fn cleanup_inactive_clears_after_timeout() {
         let mut state = KeypressState::new();
-        // Insert an entry with a timestamp in the past
-        state.entries.push(KeypressEntry {
-            text: "old".to_string(),
-            added_at: Instant::now() - KEYPRESS_DISPLAY_DURATION - Duration::from_millis(1),
-        });
+        state.push_key("old");
+        // Simulate time passing by backdating last_added_at
+        state.last_added_at =
+            Some(Instant::now() - KEYPRESS_DISPLAY_DURATION - Duration::from_millis(1));
+
+        assert!(state.should_show());
+        let changed = state.cleanup_inactive();
+        assert!(changed);
+        assert!(!state.should_show());
+    }
+
+    #[test]
+    fn cleanup_inactive_keeps_recent_entries() {
+        let mut state = KeypressState::new();
         state.push_key("new");
 
-        assert_eq!(state.entries.len(), 2);
-        let changed = state.cleanup_expired();
-        assert!(changed);
-        assert_eq!(state.entries.len(), 1);
-        assert_eq!(state.display_text(), "new");
+        let changed = state.cleanup_inactive();
+        assert!(!changed);
+        assert!(state.should_show());
     }
 
     #[test]

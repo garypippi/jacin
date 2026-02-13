@@ -36,6 +36,8 @@ pub(crate) const MAX_PREEDIT_WIDTH: f32 = 400.0;
 pub(crate) const ICON_SEPARATOR_WIDTH: f32 = 1.0;
 pub(crate) const ICON_SEPARATOR_GAP: f32 = 6.0;
 pub(crate) const MODE_GAP: f32 = 4.0;
+pub(crate) const KEYPRESS_ENTRY_GAP: f32 = 4.0;
+pub(crate) const KEYPRESS_TEXT_COLOR: Rgba = (166, 173, 186, 255);
 
 // Mode indicator colors
 pub(crate) const MODE_INSERT_COLOR: Rgba = (152, 195, 121, 255); // Green
@@ -52,7 +54,7 @@ pub struct PopupContent {
     pub cursor_begin: usize,
     pub cursor_end: usize,
     pub vim_mode: String,
-    pub keypress: String,
+    pub keypress_entries: Vec<String>,
     pub candidates: Vec<String>,
     pub selected: usize,
     pub visual_selection: Option<VisualSelection>,
@@ -64,7 +66,7 @@ impl PopupContent {
     pub fn is_empty(&self) -> bool {
         !self.ime_enabled
             && self.preedit.is_empty()
-            && self.keypress.is_empty()
+            && self.keypress_entries.is_empty()
             && self.candidates.is_empty()
     }
 }
@@ -173,10 +175,12 @@ pub(crate) fn calculate_layout(
     renderer: &mut TextRenderer,
     mono_renderer: &mut TextRenderer,
 ) -> Layout {
-    let has_preedit = !content.preedit.is_empty();
+    // Preedit row is always visible when IME is enabled to prevent
+    // layout jumps that cause visual confusion with the keypress row
+    let has_preedit = content.ime_enabled;
     // Hide keypress text when candidates are shown, but keypress row itself
     // is always visible when IME is enabled (shows mode/REC icons)
-    let has_keypress_text = !content.keypress.is_empty() && content.candidates.is_empty();
+    let has_keypress_text = !content.keypress_entries.is_empty() && content.candidates.is_empty();
     // Keypress row is always present when IME is enabled
     let has_keypress = content.ime_enabled;
     let has_candidates = !content.candidates.is_empty();
@@ -207,10 +211,12 @@ pub(crate) fn calculate_layout(
     // Preedit section (no icon area — preedit starts at PADDING)
     let preedit_y = y;
     if has_preedit {
-        let text_width = renderer.measure_text(&content.preedit);
-        let preedit_width =
-            (PADDING + text_width + PADDING + 4.0).min(MAX_PREEDIT_WIDTH + PADDING * 2.0);
-        max_width = max_width.max(preedit_width);
+        if !content.preedit.is_empty() {
+            let text_width = renderer.measure_text(&content.preedit);
+            let preedit_width =
+                (PADDING + text_width + PADDING + 4.0).min(MAX_PREEDIT_WIDTH + PADDING * 2.0);
+            max_width = max_width.max(preedit_width);
+        }
         y += line_height;
         if has_keypress || has_candidates {
             y += SECTION_SEPARATOR_HEIGHT;
@@ -222,7 +228,12 @@ pub(crate) fn calculate_layout(
     if has_keypress {
         let mut keypress_width = keypress_icon_width;
         if has_keypress_text {
-            keypress_width += renderer.measure_text(&content.keypress);
+            for (i, entry) in content.keypress_entries.iter().enumerate() {
+                if i > 0 {
+                    keypress_width += KEYPRESS_ENTRY_GAP;
+                }
+                keypress_width += mono_renderer.measure_text(entry);
+            }
         }
         keypress_width += PADDING; // right padding
         max_width = max_width.max(keypress_width);

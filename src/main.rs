@@ -242,7 +242,7 @@ fn main() -> anyhow::Result<()> {
             match handle.insert_source(
                 Timer::from_duration(std::time::Duration::from_millis(100)),
                 |_, _, state| {
-                    let changed = state.keypress.cleanup_expired();
+                    let changed = state.keypress.cleanup_inactive();
                     if !state.keypress.should_show() {
                         state.update_popup();
                         state.keypress_timer_token = None;

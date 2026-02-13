@@ -13,7 +13,8 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 
 pub use super::layout::PopupContent;
 use super::layout::{
-    BG_COLOR, BORDER_COLOR, CURSOR_BG, ICON_SEPARATOR_GAP, ICON_SEPARATOR_WIDTH, Layout,
+    BG_COLOR, BORDER_COLOR, CURSOR_BG, ICON_SEPARATOR_GAP, ICON_SEPARATOR_WIDTH,
+    KEYPRESS_ENTRY_GAP, KEYPRESS_TEXT_COLOR, Layout,
     MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING,
     REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH,
     SELECTED_BG, TEXT_COLOR, VISUAL_BG, calculate_layout, format_recording_label, mode_label,
@@ -184,7 +185,9 @@ impl UnifiedPopup {
 
         // Render sections
         if layout.has_preedit {
-            self.render_preedit_section(&mut pixmap, content, layout, PADDING);
+            if !content.preedit.is_empty() {
+                self.render_preedit_section(&mut pixmap, content, layout, PADDING);
+            }
 
             // Draw separator below preedit if more sections follow
             if layout.has_keypress || layout.has_candidates {
@@ -452,17 +455,23 @@ impl UnifiedPopup {
             pixmap.fill_rect(rect, &paint, Transform::identity(), None);
         }
 
-        // Draw keypress text after icons (hidden when candidates are shown,
+        // Draw keypress entries with gap between each (hidden when candidates are shown,
         // matching calculate_layout which excludes keypress text width)
-        if !content.keypress.is_empty() && !layout.has_candidates {
-            let text_x = layout.keypress_icon_width;
-            self.renderer.draw_text(
-                pixmap,
-                &content.keypress,
-                text_x,
-                y_baseline,
-                rgba(TEXT_COLOR),
-            );
+        if !content.keypress_entries.is_empty() && !layout.has_candidates {
+            let mut text_x = layout.keypress_icon_width;
+            for (i, entry) in content.keypress_entries.iter().enumerate() {
+                if i > 0 {
+                    text_x += KEYPRESS_ENTRY_GAP;
+                }
+                self.mono_renderer.draw_text(
+                    pixmap,
+                    entry,
+                    text_x,
+                    y_baseline,
+                    rgba(KEYPRESS_TEXT_COLOR),
+                );
+                text_x += self.mono_renderer.measure_text(entry);
+            }
         }
 
         // Draw separator if candidates follow

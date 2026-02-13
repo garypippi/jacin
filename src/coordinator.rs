@@ -260,10 +260,10 @@ impl State {
             cursor_begin: self.ime.cursor_begin,
             cursor_end: self.ime.cursor_end,
             vim_mode: self.keypress.vim_mode.clone(),
-            keypress: if self.keypress.should_show() {
-                self.keypress.display_text()
+            keypress_entries: if self.keypress.should_show() {
+                self.keypress.entries().iter().map(|e| e.text.clone()).collect()
             } else {
-                String::new()
+                Vec::new()
             },
             candidates: self.ime.candidates.clone(),
             selected: self.ime.selected_candidate,
