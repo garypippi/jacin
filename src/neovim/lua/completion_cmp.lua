@@ -11,7 +11,7 @@ local function ime_setup_cmp()
                 visible = false
                 last_sel = -1
                 last_count = 0
-                vim.rpcnotify(0, 'ime_candidates', { candidates = {}, selected = -1 })
+                vim.rpcnotify(vim.g.ime_channel, 'ime_candidates', { candidates = {}, selected = -1 })
             end
             return
         end
@@ -39,7 +39,7 @@ local function ime_setup_cmp()
             local w = e:get_word()
             if w and w ~= '' then words[#words + 1] = w end
         end
-        vim.rpcnotify(0, 'ime_candidates', {
+        vim.rpcnotify(vim.g.ime_channel, 'ime_candidates', {
             candidates = words,
             selected = sel,
         })
@@ -61,7 +61,7 @@ local function ime_setup_cmp()
         visible = false
         last_sel = -1
         last_count = 0
-        vim.rpcnotify(0, 'ime_candidates', { candidates = {}, selected = -1 })
+        vim.rpcnotify(vim.g.ime_channel, 'ime_candidates', { candidates = {}, selected = -1 })
     end)
     -- Poll after every key to catch selection changes (Ctrl+N/P)
     vim.on_key(function()

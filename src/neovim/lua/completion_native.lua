@@ -7,7 +7,7 @@ vim.api.nvim_create_autocmd('CompleteChanged', {
             local w = item.word or item.abbr or ''
             if w ~= '' then words[#words + 1] = w end
         end
-        vim.rpcnotify(0, 'ime_candidates', {
+        vim.rpcnotify(vim.g.ime_channel, 'ime_candidates', {
             candidates = words,
             selected = info.selected,
         })
@@ -16,7 +16,7 @@ vim.api.nvim_create_autocmd('CompleteChanged', {
 
 vim.api.nvim_create_autocmd('CompleteDone', {
     callback = function()
-        vim.rpcnotify(0, 'ime_candidates', {
+        vim.rpcnotify(vim.g.ime_channel, 'ime_candidates', {
             candidates = {},
             selected = -1,
         })

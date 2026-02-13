@@ -293,6 +293,18 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     // bufhidden=wipe cleans up the buffer completely when hidden
     nvim.command("set buftype=nofile bufhidden=wipe").await?;
 
+    // Store jacin's channel ID so Lua rpcnotify targets only this client
+    // (channel 0 broadcasts to ALL clients, including denops etc.)
+    let api_info = nvim.get_api_info().await?;
+    let chan_id = api_info
+        .first()
+        .and_then(|v| v.as_i64())
+        .filter(|&id| id > 0)
+        .ok_or_else(|| anyhow::anyhow!("failed to get valid channel ID from nvim_get_api_info"))?;
+    nvim.exec_lua(&format!("vim.g.ime_channel = {chan_id}"), vec![])
+        .await?;
+    log::info!("[NVIM] Channel ID: {}", chan_id);
+
     // Load Lua modules from embedded files
     nvim.exec_lua(include_str!("lua/snapshot.lua"), vec![])
         .await?;

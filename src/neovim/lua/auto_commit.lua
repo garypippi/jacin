@@ -9,7 +9,7 @@ function _G.check_line_added()
         local commit_line = cursor_line > 1 and (cursor_line - 1) or (cursor_line + 1)
         local text = vim.fn.getline(commit_line)
         if text ~= '' then
-            vim.rpcnotify(0, 'ime_auto_commit', text)
+            vim.rpcnotify(vim.g.ime_channel, 'ime_auto_commit', text)
         end
         -- Delete the committed line
         ime_context.clearing = true

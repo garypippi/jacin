@@ -10,12 +10,12 @@ vim.api.nvim_create_autocmd('ModeChanged', {
         end
         -- Push snapshot when leaving insert mode (e.g. <Esc> in insert mode)
         if old_mode and old_mode:match('^i') and new_mode and not new_mode:match('^i') then
-            vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+            vim.rpcnotify(vim.g.ime_channel, 'ime_snapshot', collect_snapshot())
         end
         -- Push snapshot when entering insert mode (e.g. i, a, A after <Esc>)
         -- so the mode indicator updates immediately
         if new_mode and new_mode:match('^i') and old_mode and not old_mode:match('^i') then
-            vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+            vim.rpcnotify(vim.g.ime_channel, 'ime_snapshot', collect_snapshot())
         end
     end,
 })
@@ -32,7 +32,7 @@ vim.api.nvim_create_autocmd({'TextChangedI', 'CursorMovedI'}, {
             snapshot_pending = true
             vim.schedule(function()
                 local ok, err = pcall(function()
-                    vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+                    vim.rpcnotify(vim.g.ime_channel, 'ime_snapshot', collect_snapshot())
                 end)
                 snapshot_pending = false
                 if not ok then
@@ -48,12 +48,12 @@ vim.api.nvim_create_autocmd('CmdlineChanged', {
     callback = function()
         local cmdtype = vim.fn.getcmdtype()
         if cmdtype == ':' then
-            vim.rpcnotify(0, 'ime_cmdline', {
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
                 type = 'update',
                 text = ':' .. vim.fn.getcmdline()
             })
         elseif cmdtype == '@' then
-            vim.rpcnotify(0, 'ime_cmdline', {
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
                 type = 'update',
                 text = vim.fn.getcmdline()
             })
@@ -67,7 +67,7 @@ vim.api.nvim_create_autocmd('CmdlineChanged', {
 vim.api.nvim_create_autocmd('CmdlineEnter', {
     callback = function()
         if vim.fn.getcmdtype() == '@' then
-            vim.rpcnotify(0, 'ime_cmdline', {
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
                 type = 'update',
                 text = vim.fn.getcmdline()
             })
@@ -81,28 +81,28 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
         local cmdtype = vim.fn.getcmdtype()
         if cmdtype == '@' then
             -- input() prompt ended (confirmed or cancelled)
-            vim.rpcnotify(0, 'ime_cmdline', { type = 'cancelled' })
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'cancelled' })
             return
         end
         if cmdtype ~= ':' then return end
         if vim.v.event.abort then
-            vim.rpcnotify(0, 'ime_cmdline', { type = 'cancelled' })
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'cancelled' })
         else
             -- Snapshot last message before command executes
             local old_msg = vim.fn.execute('1messages')
-            vim.rpcnotify(0, 'ime_cmdline', { type = 'executed' })
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'executed' })
             vim.schedule(function()
                 -- Check if command produced a new message
                 local new_msg = vim.fn.execute('1messages')
                 if new_msg ~= old_msg and new_msg ~= '' then
                     local text = vim.trim(new_msg)
                     if text ~= '' then
-                        vim.rpcnotify(0, 'ime_cmdline', { type = 'message', text = text })
+                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'message', text = text })
                     end
                 end
                 if vim.g.ime_auto_startinsert then
                     vim.cmd('startinsert')
-                    vim.rpcnotify(0, 'ime_snapshot', collect_snapshot())
+                    vim.rpcnotify(vim.g.ime_channel, 'ime_snapshot', collect_snapshot())
                 end
             end)
         end
