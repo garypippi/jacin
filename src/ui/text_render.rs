@@ -32,9 +32,17 @@ struct GlyphData {
 }
 
 impl TextRenderer {
-    /// Create a new text renderer, searching for a font via fontconfig
-    pub fn new(font_size: f32) -> Option<Self> {
-        let (font, fc) = load_font()?;
+    /// Create a text renderer with an optional font family name.
+    /// Falls back to fontconfig auto-detection if the family is not found.
+    pub fn new_with_family(font_size: f32, family: Option<&str>) -> Option<Self> {
+        let (font, fc) = if let Some(name) = family {
+            load_font_with_family(Some(name)).or_else(|| {
+                log::warn!("[FONT] Family {:?} not found, using default", name);
+                load_font_with_family(None)
+            })?
+        } else {
+            load_font()?
+        };
         Some(Self {
             font,
             fallback_fonts: Vec::new(),
@@ -44,9 +52,24 @@ impl TextRenderer {
         })
     }
 
-    /// Create a text renderer preferring monospace fonts.
-    /// Falls back to the default font if fontconfig has no monospace match.
-    pub fn new_monospace(font_size: f32) -> Option<Self> {
+    /// Create a monospace text renderer with an optional font family name.
+    /// Falls back to fontconfig "monospace" match, then default font.
+    pub fn new_monospace_with_family(font_size: f32, family: Option<&str>) -> Option<Self> {
+        if let Some(name) = family {
+            if let Some((font, fc)) = load_font_with_family(Some(name)) {
+                return Some(Self {
+                    font,
+                    fallback_fonts: Vec::new(),
+                    fc,
+                    font_size,
+                    glyph_cache: HashMap::new(),
+                });
+            }
+            log::warn!(
+                "[FONT] Mono family {:?} not found, falling back to monospace",
+                name
+            );
+        }
         if let Some((font, fc)) = load_font_with_family(Some("monospace")) {
             Some(Self {
                 font,
@@ -56,7 +79,7 @@ impl TextRenderer {
                 glyph_cache: HashMap::new(),
             })
         } else {
-            Self::new(font_size)
+            Self::new_with_family(font_size, None)
         }
     }
 

@@ -7,8 +7,22 @@ pub struct Config {
     pub keybinds: Keybinds,
     pub completion: Completion,
     pub behavior: Behavior,
+    pub font: FontConfig,
     #[serde(skip)]
     pub clean: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FontConfig {
+    /// Proportional font family name (for preedit/candidates).
+    /// Default: fontconfig auto-detection.
+    pub family: Option<String>,
+    /// Monospace font family name (for keypress/mode display).
+    /// Default: fontconfig "monospace" match.
+    pub mono_family: Option<String>,
+    /// Font size in pixels. Default: 16.0.
+    pub size: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -104,6 +118,9 @@ mod tests {
         assert_eq!(config.completion.adapter, "native");
         assert!(!config.behavior.auto_startinsert);
         assert!(!config.clean);
+        assert!(config.font.family.is_none());
+        assert!(config.font.mono_family.is_none());
+        assert!(config.font.size.is_none());
     }
 
     #[test]
@@ -112,6 +129,7 @@ mod tests {
         assert_eq!(config.keybinds.commit, "<C-CR>");
         assert_eq!(config.completion.adapter, "native");
         assert!(!config.behavior.auto_startinsert);
+        assert!(config.font.family.is_none());
     }
 
     #[test]
@@ -167,12 +185,36 @@ mod tests {
 
             [behavior]
             auto_startinsert = true
+
+            [font]
+            family = "Noto Sans CJK JP"
+            mono_family = "JetBrains Mono"
+            size = 18.0
             "#,
         )
         .unwrap();
         assert_eq!(config.keybinds.commit, "<C-;>");
         assert_eq!(config.completion.adapter, "cmp");
         assert!(config.behavior.auto_startinsert);
+        assert_eq!(config.font.family.as_deref(), Some("Noto Sans CJK JP"));
+        assert_eq!(config.font.mono_family.as_deref(), Some("JetBrains Mono"));
+        assert_eq!(config.font.size, Some(18.0));
+    }
+
+    #[test]
+    fn partial_toml_font_only() {
+        let config: Config = toml::from_str(
+            r#"
+            [font]
+            family = "Noto Sans"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.font.family.as_deref(), Some("Noto Sans"));
+        assert!(config.font.mono_family.is_none());
+        assert!(config.font.size.is_none());
+        // Other sections use defaults
+        assert_eq!(config.keybinds.commit, "<C-CR>");
     }
 
     #[test]

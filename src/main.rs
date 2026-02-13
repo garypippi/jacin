@@ -98,8 +98,16 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Try to create text renderers for unified popup window
-    let text_renderer = TextRenderer::new(16.0);
-    let mono_renderer = TextRenderer::new_monospace(16.0);
+    let font_size = config
+        .font
+        .size
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| s.clamp(8.0, 48.0))
+        .unwrap_or(16.0);
+    let text_renderer =
+        TextRenderer::new_with_family(font_size, config.font.family.as_deref());
+    let mono_renderer =
+        TextRenderer::new_monospace_with_family(font_size, config.font.mono_family.as_deref());
     if text_renderer.is_none() {
         log::warn!("Font not available, popup window disabled");
     }
