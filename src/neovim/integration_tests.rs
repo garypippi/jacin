@@ -75,7 +75,10 @@ fn insert_mode_typing_updates_preedit() {
         |m| matches!(m, FromNeovim::Preedit(info) if info.mode == "i"),
         MSG_TIMEOUT,
     );
-    assert!(msg.is_some(), "expected Preedit with mode 'i' after entering insert mode");
+    assert!(
+        msg.is_some(),
+        "expected Preedit with mode 'i' after entering insert mode"
+    );
 
     // Type characters — autocmd pushes snapshot after each key
     for ch in ['h', 'e', 'l', 'l', 'o'] {

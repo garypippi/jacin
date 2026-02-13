@@ -89,11 +89,20 @@ pub(crate) fn mode_label(vim_mode: &str) -> (&'static str, Rgba) {
     }
 }
 
+/// Radius of the red recording indicator circle
+pub(crate) const REC_CIRCLE_RADIUS: f32 = 4.0;
+/// Gap between recording circle and @reg text
+pub(crate) const REC_CIRCLE_TEXT_GAP: f32 = 3.0;
+
+/// Format the recording label text (the part after the red circle)
+pub(crate) fn format_recording_label(reg: &str) -> String {
+    format!("@{}", reg)
+}
+
 /// Layout information for rendering
 pub(crate) struct Layout {
     pub width: u32,
     pub height: u32,
-    pub icon_area_width: f32,
     pub has_preedit: bool,
     pub has_keypress: bool,
     pub has_candidates: bool,
@@ -102,6 +111,8 @@ pub(crate) struct Layout {
     pub candidates_y: f32,
     pub visible_count: usize,
     pub has_scrollbar: bool,
+    /// Width of mode+REC icons in keypress row (text starts after this)
+    pub keypress_icon_width: f32,
 }
 
 /// Calculate preedit scroll offset to keep cursor visible with center-biased scrolling.
@@ -140,8 +151,7 @@ pub(crate) fn scrollbar_thumb_geometry(
     candidates_y: f32,
 ) -> ScrollbarThumb {
     debug_assert!(total_count > 0 && visible_count <= total_count);
-    let thumb_height =
-        ((visible_count as f32 / total_count as f32) * scrollbar_height).max(20.0);
+    let thumb_height = ((visible_count as f32 / total_count as f32) * scrollbar_height).max(20.0);
     let scroll_range = total_count - visible_count;
     let y = if scroll_range > 0 {
         candidates_y
@@ -155,53 +165,67 @@ pub(crate) fn scrollbar_thumb_geometry(
     }
 }
 
-/// Calculate layout dimensions and section positions
-pub(crate) fn calculate_layout(content: &PopupContent, renderer: &mut TextRenderer) -> Layout {
+/// Calculate layout dimensions and section positions.
+///
+/// `mono_renderer` is used for measuring mode/REC icon text in the keypress row.
+pub(crate) fn calculate_layout(
+    content: &PopupContent,
+    renderer: &mut TextRenderer,
+    mono_renderer: &mut TextRenderer,
+) -> Layout {
     let has_preedit = !content.preedit.is_empty();
-    // Hide keypress when candidates are shown
-    let has_keypress = !content.keypress.is_empty() && content.candidates.is_empty();
+    // Hide keypress text when candidates are shown, but keypress row itself
+    // is always visible when IME is enabled (shows mode/REC icons)
+    let has_keypress_text = !content.keypress.is_empty() && content.candidates.is_empty();
+    // Keypress row is always present when IME is enabled
+    let has_keypress = content.ime_enabled;
     let has_candidates = !content.candidates.is_empty();
 
     let line_height = renderer.line_height();
     let mut y = PADDING;
     let mut max_width: f32 = 0.0;
 
-    // Icon area width: PADDING + mode_label + [gap + recording] + gap + separator + gap
+    // Keypress row icon width: mode_label + [gap + circle + gap + @reg] + separator area
     let (mode_text, _) = mode_label(&content.vim_mode);
-    let mode_text_width = renderer.measure_text(mode_text);
+    let mode_text_width = mono_renderer.measure_text(mode_text);
     let recording_width = if !content.recording.is_empty() {
-        let rec_label = format!("REC @{}", content.recording);
-        MODE_GAP + renderer.measure_text(&rec_label)
+        let rec_label = format_recording_label(&content.recording);
+        MODE_GAP
+            + REC_CIRCLE_RADIUS * 2.0
+            + REC_CIRCLE_TEXT_GAP
+            + mono_renderer.measure_text(&rec_label)
     } else {
         0.0
     };
-    let icon_area_width = PADDING
+    let keypress_icon_width = PADDING
         + mode_text_width
         + recording_width
         + ICON_SEPARATOR_GAP
         + ICON_SEPARATOR_WIDTH
         + ICON_SEPARATOR_GAP;
 
-    // First row is always present (icon + optional preedit)
+    // Preedit section (no icon area — preedit starts at PADDING)
     let preedit_y = y;
     if has_preedit {
         let text_width = renderer.measure_text(&content.preedit);
-        let preedit_width = (icon_area_width + text_width + PADDING + 4.0)
-            .min(MAX_PREEDIT_WIDTH + icon_area_width);
+        let preedit_width =
+            (PADDING + text_width + PADDING + 4.0).min(MAX_PREEDIT_WIDTH + PADDING * 2.0);
         max_width = max_width.max(preedit_width);
-    }
-    // Minimum width: icon area + right padding
-    max_width = max_width.max(icon_area_width + PADDING);
-    y += line_height;
-    if has_keypress || has_candidates {
-        y += SECTION_SEPARATOR_HEIGHT;
+        y += line_height;
+        if has_keypress || has_candidates {
+            y += SECTION_SEPARATOR_HEIGHT;
+        }
     }
 
-    // Keypress section
+    // Keypress section (always present when IME enabled)
     let keypress_y = if has_keypress { y } else { 0.0 };
     if has_keypress {
-        let text_width = renderer.measure_text(&content.keypress);
-        max_width = max_width.max(text_width + PADDING * 2.0);
+        let mut keypress_width = keypress_icon_width;
+        if has_keypress_text {
+            keypress_width += renderer.measure_text(&content.keypress);
+        }
+        keypress_width += PADDING; // right padding
+        max_width = max_width.max(keypress_width);
         y += line_height;
         if has_candidates {
             y += SECTION_SEPARATOR_HEIGHT;
@@ -227,8 +251,7 @@ pub(crate) fn calculate_layout(content: &PopupContent, renderer: &mut TextRender
         // Calculate max candidate width
         for candidate in content.candidates.iter().take(MAX_VISIBLE_CANDIDATES) {
             let text_width = renderer.measure_text(candidate);
-            max_width =
-                max_width.max(text_width + NUMBER_WIDTH + PADDING * 2.0 + scrollbar_space);
+            max_width = max_width.max(text_width + NUMBER_WIDTH + PADDING * 2.0 + scrollbar_space);
         }
 
         y += visible_count as f32 * line_height;
@@ -244,7 +267,6 @@ pub(crate) fn calculate_layout(content: &PopupContent, renderer: &mut TextRender
     Layout {
         width,
         height,
-        icon_area_width,
         has_preedit,
         has_keypress,
         has_candidates,
@@ -253,6 +275,7 @@ pub(crate) fn calculate_layout(content: &PopupContent, renderer: &mut TextRender
         candidates_y,
         visible_count,
         has_scrollbar,
+        keypress_icon_width,
     }
 }
 

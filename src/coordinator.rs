@@ -179,8 +179,7 @@ impl State {
         if !self.ime.is_fully_enabled() {
             return;
         }
-        self.keypress.accumulated = text;
-        self.keypress.visible = true;
+        self.keypress.set_display_text(text);
         self.keypress.set_vim_mode("c");
         self.update_popup();
     }
@@ -201,9 +200,7 @@ impl State {
         if !self.ime.is_fully_enabled() {
             return;
         }
-        self.keypress.accumulated = text;
-        self.keypress.visible = true;
-        self.keypress.last_shown = Some(std::time::Instant::now());
+        self.keypress.set_display_text(text);
         self.update_popup();
     }
 
@@ -264,7 +261,7 @@ impl State {
             cursor_end: self.ime.cursor_end,
             vim_mode: self.keypress.vim_mode.clone(),
             keypress: if self.keypress.should_show() {
-                self.keypress.accumulated.clone()
+                self.keypress.display_text()
             } else {
                 String::new()
             },
@@ -278,7 +275,10 @@ impl State {
             let qh = self.wayland.qh.clone();
             popup.update(&content, &qh);
         }
-        log::trace!("[PERF] update_popup: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+        log::trace!(
+            "[PERF] update_popup: {:.2}ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     /// Hide the unified popup
@@ -359,8 +359,7 @@ mod replay_tests {
                 }
                 FromNeovim::CmdlineUpdate(text) => {
                     if self.ime.is_fully_enabled() {
-                        self.keypress.accumulated = text;
-                        self.keypress.visible = true;
+                        self.keypress.set_display_text(text);
                         self.keypress.set_vim_mode("c");
                     }
                 }
@@ -370,9 +369,7 @@ mod replay_tests {
                 }
                 FromNeovim::CmdlineMessage(text) => {
                     if self.ime.is_fully_enabled() {
-                        self.keypress.accumulated = text;
-                        self.keypress.visible = true;
-                        self.keypress.last_shown = Some(std::time::Instant::now());
+                        self.keypress.set_display_text(text);
                     }
                 }
                 FromNeovim::AutoCommit(text) => {
@@ -430,12 +427,31 @@ mod replay_tests {
         }
 
         let expect = &fixture.expect;
-        assert_eq!(state.ime.preedit, expect.preedit, "preedit mismatch in {path}");
-        assert_eq!(state.ime.cursor_begin, expect.cursor_begin, "cursor_begin mismatch in {path}");
-        assert_eq!(state.ime.cursor_end, expect.cursor_end, "cursor_end mismatch in {path}");
-        assert_eq!(state.keypress.vim_mode, expect.vim_mode, "vim_mode mismatch in {path}");
-        assert_eq!(state.ime.candidates.len(), expect.candidates_count, "candidates_count mismatch in {path}");
-        assert_eq!(state.committed, expect.committed, "committed mismatch in {path}");
+        assert_eq!(
+            state.ime.preedit, expect.preedit,
+            "preedit mismatch in {path}"
+        );
+        assert_eq!(
+            state.ime.cursor_begin, expect.cursor_begin,
+            "cursor_begin mismatch in {path}"
+        );
+        assert_eq!(
+            state.ime.cursor_end, expect.cursor_end,
+            "cursor_end mismatch in {path}"
+        );
+        assert_eq!(
+            state.keypress.vim_mode, expect.vim_mode,
+            "vim_mode mismatch in {path}"
+        );
+        assert_eq!(
+            state.ime.candidates.len(),
+            expect.candidates_count,
+            "candidates_count mismatch in {path}"
+        );
+        assert_eq!(
+            state.committed, expect.committed,
+            "committed mismatch in {path}"
+        );
         assert_eq!(state.exited, expect.exited, "exited mismatch in {path}");
     }
 

@@ -44,6 +44,22 @@ impl TextRenderer {
         })
     }
 
+    /// Create a text renderer preferring monospace fonts.
+    /// Falls back to the default font if fontconfig has no monospace match.
+    pub fn new_monospace(font_size: f32) -> Option<Self> {
+        if let Some((font, fc)) = load_font_with_family(Some("monospace")) {
+            Some(Self {
+                font,
+                fallback_fonts: Vec::new(),
+                fc,
+                font_size,
+                glyph_cache: HashMap::new(),
+            })
+        } else {
+            Self::new(font_size)
+        }
+    }
+
     /// Get or rasterize a glyph with font fallback
     fn get_glyph(&mut self, c: char) -> GlyphData {
         if let Some(cached) = self.glyph_cache.get(&c) {
@@ -53,7 +69,10 @@ impl TextRenderer {
         // Try primary font
         if self.font.has_glyph(c) {
             let (metrics, bitmap) = self.font.rasterize(c, self.font_size);
-            let data = GlyphData { metrics, bitmap: bitmap.into() };
+            let data = GlyphData {
+                metrics,
+                bitmap: bitmap.into(),
+            };
             self.glyph_cache.insert(c, data.clone());
             return data;
         }
@@ -62,7 +81,10 @@ impl TextRenderer {
         for fb in &self.fallback_fonts {
             if fb.has_glyph(c) {
                 let (metrics, bitmap) = fb.rasterize(c, self.font_size);
-                let data = GlyphData { metrics, bitmap: bitmap.into() };
+                let data = GlyphData {
+                    metrics,
+                    bitmap: bitmap.into(),
+                };
                 self.glyph_cache.insert(c, data.clone());
                 return data;
             }
@@ -71,7 +93,10 @@ impl TextRenderer {
         // Query fontconfig for a fallback font covering this character
         if let Some(fb) = self.query_fallback_font(c) {
             let (metrics, bitmap) = fb.rasterize(c, self.font_size);
-            let data = GlyphData { metrics, bitmap: bitmap.into() };
+            let data = GlyphData {
+                metrics,
+                bitmap: bitmap.into(),
+            };
             self.glyph_cache.insert(c, data.clone());
             self.fallback_fonts.push(fb);
             return data;
@@ -79,7 +104,10 @@ impl TextRenderer {
 
         // Last resort: primary font's .notdef glyph
         let (metrics, bitmap) = self.font.rasterize(c, self.font_size);
-        let data = GlyphData { metrics, bitmap: bitmap.into() };
+        let data = GlyphData {
+            metrics,
+            bitmap: bitmap.into(),
+        };
         self.glyph_cache.insert(c, data.clone());
         data
     }
@@ -288,6 +316,12 @@ pub fn draw_border(pixmap: &mut Pixmap, width: u32, height: u32, color: Color) {
 
 /// Find and load a font via fontconfig (automatic detection, no preferences).
 fn load_font() -> Option<(Font, Fontconfig)> {
+    load_font_with_family(None)
+}
+
+/// Load a font via fontconfig, optionally requesting a specific family (e.g., "monospace").
+#[allow(unexpected_cfgs)]
+fn load_font_with_family(family: Option<&str>) -> Option<(Font, Fontconfig)> {
     let fc = Fontconfig::new().or_else(|| {
         log::warn!("[FONT] Failed to initialize fontconfig");
         None
@@ -296,6 +330,19 @@ fn load_font() -> Option<(Font, Fontconfig)> {
     // Extract path and index from fontconfig match, then drop patterns to release borrow on fc
     let (path, index) = {
         let mut pat = fontconfig::Pattern::new(&fc);
+        if let Some(family_name) = family {
+            unsafe {
+                let c_family = std::ffi::CString::new("family").ok()?;
+                let c_value = std::ffi::CString::new(family_name).ok()?;
+                ffi_dispatch!(
+                    LIB,
+                    FcPatternAddString,
+                    pat.as_mut_ptr(),
+                    c_family.as_ptr(),
+                    c_value.as_ptr() as *const u8
+                );
+            }
+        }
         let matched = pat.font_match();
 
         let path = matched.filename().or_else(|| {
@@ -324,6 +371,12 @@ fn load_font() -> Option<(Font, Fontconfig)> {
     })
     .ok()?;
 
-    log::info!("[FONT] Loaded: {} (index={})", path, index);
+    let family_label = family.unwrap_or("default");
+    log::info!(
+        "[FONT] Loaded ({}): {} (index={})",
+        family_label,
+        path,
+        index
+    );
     Some((font, fc))
 }

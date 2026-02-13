@@ -6,22 +6,28 @@ use std::time::{Duration, Instant};
 
 use crate::neovim::PendingState;
 
-/// Duration to show keypress window before auto-hide
+/// Duration to show each keypress entry before auto-hide
 pub const KEYPRESS_DISPLAY_DURATION: Duration = Duration::from_millis(1500);
+
+/// Maximum number of display entries kept
+const MAX_DISPLAY_ENTRIES: usize = 20;
+
+/// A single keypress display entry with its timestamp
+#[derive(Debug, Clone)]
+struct KeypressEntry {
+    text: String,
+    added_at: Instant,
+}
 
 /// State for keypress display window
 #[derive(Debug)]
 pub struct KeypressState {
-    /// Accumulated key sequence (e.g., "di" while waiting for text object)
-    pub accumulated: String,
-    /// Whether display is visible
-    pub visible: bool,
+    /// Individual keypress entries with timestamps
+    entries: Vec<KeypressEntry>,
     /// Pending mode type
     pub pending_type: PendingState,
     /// Current vim mode string (i, n, v, no, etc.)
     pub vim_mode: String,
-    /// Time when keypress display was last shown/updated
-    pub last_shown: Option<Instant>,
     /// Currently recording macro register ("" when not recording)
     pub recording: String,
 }
@@ -30,28 +36,30 @@ impl KeypressState {
     /// Create a new keypress state
     pub fn new() -> Self {
         Self {
-            accumulated: String::new(),
-            visible: false,
+            entries: Vec::new(),
             pending_type: PendingState::None,
             vim_mode: String::new(),
-            last_shown: None,
             recording: String::new(),
         }
     }
 
-    /// Push a key to the accumulated sequence
+    /// Push a key to the entries
     pub fn push_key(&mut self, key: &str) {
-        self.accumulated.push_str(key);
-        self.visible = true;
-        self.last_shown = Some(Instant::now());
+        self.entries.push(KeypressEntry {
+            text: key.to_string(),
+            added_at: Instant::now(),
+        });
+        // Trim oldest entries if over limit
+        if self.entries.len() > MAX_DISPLAY_ENTRIES {
+            let excess = self.entries.len() - MAX_DISPLAY_ENTRIES;
+            self.entries.drain(..excess);
+        }
     }
 
-    /// Clear accumulated keys and hide display
+    /// Clear all entries and hide display
     pub fn clear(&mut self) {
-        self.accumulated.clear();
-        self.visible = false;
+        self.entries.clear();
         self.pending_type = PendingState::None;
-        self.last_shown = None;
         // NOTE: recording is NOT cleared here — it's driven by Neovim snapshots,
         // not by keypress display lifecycle. Cleared explicitly on disable/exit.
     }
@@ -67,31 +75,49 @@ impl KeypressState {
     }
 
     /// Check if in normal mode
+    #[cfg(test)]
     pub fn is_normal_mode(&self) -> bool {
         self.vim_mode == "n" || self.vim_mode.starts_with("no")
     }
 
     /// Check if in visual mode
+    #[cfg(test)]
     pub fn is_visual_mode(&self) -> bool {
-        self.vim_mode == "v" || self.vim_mode.starts_with('v')
+        matches!(self.vim_mode.as_str(), "v" | "V" | "\x16")
+            || self.vim_mode.starts_with('v')
+            || self.vim_mode.starts_with('V')
+    }
+
+    /// Remove entries older than KEYPRESS_DISPLAY_DURATION.
+    /// Returns true if any entries were removed.
+    pub fn cleanup_expired(&mut self) -> bool {
+        let before = self.entries.len();
+        self.entries
+            .retain(|e| e.added_at.elapsed() < KEYPRESS_DISPLAY_DURATION);
+        self.entries.len() != before
     }
 
     /// Check if we should show the keypress display
     pub fn should_show(&self) -> bool {
-        self.visible && !self.accumulated.is_empty()
+        !self.entries.is_empty()
     }
 
-    /// Check if display has timed out
-    pub fn is_timed_out(&self) -> bool {
-        // Command-line mode should not auto-hide
-        if self.vim_mode == "c" {
-            return false;
+    /// Build display text from all current entries
+    pub fn display_text(&self) -> String {
+        let mut s = String::new();
+        for entry in &self.entries {
+            s.push_str(&entry.text);
         }
-        if let Some(last_shown) = self.last_shown {
-            last_shown.elapsed() >= KEYPRESS_DISPLAY_DURATION
-        } else {
-            false
-        }
+        s
+    }
+
+    /// Set entries directly from text (for CmdlineUpdate/CmdlineMessage)
+    pub fn set_display_text(&mut self, text: String) {
+        self.entries.clear();
+        self.entries.push(KeypressEntry {
+            text,
+            added_at: Instant::now(),
+        });
     }
 }
 
@@ -108,13 +134,10 @@ mod tests {
     #[test]
     fn new_state_is_hidden_and_empty() {
         let state = KeypressState::new();
-        assert!(state.accumulated.is_empty());
-        assert!(!state.visible);
+        assert!(state.entries.is_empty());
         assert_eq!(state.pending_type, PendingState::None);
         assert!(state.vim_mode.is_empty());
-        assert_eq!(state.last_shown, None);
         assert!(!state.should_show());
-        assert!(!state.is_timed_out());
     }
 
     #[test]
@@ -124,9 +147,7 @@ mod tests {
         state.push_key("i");
         state.push_key("w");
 
-        assert_eq!(state.accumulated, "diw");
-        assert!(state.visible);
-        assert!(state.last_shown.is_some());
+        assert_eq!(state.display_text(), "diw");
         assert!(state.should_show());
     }
 
@@ -139,10 +160,8 @@ mod tests {
 
         state.clear();
 
-        assert_eq!(state.accumulated, "");
-        assert!(!state.visible);
+        assert_eq!(state.display_text(), "");
         assert_eq!(state.pending_type, PendingState::None);
-        assert_eq!(state.last_shown, None);
         assert_eq!(state.recording, "q");
         assert!(!state.should_show());
     }
@@ -175,46 +194,62 @@ mod tests {
         assert!(state.is_visual_mode());
 
         state.set_vim_mode("V");
-        assert!(!state.is_visual_mode());
+        assert!(state.is_visual_mode());
+
+        state.set_vim_mode("\x16");
+        assert!(state.is_visual_mode());
 
         state.set_vim_mode("n");
         assert!(!state.is_visual_mode());
     }
 
     #[test]
-    fn should_show_requires_visible_and_non_empty() {
+    fn should_show_requires_non_empty_entries() {
         let mut state = KeypressState::new();
         assert!(!state.should_show());
 
-        state.visible = true;
-        assert!(!state.should_show());
-
-        state.accumulated = "x".to_string();
+        state.push_key("x");
         assert!(state.should_show());
 
-        state.visible = false;
+        state.clear();
         assert!(!state.should_show());
     }
 
     #[test]
-    fn timeout_depends_on_elapsed_duration() {
+    fn cleanup_expired_removes_old_entries() {
         let mut state = KeypressState::new();
-        state.set_vim_mode("n");
-        state.last_shown = Some(Instant::now() - KEYPRESS_DISPLAY_DURATION - Duration::from_millis(1));
-        assert!(state.is_timed_out());
+        // Insert an entry with a timestamp in the past
+        state.entries.push(KeypressEntry {
+            text: "old".to_string(),
+            added_at: Instant::now() - KEYPRESS_DISPLAY_DURATION - Duration::from_millis(1),
+        });
+        state.push_key("new");
 
-        state.last_shown = Some(Instant::now());
-        assert!(!state.is_timed_out());
-
-        state.last_shown = None;
-        assert!(!state.is_timed_out());
+        assert_eq!(state.entries.len(), 2);
+        let changed = state.cleanup_expired();
+        assert!(changed);
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.display_text(), "new");
     }
 
     #[test]
-    fn command_line_mode_never_times_out() {
+    fn max_entries_trims_oldest() {
         let mut state = KeypressState::new();
-        state.set_vim_mode("c");
-        state.last_shown = Some(Instant::now() - KEYPRESS_DISPLAY_DURATION - Duration::from_secs(1));
-        assert!(!state.is_timed_out());
+        for i in 0..25 {
+            state.push_key(&format!("{}", i % 10));
+        }
+        assert_eq!(state.entries.len(), MAX_DISPLAY_ENTRIES);
+        // First entry should be the 6th push (index 5)
+        assert_eq!(state.entries[0].text, "5");
+    }
+
+    #[test]
+    fn set_display_text_replaces_entries() {
+        let mut state = KeypressState::new();
+        state.push_key("a");
+        state.push_key("b");
+        state.set_display_text(":wq".to_string());
+        assert_eq!(state.display_text(), ":wq");
+        assert_eq!(state.entries.len(), 1);
     }
 }

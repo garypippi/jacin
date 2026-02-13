@@ -494,10 +494,13 @@ async fn handle_backspace(
     }
     let result = nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
     if get_map_str(&result, "type") == Some("delete_surrounding") {
-        send_msg(tx, FromNeovim::DeleteSurrounding {
-            before: 1,
-            after: 0,
-        });
+        send_msg(
+            tx,
+            FromNeovim::DeleteSurrounding {
+                before: 1,
+                after: 0,
+            },
+        );
     } else {
         send_msg(tx, FromNeovim::KeyProcessed);
     }
@@ -659,6 +662,7 @@ async fn handle_snapshot_response(
     if snapshot.mode.starts_with("no") {
         PENDING.store(PendingState::Motion);
         log::debug!("[NVIM] Entered operator-pending mode ({})", snapshot.mode);
+        send_msg(tx, FromNeovim::KeyProcessed);
         return Ok(());
     }
 
@@ -674,6 +678,7 @@ async fn handle_snapshot_response(
         *last_mode = snapshot.mode.clone();
     }
 
+    send_msg(tx, FromNeovim::KeyProcessed);
     Ok(())
 }
 

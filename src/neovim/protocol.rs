@@ -433,10 +433,7 @@ mod tests {
 
     #[test]
     fn from_neovim_visual_range_some_roundtrip() {
-        let msg = FromNeovim::VisualRange(Some(VisualSelection::Charwise {
-            begin: 2,
-            end: 8,
-        }));
+        let msg = FromNeovim::VisualRange(Some(VisualSelection::Charwise { begin: 2, end: 8 }));
         let rt = roundtrip_from_neovim(&msg);
         match rt {
             FromNeovim::VisualRange(Some(VisualSelection::Charwise { begin, end })) => {

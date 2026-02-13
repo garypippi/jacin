@@ -97,16 +97,17 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Try to create text renderer for unified popup window
+    // Try to create text renderers for unified popup window
     let text_renderer = TextRenderer::new(16.0);
+    let mono_renderer = TextRenderer::new_monospace(16.0);
     if text_renderer.is_none() {
         log::warn!("Font not available, popup window disabled");
     }
 
     // Create unified popup window using input method popup surface
     // The popup surface is automatically positioned near the cursor by the compositor
-    let popup = if let Some(renderer) = text_renderer {
-        match UnifiedPopup::new(&compositor, &input_method, &shm, &qh, renderer) {
+    let popup = if let (Some(renderer), Some(mono)) = (text_renderer, mono_renderer) {
+        match UnifiedPopup::new(&compositor, &input_method, &shm, &qh, renderer, mono) {
             Some(win) => {
                 log::info!("Unified popup window created (using input popup surface)");
                 Some(win)
@@ -241,15 +242,16 @@ fn main() -> anyhow::Result<()> {
             match handle.insert_source(
                 Timer::from_duration(std::time::Duration::from_millis(100)),
                 |_, _, state| {
-                    if state.keypress.should_show() && state.keypress.is_timed_out() {
-                        state.hide_keypress();
+                    let changed = state.keypress.cleanup_expired();
+                    if !state.keypress.should_show() {
+                        state.update_popup();
                         state.keypress_timer_token = None;
                         TimeoutAction::Drop
-                    } else if state.keypress.should_show() {
-                        TimeoutAction::ToDuration(std::time::Duration::from_millis(100))
                     } else {
-                        state.keypress_timer_token = None;
-                        TimeoutAction::Drop
+                        if changed {
+                            state.update_popup();
+                        }
+                        TimeoutAction::ToDuration(std::time::Duration::from_millis(100))
                     }
                 },
             ) {

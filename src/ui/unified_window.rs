@@ -11,14 +11,14 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_v2, zwp_input_popup_surface_v2,
 };
 
-use super::layout::{
-    Layout, calculate_layout, mode_label, preedit_scroll_offset, rgba,
-    scrollbar_thumb_geometry, BG_COLOR, BORDER_COLOR, CURSOR_BG, ICON_SEPARATOR_GAP,
-    ICON_SEPARATOR_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR,
-    NUMBER_WIDTH, PADDING, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH, SELECTED_BG,
-    TEXT_COLOR, VISUAL_BG,
-};
 pub use super::layout::PopupContent;
+use super::layout::{
+    BG_COLOR, BORDER_COLOR, CURSOR_BG, ICON_SEPARATOR_GAP, ICON_SEPARATOR_WIDTH, Layout,
+    MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING,
+    REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH,
+    SELECTED_BG, TEXT_COLOR, VISUAL_BG, calculate_layout, format_recording_label, mode_label,
+    preedit_scroll_offset, rgba, scrollbar_thumb_geometry,
+};
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
 use crate::neovim::VisualSelection;
@@ -46,6 +46,7 @@ pub struct UnifiedPopup {
     height: u32,
     pub visible: bool,
     renderer: TextRenderer,
+    mono_renderer: TextRenderer,
     scroll_offset: usize,
 }
 
@@ -57,6 +58,7 @@ impl UnifiedPopup {
         shm: &wl_shm::WlShm,
         qh: &QueueHandle<State>,
         renderer: TextRenderer,
+        mono_renderer: TextRenderer,
     ) -> Option<Self> {
         // Create surface
         let surface = compositor.create_surface(qh, ());
@@ -86,6 +88,7 @@ impl UnifiedPopup {
             height: 100,
             visible: false,
             renderer,
+            mono_renderer,
             scroll_offset: 0,
         })
     }
@@ -110,7 +113,7 @@ impl UnifiedPopup {
         }
 
         // Calculate layout and size
-        let layout = calculate_layout(content, &mut self.renderer);
+        let layout = calculate_layout(content, &mut self.renderer, &mut self.mono_renderer);
         self.width = layout.width;
         self.height = layout.height;
 
@@ -180,22 +183,20 @@ impl UnifiedPopup {
         draw_border(&mut pixmap, self.width, self.height, rgba(BORDER_COLOR));
 
         // Render sections
-        self.render_status_bar(&mut pixmap, content, layout);
-
         if layout.has_preedit {
-            self.render_preedit_section(&mut pixmap, content, layout, layout.icon_area_width);
-        }
+            self.render_preedit_section(&mut pixmap, content, layout, PADDING);
 
-        // Draw separator below first row if more sections follow
-        if layout.has_keypress || layout.has_candidates {
-            let line_height = self.renderer.line_height();
-            let sep_y = layout.preedit_y + line_height;
-            if let Some(rect) =
-                Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
-            {
-                let mut paint = Paint::default();
-                paint.set_color(rgba(BORDER_COLOR));
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            // Draw separator below preedit if more sections follow
+            if layout.has_keypress || layout.has_candidates {
+                let line_height = self.renderer.line_height();
+                let sep_y = layout.preedit_y + line_height;
+                if let Some(rect) =
+                    Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
+                {
+                    let mut paint = Paint::default();
+                    paint.set_color(rgba(BORDER_COLOR));
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
             }
         }
 
@@ -255,44 +256,6 @@ impl UnifiedPopup {
         );
     }
 
-    /// Render mode label, recording indicator, and vertical separator in the first row
-    fn render_status_bar(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
-        let line_height = self.renderer.line_height();
-        let y_baseline = layout.preedit_y + line_height * 0.75;
-
-        // Draw mode label
-        let (mode_text, mode_color) = mode_label(&content.vim_mode);
-        let mode_x = PADDING;
-        self.renderer
-            .draw_text(pixmap, mode_text, mode_x, y_baseline, rgba(mode_color));
-
-        // Draw recording indicator if active
-        let mode_text_width = self.renderer.measure_text(mode_text);
-        let mut after_mode_x = mode_x + mode_text_width;
-        if !content.recording.is_empty() {
-            let rec_label = format!("REC @{}", content.recording);
-            let rec_x = after_mode_x + MODE_GAP;
-            self.renderer.draw_text(
-                pixmap,
-                &rec_label,
-                rec_x,
-                y_baseline,
-                rgba(MODE_RECORDING_COLOR),
-            );
-            after_mode_x = rec_x + self.renderer.measure_text(&rec_label);
-        }
-
-        // Draw vertical separator
-        let sep_x = after_mode_x + ICON_SEPARATOR_GAP;
-        if let Some(rect) =
-            Rect::from_xywh(sep_x, layout.preedit_y, ICON_SEPARATOR_WIDTH, line_height)
-        {
-            let mut paint = Paint::default();
-            paint.set_color(rgba(BORDER_COLOR));
-            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-        }
-    }
-
     /// Render preedit section with cursor
     fn render_preedit_section(
         &mut self,
@@ -344,8 +307,7 @@ impl UnifiedPopup {
             .copied()
             .unwrap_or(preedit_left);
         let cursor_rel = cursor_x - preedit_left;
-        let scroll_offset =
-            preedit_scroll_offset(total_text_width, visible_width, cursor_rel);
+        let scroll_offset = preedit_scroll_offset(total_text_width, visible_width, cursor_rel);
 
         if is_normal_mode && cursor_char_begin <= chars.len() {
             // Convert visual selection byte offsets to char positions
@@ -434,7 +396,7 @@ impl UnifiedPopup {
         }
     }
 
-    /// Render keypress section
+    /// Render keypress section with mode/REC icons and optional keypress text
     fn render_keypress_section(
         &mut self,
         pixmap: &mut Pixmap,
@@ -444,13 +406,64 @@ impl UnifiedPopup {
         let line_height = self.renderer.line_height();
         let y_baseline = layout.keypress_y + line_height * 0.75;
 
-        self.renderer.draw_text(
-            pixmap,
-            &content.keypress,
-            PADDING,
-            y_baseline,
-            rgba(TEXT_COLOR),
-        );
+        // Draw mode label using monospace font
+        let (mode_text, mode_color) = mode_label(&content.vim_mode);
+        let mode_x = PADDING;
+        self.mono_renderer
+            .draw_text(pixmap, mode_text, mode_x, y_baseline, rgba(mode_color));
+
+        // Draw recording indicator if active
+        let mode_text_width = self.mono_renderer.measure_text(mode_text);
+        let mut after_mode_x = mode_x + mode_text_width;
+        if !content.recording.is_empty() {
+            let rec_x = after_mode_x + MODE_GAP;
+
+            // Draw red filled circle
+            let circle_cy = layout.keypress_y + line_height * 0.5;
+            let circle_cx = rec_x + REC_CIRCLE_RADIUS;
+            draw_filled_circle(
+                pixmap,
+                circle_cx,
+                circle_cy,
+                REC_CIRCLE_RADIUS,
+                rgba(MODE_RECORDING_COLOR),
+            );
+
+            // Draw @reg text using monospace font
+            let rec_label = format_recording_label(&content.recording);
+            let text_x = rec_x + REC_CIRCLE_RADIUS * 2.0 + REC_CIRCLE_TEXT_GAP;
+            self.mono_renderer.draw_text(
+                pixmap,
+                &rec_label,
+                text_x,
+                y_baseline,
+                rgba(MODE_RECORDING_COLOR),
+            );
+            after_mode_x = text_x + self.mono_renderer.measure_text(&rec_label);
+        }
+
+        // Draw vertical separator
+        let sep_x = after_mode_x + ICON_SEPARATOR_GAP;
+        if let Some(rect) =
+            Rect::from_xywh(sep_x, layout.keypress_y, ICON_SEPARATOR_WIDTH, line_height)
+        {
+            let mut paint = Paint::default();
+            paint.set_color(rgba(BORDER_COLOR));
+            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        }
+
+        // Draw keypress text after icons (hidden when candidates are shown,
+        // matching calculate_layout which excludes keypress text width)
+        if !content.keypress.is_empty() && !layout.has_candidates {
+            let text_x = layout.keypress_icon_width;
+            self.renderer.draw_text(
+                pixmap,
+                &content.keypress,
+                text_x,
+                y_baseline,
+                rgba(TEXT_COLOR),
+            );
+        }
 
         // Draw separator if candidates follow
         if layout.has_candidates {
@@ -568,5 +581,37 @@ impl UnifiedPopup {
             return other;
         }
         self.current_buffer
+    }
+}
+
+/// Draw a filled circle on the pixmap using midpoint algorithm
+fn draw_filled_circle(pixmap: &mut Pixmap, cx: f32, cy: f32, radius: f32, color: Color) {
+    let r = radius as i32;
+    let cx_i = cx as i32;
+    let cy_i = cy as i32;
+    let pw = pixmap.width() as i32;
+    let ph = pixmap.height() as i32;
+
+    let mut paint = Paint::default();
+    paint.set_color(color);
+
+    // Scan lines from top to bottom of bounding box
+    for dy in -r..=r {
+        let py = cy_i + dy;
+        if py < 0 || py >= ph {
+            continue;
+        }
+        // Half-width at this scanline
+        let half_w = ((radius * radius - (dy as f32) * (dy as f32)).max(0.0)).sqrt();
+        let x_start = (cx_i as f32 - half_w).ceil() as i32;
+        let x_end = (cx_i as f32 + half_w).floor() as i32;
+        let x_start = x_start.max(0);
+        let x_end = x_end.min(pw - 1);
+        if x_start <= x_end
+            && let Some(rect) =
+                Rect::from_xywh(x_start as f32, py as f32, (x_end - x_start + 1) as f32, 1.0)
+        {
+            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        }
     }
 }

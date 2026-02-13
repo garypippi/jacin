@@ -76,13 +76,9 @@ impl State {
         log::debug!("[KEY] vim_key={:?}", vim_key);
 
         if let Some(ref vim_key) = vim_key {
-            // Track state before sending to Neovim
-            let was_normal = self.keypress.is_normal_mode();
-            let was_visual = self.keypress.is_visual_mode();
-            let before = pending_state().load();
-            let was_motion_pending = before.is_motion();
-            let was_register_pending = before.is_register();
-            let was_insert_register_pending = before == PendingState::InsertRegister;
+            // Drain stale messages before setting current_keycode to avoid
+            // stale PassthroughKey using the new key's keycode
+            self.drain_stale_nvim_messages();
 
             // Store raw keycode for potential passthrough
             self.current_keycode = Some(key);
@@ -96,52 +92,25 @@ impl State {
 
             // Check state after Neovim response
             let after = pending_state().load();
-            let now_pending = after.is_pending();
-            let is_normal = self.keypress.is_normal_mode();
-            let is_visual = self.keypress.is_visual_mode();
-            let is_insert = self.keypress.vim_mode == "i";
 
             // Command-line mode: display updates come via CmdlineUpdate messages
             if after == PendingState::CommandLine {
                 return;
             }
 
-            if now_pending {
-                // In pending state (operator or register) - accumulate key and show
+            // Keypress display: show everything except insert-mode printable typing
+            let is_insert_printable_typing = self.keypress.vim_mode == "i"
+                && !self.keyboard.ctrl_pressed
+                && !self.keyboard.alt_pressed
+                && is_printable(&utf8);
+
+            if !is_insert_printable_typing {
                 self.keypress.push_key(vim_key);
-                self.update_keypress_from_pending();
-                self.show_keypress();
-            } else if was_insert_register_pending && is_insert {
-                // Just completed <C-r> + register in insert mode - show full sequence
-                self.keypress.push_key(vim_key);
-                self.show_keypress();
-            } else if (was_normal || was_visual) && is_insert {
-                // Just entered insert mode from normal/visual - show entry key (i, a, A, c, etc.)
-                self.keypress.clear();
-                self.keypress.push_key(vim_key);
-                self.show_keypress();
-            } else if was_normal && is_visual {
-                // Entered visual mode from normal - show 'v'
-                self.keypress.clear();
-                self.keypress.push_key(vim_key);
-                self.show_keypress();
-            } else if is_normal && was_visual {
-                // Visual operator completed (d, y, x from visual) - show key
-                self.keypress.push_key(vim_key);
-                self.show_keypress();
-            } else if is_normal {
-                // In normal mode - show completed sequences
-                if was_motion_pending || was_register_pending {
-                    // Sequence completed (e.g., "d$", "\"ay$") - add final key
-                    self.keypress.push_key(vim_key);
-                    self.show_keypress();
-                }
-                // Don't show standalone normal mode keys (h, j, k, l, etc.)
-            } else if is_visual {
-                // Visual mode movement - don't hide existing display
-            } else {
-                // In insert mode typing - hide keypress display
-                self.hide_keypress();
+                self.update_popup();
+            }
+
+            if after.is_pending() {
+                self.keypress.set_pending(after);
             }
         } else if is_printable(&utf8) {
             // Fallback: if no Neovim or no vim key, use local preedit
@@ -165,12 +134,42 @@ impl State {
         }
     }
 
+    fn drain_stale_nvim_messages(&mut self) {
+        loop {
+            let msg = self.nvim.as_ref().and_then(|n| n.try_recv());
+            match msg {
+                Some(stale) => {
+                    log::debug!("[NVIM] Draining stale message: {:?}", stale);
+                    self.handle_nvim_message(stale);
+                }
+                None => break,
+            }
+        }
+    }
+
     pub(crate) fn wait_for_nvim_response(&mut self) {
+        use crate::neovim::FromNeovim;
+
         let _perf = PerfGuard::new("nvim_rpc");
-        if let Some(ref nvim) = self.nvim {
-            // Block waiting for response with 200ms timeout
-            if let Some(msg) = nvim.recv_timeout(std::time::Duration::from_millis(200)) {
-                self.handle_nvim_message(msg);
+
+        // Loop until KeyProcessed or deadline (200ms)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                log::debug!("[NVIM] wait_for_nvim_response: deadline reached");
+                break;
+            }
+            let msg = self.nvim.as_ref().and_then(|n| n.recv_timeout(remaining));
+            match msg {
+                Some(msg) => {
+                    let is_key_processed = matches!(msg, FromNeovim::KeyProcessed);
+                    self.handle_nvim_message(msg);
+                    if is_key_processed {
+                        break;
+                    }
+                }
+                None => break,
             }
         }
     }
@@ -201,26 +200,6 @@ impl State {
                 old_alt,
                 self.keyboard.alt_pressed
             );
-        }
-    }
-
-    pub(crate) fn show_keypress(&mut self) {
-        self.update_popup();
-    }
-
-    pub(crate) fn hide_keypress(&mut self) {
-        self.keypress.clear();
-        self.keypress_timer_token = None;
-        self.update_popup();
-    }
-
-    pub(crate) fn update_keypress_from_pending(&mut self) {
-        // Sync keypress state with neovim pending state
-        let state = pending_state().load();
-        if state.is_pending() {
-            self.keypress.set_pending(state);
-        } else {
-            self.hide_keypress();
         }
     }
 }
