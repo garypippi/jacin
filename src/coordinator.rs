@@ -270,7 +270,7 @@ impl State {
             visual_selection: self.visual_display.clone(),
             ime_enabled: self.ime.is_enabled(),
             recording: self.keypress.recording.clone(),
-            rec_blink_on: self.keypress.rec_blink_on,
+            rec_blink_on: self.animations.rec_blink.on,
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();

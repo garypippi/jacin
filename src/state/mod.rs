@@ -5,12 +5,14 @@
 //! - KeyboardState: XKB context and modifier tracking
 //! - ImeState: IME mode state machine and preedit
 
+mod animation;
 mod ime;
 mod keyboard;
 mod keypress;
 mod repeat;
 mod wayland;
 
+pub use animation::Animations;
 pub use ime::{ImeState, VimMode};
 pub use keyboard::KeyboardState;
 pub use keypress::KeypressState;

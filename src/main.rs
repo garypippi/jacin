@@ -26,7 +26,7 @@ mod state;
 mod ui;
 
 use neovim::{NeovimHandle, VisualSelection};
-use state::{ImeState, KeyRepeatState, KeyboardState, KeypressState, WaylandState};
+use state::{Animations, ImeState, KeyRepeatState, KeyboardState, KeypressState, WaylandState};
 use ui::{TextRenderer, UnifiedPopup};
 
 fn main() -> anyhow::Result<()> {
@@ -141,6 +141,7 @@ fn main() -> anyhow::Result<()> {
         repeat: KeyRepeatState::new(),
         ime: ImeState::new(),
         keypress: KeypressState::new(),
+        animations: Animations::new(),
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
         config: config.clone(),
@@ -255,11 +256,15 @@ fn main() -> anyhow::Result<()> {
             match handle.insert_source(
                 Timer::from_duration(std::time::Duration::from_millis(100)),
                 |_, _, state| {
+                    let now = std::time::Instant::now();
                     let mut changed = state.keypress.cleanup_inactive();
 
-                    // Toggle REC blink if recording and blink enabled
+                    // Advance all animations (currently: REC blink)
                     if state.config.behavior.recording_blink {
-                        changed |= state.keypress.update_rec_blink();
+                        changed |= state.animations.update_all(
+                            now,
+                            &state.keypress.recording,
+                        );
                     }
 
                     let needs_blink = state.config.behavior.recording_blink
@@ -314,6 +319,7 @@ pub struct State {
     pub(crate) repeat: KeyRepeatState,
     pub(crate) ime: ImeState,
     pub(crate) keypress: KeypressState,
+    pub(crate) animations: Animations,
     // Exit and toggle flags
     pub(crate) pending_exit: bool,
     pub(crate) toggle_flag: Arc<AtomicBool>,

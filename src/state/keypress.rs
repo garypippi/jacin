@@ -31,14 +31,7 @@ pub struct KeypressState {
     pub vim_mode: String,
     /// Currently recording macro register ("" when not recording)
     pub recording: String,
-    /// Whether the REC blink dot is currently visible
-    pub rec_blink_on: bool,
-    /// Timestamp of last blink toggle
-    last_rec_blink: Option<Instant>,
 }
-
-/// Duration of one blink half-cycle (on or off)
-pub const REC_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 impl KeypressState {
     /// Create a new keypress state
@@ -49,29 +42,6 @@ impl KeypressState {
             pending_type: PendingState::None,
             vim_mode: String::new(),
             recording: String::new(),
-            rec_blink_on: true,
-            last_rec_blink: None,
-        }
-    }
-
-    /// Update the REC blink state. Returns true if the blink toggled.
-    pub fn update_rec_blink(&mut self) -> bool {
-        if self.recording.is_empty() {
-            // Reset when not recording so dot is visible on next record start
-            if !self.rec_blink_on || self.last_rec_blink.is_some() {
-                self.rec_blink_on = true;
-                self.last_rec_blink = None;
-            }
-            return false;
-        }
-        let now = Instant::now();
-        let last = self.last_rec_blink.get_or_insert(now);
-        if now.duration_since(*last) >= REC_BLINK_INTERVAL {
-            self.rec_blink_on = !self.rec_blink_on;
-            self.last_rec_blink = Some(now);
-            true
-        } else {
-            false
         }
     }
 
@@ -122,7 +92,7 @@ impl KeypressState {
     }
 
     /// Clear all entries if no new entries have been added within KEYPRESS_DISPLAY_DURATION.
-    /// Skips clearing in command-line mode (display is managed by CmdlineUpdate).
+    /// Skips clearing in command-line mode (display is managed by CmdlineShow).
     /// Returns true if entries were cleared.
     pub fn cleanup_inactive(&mut self) -> bool {
         if self.vim_mode.starts_with('c') {
@@ -158,7 +128,7 @@ impl KeypressState {
         s
     }
 
-    /// Set entries directly from text (for CmdlineUpdate/CmdlineMessage)
+    /// Set entries directly from text (for CmdlineShow/CmdlineMessage)
     pub fn set_display_text(&mut self, text: String) {
         self.entries.clear();
         self.entries.push(KeypressEntry { text });
@@ -305,67 +275,4 @@ mod tests {
         assert_eq!(state.entries.len(), 1);
     }
 
-    #[test]
-    fn rec_blink_no_toggle_when_not_recording() {
-        let mut state = KeypressState::new();
-        assert!(state.rec_blink_on);
-        assert!(!state.update_rec_blink());
-        assert!(state.rec_blink_on);
-    }
-
-    #[test]
-    fn rec_blink_toggles_after_interval() {
-        let mut state = KeypressState::new();
-        state.recording = "q".to_string();
-
-        // First call initializes last_rec_blink, no toggle yet
-        assert!(!state.update_rec_blink());
-        assert!(state.rec_blink_on);
-
-        // Backdate to simulate elapsed time
-        state.last_rec_blink =
-            Some(Instant::now() - REC_BLINK_INTERVAL - Duration::from_millis(1));
-        assert!(state.update_rec_blink());
-        assert!(!state.rec_blink_on);
-    }
-
-    #[test]
-    fn rec_blink_resets_on_recording_stop() {
-        let mut state = KeypressState::new();
-        state.recording = "q".to_string();
-
-        // Initialize and force toggle off
-        state.update_rec_blink();
-        state.last_rec_blink =
-            Some(Instant::now() - REC_BLINK_INTERVAL - Duration::from_millis(1));
-        state.update_rec_blink();
-        assert!(!state.rec_blink_on);
-
-        // Stop recording — should reset to visible
-        state.recording.clear();
-        state.update_rec_blink();
-        assert!(state.rec_blink_on);
-        assert!(state.last_rec_blink.is_none());
-    }
-
-    #[test]
-    fn rec_blink_starts_visible_on_new_recording() {
-        let mut state = KeypressState::new();
-
-        // First recording: toggle off
-        state.recording = "q".to_string();
-        state.update_rec_blink();
-        state.last_rec_blink =
-            Some(Instant::now() - REC_BLINK_INTERVAL - Duration::from_millis(1));
-        state.update_rec_blink();
-        assert!(!state.rec_blink_on);
-
-        // Stop recording
-        state.recording.clear();
-        state.update_rec_blink();
-
-        // Start new recording — must begin visible
-        state.recording = "a".to_string();
-        assert!(state.rec_blink_on);
-    }
 }
