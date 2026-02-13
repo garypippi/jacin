@@ -190,7 +190,7 @@ impl UnifiedPopup {
             }
 
             // Draw separator below preedit if more sections follow
-            if layout.has_keypress || layout.has_candidates {
+            if layout.has_keypress || layout.has_candidates || layout.has_transient_message {
                 let line_height = self.renderer.line_height();
                 let sep_y = layout.preedit_y + line_height;
                 if let Some(rect) =
@@ -209,6 +209,8 @@ impl UnifiedPopup {
 
         if layout.has_candidates {
             self.render_candidate_section(&mut pixmap, content, layout);
+        } else if layout.has_transient_message {
+            self.render_transient_message(&mut pixmap, content, layout);
         }
 
         // Copy to SHM buffer
@@ -578,6 +580,21 @@ impl UnifiedPopup {
                 paint.set_color(scrollbar_thumb);
                 pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
+        }
+    }
+
+    /// Render a transient message in the candidate area
+    fn render_transient_message(
+        &mut self,
+        pixmap: &mut Pixmap,
+        content: &PopupContent,
+        layout: &Layout,
+    ) {
+        if let Some(ref msg) = content.transient_message {
+            let line_height = self.renderer.line_height();
+            let y_text = layout.candidates_y + line_height * 0.75;
+            self.renderer
+                .draw_text(pixmap, msg, PADDING, y_text, rgba(TEXT_COLOR));
         }
     }
 

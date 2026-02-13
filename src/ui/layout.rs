@@ -57,6 +57,7 @@ pub struct PopupContent {
     pub keypress_entries: Vec<String>,
     pub candidates: Vec<String>,
     pub selected: usize,
+    pub transient_message: Option<String>,
     pub visual_selection: Option<VisualSelection>,
     pub ime_enabled: bool,
     pub recording: String,
@@ -69,6 +70,7 @@ impl PopupContent {
             && self.preedit.is_empty()
             && self.keypress_entries.is_empty()
             && self.candidates.is_empty()
+            && self.transient_message.is_none()
     }
 }
 
@@ -109,6 +111,7 @@ pub(crate) struct Layout {
     pub has_preedit: bool,
     pub has_keypress: bool,
     pub has_candidates: bool,
+    pub has_transient_message: bool,
     pub preedit_y: f32,
     pub keypress_y: f32,
     pub candidates_y: f32,
@@ -185,6 +188,7 @@ pub(crate) fn calculate_layout(
     // Keypress row is always present when IME is enabled
     let has_keypress = content.ime_enabled;
     let has_candidates = !content.candidates.is_empty();
+    let has_transient_message = content.candidates.is_empty() && content.transient_message.is_some();
 
     let line_height = renderer.line_height();
     let mut y = PADDING;
@@ -239,13 +243,17 @@ pub(crate) fn calculate_layout(
         keypress_width += PADDING; // right padding
         max_width = max_width.max(keypress_width);
         y += line_height;
-        if has_candidates {
+        if has_candidates || has_transient_message {
             y += SECTION_SEPARATOR_HEIGHT;
         }
     }
 
-    // Candidates section
-    let candidates_y = if has_candidates { y } else { 0.0 };
+    // Candidates section (or transient message)
+    let candidates_y = if has_candidates || has_transient_message {
+        y
+    } else {
+        0.0
+    };
     let visible_count = if has_candidates {
         MAX_VISIBLE_CANDIDATES.min(content.candidates.len())
     } else {
@@ -267,6 +275,12 @@ pub(crate) fn calculate_layout(
         }
 
         y += visible_count as f32 * line_height;
+    } else if has_transient_message {
+        if let Some(ref msg) = content.transient_message {
+            let text_width = renderer.measure_text(msg);
+            max_width = max_width.max(text_width + PADDING * 2.0);
+        }
+        y += line_height;
     }
 
     y += PADDING;
@@ -282,6 +296,7 @@ pub(crate) fn calculate_layout(
         has_preedit,
         has_keypress,
         has_candidates,
+        has_transient_message,
         preedit_y,
         keypress_y,
         candidates_y,

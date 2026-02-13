@@ -2,6 +2,8 @@
 //!
 //! Explicit state machine for IME mode transitions, replacing scattered boolean flags.
 
+use std::time::{Duration, Instant};
+
 /// Main IME mode state machine
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ImeMode {
@@ -27,6 +29,9 @@ pub enum VimMode {
     Normal,
 }
 
+/// How long a transient message stays visible before auto-clearing
+pub const TRANSIENT_MESSAGE_DURATION: Duration = Duration::from_millis(2000);
+
 /// IME state including mode, preedit, and candidates
 pub struct ImeState {
     /// Current IME mode
@@ -41,6 +46,10 @@ pub struct ImeState {
     pub candidates: Vec<String>,
     /// Selected candidate index
     pub selected_candidate: usize,
+    /// Transient message shown in candidate area (e.g., command output)
+    pub transient_message: Option<String>,
+    /// When the transient message was set
+    transient_message_at: Option<Instant>,
 }
 
 impl ImeState {
@@ -53,7 +62,38 @@ impl ImeState {
             cursor_end: 0,
             candidates: Vec::new(),
             selected_candidate: 0,
+            transient_message: None,
+            transient_message_at: None,
         }
+    }
+
+    /// Set a transient message to display in the candidate area
+    pub fn set_transient_message(&mut self, text: String) {
+        self.transient_message = Some(text);
+        self.transient_message_at = Some(Instant::now());
+    }
+
+    /// Clear the transient message
+    pub fn clear_transient_message(&mut self) {
+        self.transient_message = None;
+        self.transient_message_at = None;
+    }
+
+    /// Check if the transient message has expired and clear it if so.
+    /// Returns true if the message was cleared.
+    pub fn expire_transient_message(&mut self) -> bool {
+        if let Some(at) = self.transient_message_at
+            && at.elapsed() >= TRANSIENT_MESSAGE_DURATION
+        {
+            self.clear_transient_message();
+            return true;
+        }
+        false
+    }
+
+    /// Whether a transient message is active (for timer scheduling)
+    pub fn has_transient_message(&self) -> bool {
+        self.transient_message.is_some()
     }
 
     /// Check if IME is enabled (or enabling)
@@ -87,6 +127,7 @@ impl ImeState {
     pub fn disable(&mut self) {
         self.mode = ImeMode::Disabled;
         self.clear_preedit();
+        self.clear_transient_message();
     }
 
     /// Update preedit
@@ -103,10 +144,13 @@ impl ImeState {
         self.cursor_end = 0;
     }
 
-    /// Update candidates
+    /// Update candidates (clears any transient message — candidates take priority)
     pub fn set_candidates(&mut self, candidates: Vec<String>, selected: usize) {
         self.candidates = candidates;
         self.selected_candidate = selected;
+        if !self.candidates.is_empty() {
+            self.clear_transient_message();
+        }
     }
 
     /// Clear candidates

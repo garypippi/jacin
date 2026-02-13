@@ -200,7 +200,7 @@ impl State {
         if !self.ime.is_fully_enabled() {
             return;
         }
-        self.keypress.set_display_text(text);
+        self.ime.set_transient_message(text);
         self.update_popup();
     }
 
@@ -267,6 +267,11 @@ impl State {
             },
             candidates: self.ime.candidates.clone(),
             selected: self.ime.selected_candidate,
+            transient_message: if self.ime.candidates.is_empty() {
+                self.ime.transient_message.clone()
+            } else {
+                None
+            },
             visual_selection: self.visual_display.clone(),
             ime_enabled: self.ime.is_enabled(),
             recording: self.keypress.recording.clone(),
