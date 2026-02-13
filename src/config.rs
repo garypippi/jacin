@@ -25,13 +25,25 @@ pub struct FontConfig {
     pub size: Option<f32>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Behavior {
     /// If true, IME starts in insert mode and returns to insert mode after commands.
     /// If false, IME starts in normal mode.
     /// Default: false.
     pub auto_startinsert: bool,
+    /// If true, the REC indicator dot blinks while recording a macro.
+    /// Default: true.
+    pub recording_blink: bool,
+}
+
+impl Default for Behavior {
+    fn default() -> Self {
+        Self {
+            auto_startinsert: false,
+            recording_blink: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +129,7 @@ mod tests {
         assert_eq!(config.keybinds.commit, "<C-CR>");
         assert_eq!(config.completion.adapter, "native");
         assert!(!config.behavior.auto_startinsert);
+        assert!(config.behavior.recording_blink);
         assert!(!config.clean);
         assert!(config.font.family.is_none());
         assert!(config.font.mono_family.is_none());
@@ -129,6 +142,7 @@ mod tests {
         assert_eq!(config.keybinds.commit, "<C-CR>");
         assert_eq!(config.completion.adapter, "native");
         assert!(!config.behavior.auto_startinsert);
+        assert!(config.behavior.recording_blink);
         assert!(config.font.family.is_none());
     }
 
@@ -170,7 +184,20 @@ mod tests {
         )
         .unwrap();
         assert!(config.behavior.auto_startinsert);
+        assert!(config.behavior.recording_blink); // default true even when not specified
         assert_eq!(config.keybinds.commit, "<C-CR>");
+    }
+
+    #[test]
+    fn recording_blink_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+            [behavior]
+            recording_blink = false
+            "#,
+        )
+        .unwrap();
+        assert!(!config.behavior.recording_blink);
     }
 
     #[test]

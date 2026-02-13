@@ -421,16 +421,18 @@ impl UnifiedPopup {
         if !content.recording.is_empty() {
             let rec_x = after_mode_x + MODE_GAP;
 
-            // Draw red filled circle
+            // Draw red filled circle (hidden during blink-off phase)
             let circle_cy = layout.keypress_y + line_height * 0.5;
             let circle_cx = rec_x + REC_CIRCLE_RADIUS;
-            draw_filled_circle(
-                pixmap,
-                circle_cx,
-                circle_cy,
-                REC_CIRCLE_RADIUS,
-                rgba(MODE_RECORDING_COLOR),
-            );
+            if content.rec_blink_on {
+                draw_filled_circle(
+                    pixmap,
+                    circle_cx,
+                    circle_cy,
+                    REC_CIRCLE_RADIUS,
+                    rgba(MODE_RECORDING_COLOR),
+                );
+            }
 
             // Draw @reg text using monospace font
             let rec_label = format_recording_label(&content.recording);

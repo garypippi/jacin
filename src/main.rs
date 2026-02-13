@@ -246,12 +246,25 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Insert on-demand keypress display timeout timer
-        if state.keypress.should_show() && state.keypress_timer_token.is_none() {
+        // Also drives REC blink when recording and blink is enabled
+        let needs_blink = state.config.behavior.recording_blink
+            && !state.keypress.recording.is_empty();
+        if (state.keypress.should_show() || needs_blink)
+            && state.keypress_timer_token.is_none()
+        {
             match handle.insert_source(
                 Timer::from_duration(std::time::Duration::from_millis(100)),
                 |_, _, state| {
-                    let changed = state.keypress.cleanup_inactive();
-                    if !state.keypress.should_show() {
+                    let mut changed = state.keypress.cleanup_inactive();
+
+                    // Toggle REC blink if recording and blink enabled
+                    if state.config.behavior.recording_blink {
+                        changed |= state.keypress.update_rec_blink();
+                    }
+
+                    let needs_blink = state.config.behavior.recording_blink
+                        && !state.keypress.recording.is_empty();
+                    if !state.keypress.should_show() && !needs_blink {
                         state.update_popup();
                         state.keypress_timer_token = None;
                         TimeoutAction::Drop

@@ -60,6 +60,7 @@ pub struct PopupContent {
     pub visual_selection: Option<VisualSelection>,
     pub ime_enabled: bool,
     pub recording: String,
+    pub rec_blink_on: bool,
 }
 
 impl PopupContent {
