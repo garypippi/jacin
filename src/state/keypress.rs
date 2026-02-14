@@ -31,6 +31,12 @@ pub struct KeypressState {
     pub vim_mode: String,
     /// Currently recording macro register ("" when not recording)
     pub recording: String,
+    /// Command-line cursor byte offset within display_text (None when not in cmdline)
+    cmdline_cursor_byte: Option<usize>,
+    /// Byte length of command-line prefix (firstc or prompt)
+    cmdline_prefix_len: usize,
+    /// Active command-line level for guard (None when not in cmdline)
+    cmdline_level: Option<u64>,
 }
 
 impl KeypressState {
@@ -42,6 +48,9 @@ impl KeypressState {
             pending_type: PendingState::None,
             vim_mode: String::new(),
             recording: String::new(),
+            cmdline_cursor_byte: None,
+            cmdline_prefix_len: 0,
+            cmdline_level: None,
         }
     }
 
@@ -63,6 +72,9 @@ impl KeypressState {
         self.entries.clear();
         self.last_added_at = None;
         self.pending_type = PendingState::None;
+        self.cmdline_cursor_byte = None;
+        self.cmdline_prefix_len = 0;
+        self.cmdline_level = None;
         // NOTE: recording is NOT cleared here — it's driven by Neovim snapshots,
         // not by keypress display lifecycle. Cleared explicitly on disable/exit.
     }
@@ -128,11 +140,49 @@ impl KeypressState {
         s
     }
 
-    /// Set entries directly from text (for CmdlineShow/CmdlineMessage)
-    pub fn set_display_text(&mut self, text: String) {
+    /// Set command-line text with cursor position
+    pub fn set_cmdline_text(
+        &mut self,
+        text: String,
+        cursor_byte: usize,
+        prefix_len: usize,
+        level: u64,
+    ) {
+        let clamped = cursor_byte.min(text.len());
         self.entries.clear();
         self.entries.push(KeypressEntry { text });
         self.last_added_at = Some(Instant::now());
+        self.cmdline_cursor_byte = Some(clamped);
+        self.cmdline_prefix_len = prefix_len;
+        self.cmdline_level = Some(level);
+    }
+
+    /// Update command-line cursor position. Returns true if updated.
+    pub fn update_cmdline_cursor(&mut self, pos: usize, level: u64) -> bool {
+        if self.cmdline_level != Some(level) {
+            return false;
+        }
+        let display_len = self
+            .entries
+            .first()
+            .map(|e| e.text.len())
+            .unwrap_or(0);
+        self.cmdline_cursor_byte = Some((self.cmdline_prefix_len + pos).min(display_len));
+        true
+    }
+
+    /// Clear cmdline state only if the level matches. Returns true if cleared.
+    pub fn clear_cmdline_if_level(&mut self, level: u64) -> bool {
+        if self.cmdline_level != Some(level) {
+            return false;
+        }
+        self.clear();
+        true
+    }
+
+    /// Get command-line cursor byte offset (within display_text)
+    pub fn cmdline_cursor_byte(&self) -> Option<usize> {
+        self.cmdline_cursor_byte
     }
 }
 
@@ -266,13 +316,78 @@ mod tests {
     }
 
     #[test]
-    fn set_display_text_replaces_entries() {
+    fn set_cmdline_text_stores_cursor_and_level() {
         let mut state = KeypressState::new();
-        state.push_key("a");
-        state.push_key("b");
-        state.set_display_text(":wq".to_string());
-        assert_eq!(state.display_text(), ":wq");
-        assert_eq!(state.entries.len(), 1);
+        state.set_cmdline_text(":hello".to_string(), 3, 1, 1);
+        assert_eq!(state.display_text(), ":hello");
+        assert_eq!(state.cmdline_cursor_byte(), Some(3));
+        assert_eq!(state.cmdline_level, Some(1));
+        assert_eq!(state.cmdline_prefix_len, 1);
+    }
+
+    #[test]
+    fn set_cmdline_text_clamps_cursor_to_text_len() {
+        let mut state = KeypressState::new();
+        state.set_cmdline_text(":ab".to_string(), 100, 1, 1);
+        assert_eq!(state.cmdline_cursor_byte(), Some(3)); // clamped to ":ab".len()
+    }
+
+    #[test]
+    fn update_cmdline_cursor_with_matching_level() {
+        let mut state = KeypressState::new();
+        // ":hello" — prefix ":" is 1 byte
+        state.set_cmdline_text(":hello".to_string(), 1, 1, 1);
+        assert_eq!(state.cmdline_cursor_byte(), Some(1));
+
+        // Move cursor to pos=3 within content → prefix_len(1) + 3 = 4
+        let updated = state.update_cmdline_cursor(3, 1);
+        assert!(updated);
+        assert_eq!(state.cmdline_cursor_byte(), Some(4));
+    }
+
+    #[test]
+    fn update_cmdline_cursor_ignores_level_mismatch() {
+        let mut state = KeypressState::new();
+        state.set_cmdline_text(":hello".to_string(), 1, 1, 1);
+
+        let updated = state.update_cmdline_cursor(3, 2); // wrong level
+        assert!(!updated);
+        assert_eq!(state.cmdline_cursor_byte(), Some(1)); // unchanged
+    }
+
+    #[test]
+    fn update_cmdline_cursor_clamps_to_display_len() {
+        let mut state = KeypressState::new();
+        state.set_cmdline_text(":ab".to_string(), 1, 1, 1);
+
+        let updated = state.update_cmdline_cursor(100, 1);
+        assert!(updated);
+        assert_eq!(state.cmdline_cursor_byte(), Some(3)); // clamped to ":ab".len()
+    }
+
+    #[test]
+    fn clear_resets_cmdline_fields() {
+        let mut state = KeypressState::new();
+        state.set_cmdline_text(":hello".to_string(), 3, 1, 1);
+
+        state.clear();
+        assert_eq!(state.cmdline_cursor_byte(), None);
+        assert_eq!(state.cmdline_prefix_len, 0);
+        assert_eq!(state.cmdline_level, None);
+    }
+
+    #[test]
+    fn cmdline_cursor_with_multibyte_prefix() {
+        let mut state = KeypressState::new();
+        // Prompt "辞書登録: " is 14 bytes in UTF-8 (4×3 + 1 + 1)
+        let prompt = "辞書登録: ";
+        assert_eq!(prompt.len(), 14);
+        let content = "test";
+        let display = format!("{}{}", prompt, content);
+        let prefix_len = prompt.len();
+        let pos = 2; // cursor at byte 2 within content
+        state.set_cmdline_text(display, prefix_len + pos, prefix_len, 1);
+        assert_eq!(state.cmdline_cursor_byte(), Some(16)); // 14 + 2
     }
 
 }

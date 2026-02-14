@@ -62,6 +62,7 @@ pub struct PopupContent {
     pub ime_enabled: bool,
     pub recording: String,
     pub rec_blink_on: bool,
+    pub cmdline_cursor_pos: Option<usize>,
 }
 
 impl PopupContent {

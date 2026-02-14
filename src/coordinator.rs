@@ -81,15 +81,13 @@ impl State {
             }
             FromNeovim::CmdlineShow {
                 content,
-                pos: _,
+                pos,
                 firstc,
                 prompt,
-                level: _,
-            } => self.on_cmdline_show(content, firstc, prompt),
-            FromNeovim::CmdlinePos { .. } => {
-                // Cursor position update — future use (command-line cursor display)
-            }
-            FromNeovim::CmdlineHide { .. } => self.on_cmdline_hide(),
+                level,
+            } => self.on_cmdline_show(content, pos, firstc, prompt, level),
+            FromNeovim::CmdlinePos { pos, level } => self.on_cmdline_pos(pos, level),
+            FromNeovim::CmdlineHide { level } => self.on_cmdline_hide(level),
             FromNeovim::CmdlineCancelled { cmdtype, executed } => {
                 self.on_cmdline_cancelled(cmdtype, executed)
             }
@@ -186,34 +184,55 @@ impl State {
         }
     }
 
-    fn on_cmdline_show(&mut self, content: String, firstc: String, prompt: String) {
+    fn on_cmdline_show(
+        &mut self,
+        content: String,
+        pos: usize,
+        firstc: String,
+        prompt: String,
+        level: u64,
+    ) {
         log::debug!(
-            "[NVIM] CmdlineShow: firstc={:?}, prompt={:?}, content={:?}",
+            "[NVIM] CmdlineShow: firstc={:?}, prompt={:?}, content={:?}, pos={}, level={}",
             firstc,
             prompt,
-            content
+            content,
+            pos,
+            level
         );
         if !self.ime.is_fully_enabled() {
             return;
         }
         // Build display text: prompt + content for @-mode, firstc + content for :/?
-        let display_text = if !prompt.is_empty() {
-            format!("{}{}", prompt, content)
-        } else if !firstc.is_empty() {
-            format!("{}{}", firstc, content)
+        let prefix = if !prompt.is_empty() {
+            &prompt
         } else {
-            content
+            &firstc
         };
-        self.keypress.set_display_text(display_text);
+        let prefix_len = prefix.len();
+        let display_text = format!("{}{}", prefix, content);
+        let cursor_byte = prefix_len + pos;
+        self.keypress
+            .set_cmdline_text(display_text, cursor_byte, prefix_len, level);
         self.keypress.set_vim_mode("c");
         self.update_popup();
     }
 
-    fn on_cmdline_hide(&mut self) {
-        log::debug!("[NVIM] CmdlineHide");
-        // Clear display only — state transition handled by CmdlineLeave autocmd
-        self.keypress.clear();
-        self.update_popup();
+    fn on_cmdline_pos(&mut self, pos: usize, level: u64) {
+        if !self.ime.is_fully_enabled() {
+            return;
+        }
+        if self.keypress.update_cmdline_cursor(pos, level) {
+            self.update_popup();
+        }
+    }
+
+    fn on_cmdline_hide(&mut self, level: u64) {
+        log::debug!("[NVIM] CmdlineHide (level={})", level);
+        // Only clear if the level matches the active cmdline
+        if self.keypress.clear_cmdline_if_level(level) {
+            self.update_popup();
+        }
     }
 
     fn on_cmdline_cancelled(&mut self, cmdtype: String, executed: bool) {
@@ -308,6 +327,7 @@ impl State {
             ime_enabled: self.ime.is_enabled(),
             recording: self.keypress.recording.clone(),
             rec_blink_on: self.animations.rec_blink.on,
+            cmdline_cursor_pos: self.keypress.cmdline_cursor_byte(),
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();
@@ -397,25 +417,32 @@ mod replay_tests {
                 }
                 FromNeovim::CmdlineShow {
                     content,
+                    pos,
                     firstc,
                     prompt,
-                    ..
+                    level,
                 } => {
                     if self.ime.is_fully_enabled() {
-                        let display_text = if !prompt.is_empty() {
-                            format!("{}{}", prompt, content)
-                        } else if !firstc.is_empty() {
-                            format!("{}{}", firstc, content)
+                        let prefix = if !prompt.is_empty() {
+                            &prompt
                         } else {
-                            content
+                            &firstc
                         };
-                        self.keypress.set_display_text(display_text);
+                        let prefix_len = prefix.len();
+                        let display_text = format!("{}{}", prefix, content);
+                        let cursor_byte = prefix_len + pos;
+                        self.keypress
+                            .set_cmdline_text(display_text, cursor_byte, prefix_len, level);
                         self.keypress.set_vim_mode("c");
                     }
                 }
-                FromNeovim::CmdlinePos { .. } => {}
-                FromNeovim::CmdlineHide { .. } => {
-                    self.keypress.clear();
+                FromNeovim::CmdlinePos { pos, level } => {
+                    if self.ime.is_fully_enabled() {
+                        self.keypress.update_cmdline_cursor(pos, level);
+                    }
+                }
+                FromNeovim::CmdlineHide { level } => {
+                    self.keypress.clear_cmdline_if_level(level);
                 }
                 FromNeovim::CmdlineCancelled { cmdtype, .. } => {
                     self.keypress.clear();
@@ -424,7 +451,7 @@ mod replay_tests {
                 }
                 FromNeovim::CmdlineMessage { text, .. } => {
                     if self.ime.is_fully_enabled() {
-                        self.keypress.set_display_text(text);
+                        self.ime.set_transient_message(text);
                     }
                 }
                 FromNeovim::AutoCommit(text) => {

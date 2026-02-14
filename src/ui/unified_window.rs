@@ -462,19 +462,76 @@ impl UnifiedPopup {
         // Draw keypress entries with gap between each (hidden when candidates are shown,
         // matching calculate_layout which excludes keypress text width)
         if !content.keypress_entries.is_empty() && !layout.has_candidates {
-            let mut text_x = layout.keypress_icon_width;
-            for (i, entry) in content.keypress_entries.iter().enumerate() {
-                if i > 0 {
-                    text_x += KEYPRESS_ENTRY_GAP;
+            if let Some(cursor_byte) = content.cmdline_cursor_pos {
+                // Command-line mode: render single entry char-by-char with line cursor
+                let text = &content.keypress_entries[0];
+                let text_left = layout.keypress_icon_width;
+                let text_color = rgba(KEYPRESS_TEXT_COLOR);
+
+                // Build byte-to-char mapping
+                let chars: Vec<char> = text.chars().collect();
+                let mut byte_to_char: Vec<usize> = Vec::with_capacity(text.len() + 1);
+                for (i, c) in chars.iter().enumerate() {
+                    for _ in 0..c.len_utf8() {
+                        byte_to_char.push(i);
+                    }
                 }
-                self.mono_renderer.draw_text(
-                    pixmap,
-                    entry,
-                    text_x,
-                    y_baseline,
-                    rgba(KEYPRESS_TEXT_COLOR),
-                );
-                text_x += self.mono_renderer.measure_text(entry);
+                byte_to_char.push(chars.len());
+
+                let cursor_char = byte_to_char
+                    .get(cursor_byte)
+                    .copied()
+                    .unwrap_or(chars.len());
+
+                // Calculate character x positions
+                let mut char_x_positions: Vec<f32> = Vec::with_capacity(chars.len() + 1);
+                let mut x = text_left;
+                for c in &chars {
+                    char_x_positions.push(x);
+                    x += self.mono_renderer.measure_text(&c.to_string());
+                }
+                char_x_positions.push(x);
+
+                // Draw characters
+                for (i, c) in chars.iter().enumerate() {
+                    let char_x = char_x_positions[i];
+                    self.mono_renderer.draw_text(
+                        pixmap,
+                        &c.to_string(),
+                        char_x,
+                        y_baseline,
+                        text_color,
+                    );
+                }
+
+                // Draw line cursor (2px vertical line)
+                let cursor_x = char_x_positions
+                    .get(cursor_char)
+                    .copied()
+                    .unwrap_or(text_left);
+                if let Some(rect) =
+                    Rect::from_xywh(cursor_x, layout.keypress_y, 2.0, line_height)
+                {
+                    let mut paint = Paint::default();
+                    paint.set_color(text_color);
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            } else {
+                // Normal keypress display: render entries with gaps
+                let mut text_x = layout.keypress_icon_width;
+                for (i, entry) in content.keypress_entries.iter().enumerate() {
+                    if i > 0 {
+                        text_x += KEYPRESS_ENTRY_GAP;
+                    }
+                    self.mono_renderer.draw_text(
+                        pixmap,
+                        entry,
+                        text_x,
+                        y_baseline,
+                        rgba(KEYPRESS_TEXT_COLOR),
+                    );
+                    text_x += self.mono_renderer.measure_text(entry);
+                }
             }
         }
 
