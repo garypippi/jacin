@@ -79,7 +79,17 @@ impl State {
             FromNeovim::KeyProcessed => {
                 // Acknowledgment only — unblocks wait_for_nvim_response
             }
-            FromNeovim::CmdlineUpdate { text, cmdtype } => self.on_cmdline_update(text, cmdtype),
+            FromNeovim::CmdlineShow {
+                content,
+                pos: _,
+                firstc,
+                prompt,
+                level: _,
+            } => self.on_cmdline_show(content, firstc, prompt),
+            FromNeovim::CmdlinePos { .. } => {
+                // Cursor position update — future use (command-line cursor display)
+            }
+            FromNeovim::CmdlineHide { .. } => self.on_cmdline_hide(),
             FromNeovim::CmdlineCancelled { cmdtype, executed } => {
                 self.on_cmdline_cancelled(cmdtype, executed)
             }
@@ -176,18 +186,33 @@ impl State {
         }
     }
 
-    fn on_cmdline_update(&mut self, text: String, cmdtype: String) {
-        log::debug!("[NVIM] CmdlineUpdate ({}): {:?}", cmdtype, text);
+    fn on_cmdline_show(&mut self, content: String, firstc: String, prompt: String) {
+        log::debug!(
+            "[NVIM] CmdlineShow: firstc={:?}, prompt={:?}, content={:?}",
+            firstc,
+            prompt,
+            content
+        );
         if !self.ime.is_fully_enabled() {
             return;
         }
-        let display_text = if cmdtype == "@" && !text.starts_with('@') {
-            format!("@{}", text)
+        // Build display text: prompt + content for @-mode, firstc + content for :/?
+        let display_text = if !prompt.is_empty() {
+            format!("{}{}", prompt, content)
+        } else if !firstc.is_empty() {
+            format!("{}{}", firstc, content)
         } else {
-            text
+            content
         };
         self.keypress.set_display_text(display_text);
         self.keypress.set_vim_mode("c");
+        self.update_popup();
+    }
+
+    fn on_cmdline_hide(&mut self) {
+        log::debug!("[NVIM] CmdlineHide");
+        // Clear display only — state transition handled by CmdlineLeave autocmd
+        self.keypress.clear();
         self.update_popup();
     }
 
@@ -370,16 +395,27 @@ mod replay_tests {
                         self.visual_display = selection;
                     }
                 }
-                FromNeovim::CmdlineUpdate { text, cmdtype } => {
+                FromNeovim::CmdlineShow {
+                    content,
+                    firstc,
+                    prompt,
+                    ..
+                } => {
                     if self.ime.is_fully_enabled() {
-                        let display_text = if cmdtype == "@" && !text.starts_with('@') {
-                            format!("@{}", text)
+                        let display_text = if !prompt.is_empty() {
+                            format!("{}{}", prompt, content)
+                        } else if !firstc.is_empty() {
+                            format!("{}{}", firstc, content)
                         } else {
-                            text
+                            content
                         };
                         self.keypress.set_display_text(display_text);
                         self.keypress.set_vim_mode("c");
                     }
+                }
+                FromNeovim::CmdlinePos { .. } => {}
+                FromNeovim::CmdlineHide { .. } => {
+                    self.keypress.clear();
                 }
                 FromNeovim::CmdlineCancelled { cmdtype, .. } => {
                     self.keypress.clear();

@@ -43,40 +43,9 @@ vim.api.nvim_create_autocmd({'TextChangedI', 'CursorMovedI'}, {
     end,
 })
 
--- Command-line display updates (`:` normal commands, `@` input() prompts)
-vim.api.nvim_create_autocmd('CmdlineChanged', {
-    callback = function()
-        local cmdtype = vim.fn.getcmdtype()
-        if cmdtype == ':' then
-            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
-                type = 'update',
-                cmdtype = ':',
-                text = ':' .. vim.fn.getcmdline()
-            })
-        elseif cmdtype == '@' then
-            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
-                type = 'update',
-                cmdtype = '@',
-                text = vim.fn.getcmdline()
-            })
-        end
-    end,
-})
-
--- Detect entry into input() prompts (e.g., skkeleton dictionary registration).
--- Sends an initial update so the Rust side sets PendingState::CommandLine
--- before any key arrives, preventing c-mode recovery from escaping the prompt.
-vim.api.nvim_create_autocmd('CmdlineEnter', {
-    callback = function()
-        if vim.fn.getcmdtype() == '@' then
-            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
-                type = 'update',
-                cmdtype = '@',
-                text = vim.fn.getcmdline()
-            })
-        end
-    end,
-})
+-- CmdlineChanged and CmdlineEnter are replaced by ext_cmdline (nvim_ui_attach).
+-- cmdline_show handles both display updates and entry detection, including
+-- the prompt text for @-mode (input() prompts).
 
 -- Post-command handling
 vim.api.nvim_create_autocmd('CmdlineLeave', {
@@ -85,6 +54,13 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
         if cmdtype == '@' then
             -- input() prompt ended (confirmed or cancelled)
             vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'cancelled', cmdtype = '@' })
+            return
+        end
+        if cmdtype == '/' or cmdtype == '?' then
+            -- Search command-line ended (ext_cmdline sets PENDING=CommandLine,
+            -- this clears it regardless of execute/cancel)
+            local event = vim.v.event.abort and 'cancelled' or 'executed'
+            vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = event, cmdtype = cmdtype })
             return
         end
         if cmdtype ~= ':' then return end

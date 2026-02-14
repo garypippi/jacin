@@ -2,7 +2,8 @@
   "description": "Enter command mode, type :set, then cancel",
   "messages": [
     { "Preedit": { "text": "hello", "cursor_begin": 5, "cursor_end": 5, "mode": "i", "recording": "" } },
-    { "CmdlineUpdate": { "text": ":set", "cmdtype": ":" } },
+    { "CmdlineShow": { "content": "set", "pos": 3, "firstc": ":", "prompt": "", "level": 1 } },
+    { "CmdlineHide": { "level": 1 } },
     { "CmdlineCancelled": { "cmdtype": ":", "executed": false } }
   ],
   "expect": {

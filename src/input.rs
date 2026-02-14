@@ -93,7 +93,7 @@ impl State {
             // Check state after Neovim response
             let after = pending_state().load();
 
-            // Command-line mode: display updates come via CmdlineUpdate messages
+            // Command-line mode: display updates come via ext_cmdline (cmdline_show)
             if after == PendingState::CommandLine {
                 return;
             }

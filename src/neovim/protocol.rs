@@ -115,8 +115,18 @@ pub enum FromNeovim {
     VisualRange(Option<VisualSelection>),
     /// Key was processed (acknowledgment for paths that send no data)
     KeyProcessed,
-    /// Command-line text update (display in keypress area)
-    CmdlineUpdate { text: String, cmdtype: String },
+    /// Command-line shown (from ext_cmdline redraw event)
+    CmdlineShow {
+        content: String,
+        pos: usize,
+        firstc: String,
+        prompt: String,
+        level: u64,
+    },
+    /// Command-line cursor position update (from ext_cmdline redraw event)
+    CmdlinePos { pos: usize, level: u64 },
+    /// Command-line hidden (from ext_cmdline redraw event)
+    CmdlineHide { level: u64 },
     /// Command-line left (executed or cancelled)
     CmdlineCancelled { cmdtype: String, executed: bool },
     /// Text auto-committed due to line addition (context break)
@@ -458,10 +468,15 @@ mod tests {
             FromNeovim::KeyProcessed,
             FromNeovim::PassthroughKey,
             FromNeovim::NvimExited,
-            FromNeovim::CmdlineUpdate {
-                text: ":s/foo/bar/g".into(),
-                cmdtype: ":".into(),
+            FromNeovim::CmdlineShow {
+                content: "s/foo/bar/g".into(),
+                pos: 11,
+                firstc: ":".into(),
+                prompt: String::new(),
+                level: 1,
             },
+            FromNeovim::CmdlinePos { pos: 5, level: 1 },
+            FromNeovim::CmdlineHide { level: 1 },
             FromNeovim::CmdlineCancelled {
                 cmdtype: ":".into(),
                 executed: false,

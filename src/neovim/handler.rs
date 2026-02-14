@@ -11,7 +11,7 @@ use crossbeam_channel::{Receiver, Sender};
 use tokio::runtime::Runtime;
 
 use nvim_rs::create::tokio::new_child_cmd;
-use nvim_rs::{Handler, Neovim};
+use nvim_rs::{Handler, Neovim, Value};
 use tokio::process::Command;
 
 use super::protocol::{
@@ -157,21 +157,28 @@ impl Handler for NvimHandler {
 
             match get_str("type").as_deref() {
                 Some("update") => {
+                    // Fallback path: only fires when nvim_ui_attach failed and
+                    // CmdlineChanged/CmdlineEnter autocmds are registered.
+                    // Convert to CmdlineShow for uniform downstream handling.
                     if let Some(text) = get_str("text") {
-                        let cmdtype = get_str("cmdtype").unwrap_or_else(|| {
-                            if text.starts_with(':') {
-                                ":".to_string()
-                            } else {
-                                "@".to_string()
-                            }
-                        });
-                        // Set CommandLine pending from the notification side so that
-                        // plugin-triggered command-line mode (e.g., input() from
-                        // skkeleton dictionary registration) also suppresses the
-                        // c-mode recovery in handle_snapshot_response.
+                        let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
+                        let (firstc, content) = if cmdtype == ":" && text.starts_with(':') {
+                            (":".to_string(), text[1..].to_string())
+                        } else {
+                            (cmdtype.clone(), text)
+                        };
                         PENDING.store(PendingState::CommandLine);
-                        log::debug!("[NVIM] Cmdline update ({}): {:?}", cmdtype, text);
-                        send_msg(&self.tx, FromNeovim::CmdlineUpdate { text, cmdtype });
+                        log::debug!("[NVIM] Cmdline update fallback ({}): {:?}", cmdtype, content);
+                        send_msg(
+                            &self.tx,
+                            FromNeovim::CmdlineShow {
+                                content,
+                                pos: 0,
+                                firstc,
+                                prompt: String::new(),
+                                level: 1,
+                            },
+                        );
                     }
                 }
                 Some("cancelled" | "executed") => {
@@ -196,7 +203,118 @@ impl Handler for NvimHandler {
                     log::warn!("[NVIM] Unknown cmdline type: {:?}", other);
                 }
             }
+        } else if name == "redraw" {
+            self.handle_redraw(&args);
         }
+    }
+}
+
+impl NvimHandler {
+    /// Parse and dispatch redraw notification events (ext_cmdline).
+    fn handle_redraw(&self, args: &[Value]) {
+        for event_group in args {
+            let Some(arr) = event_group.as_array() else {
+                continue;
+            };
+            let Some(event_name) = arr.first().and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // Each event_group: ["event_name", params_call1, params_call2, ...]
+            for params in &arr[1..] {
+                match event_name {
+                    "cmdline_show" => self.handle_cmdline_show(params),
+                    "cmdline_pos" => self.handle_cmdline_pos(params),
+                    "cmdline_hide" => self.handle_cmdline_hide(params),
+                    _ => {
+                        log::trace!("[NVIM] Ignoring redraw event: {}", event_name);
+                    }
+                }
+            }
+        }
+    }
+
+    /// cmdline_show: [content, pos, firstc, prompt, indent, level]
+    /// content: [[attr_id, text], ...]
+    fn handle_cmdline_show(&self, params: &Value) {
+        let Some(arr) = params.as_array() else {
+            log::debug!("[NVIM] cmdline_show: expected array params");
+            return;
+        };
+        if arr.len() < 6 {
+            log::debug!("[NVIM] cmdline_show: expected 6 params, got {}", arr.len());
+            return;
+        }
+        // Parse content: array of [attr_id, text] chunks
+        let content = if let Some(chunks) = arr[0].as_array() {
+            chunks
+                .iter()
+                .filter_map(|chunk| {
+                    chunk
+                        .as_array()
+                        .and_then(|c| c.get(1))
+                        .and_then(|v| v.as_str())
+                })
+                .collect::<Vec<&str>>()
+                .join("")
+        } else {
+            String::new()
+        };
+        let pos = arr[1].as_u64().unwrap_or(0) as usize;
+        let firstc = arr[2].as_str().unwrap_or("").to_string();
+        let prompt = arr[3].as_str().unwrap_or("").to_string();
+        // arr[4] = indent (unused)
+        let level = arr[5].as_u64().unwrap_or(1);
+
+        // Set CommandLine pending from the redraw notification side so that
+        // plugin-triggered command-line mode (e.g., input() from
+        // skkeleton dictionary registration) also suppresses the
+        // c-mode recovery in handle_snapshot_response.
+        PENDING.store(PendingState::CommandLine);
+        log::debug!(
+            "[NVIM] cmdline_show: firstc={:?}, prompt={:?}, content={:?}, pos={}, level={}",
+            firstc,
+            prompt,
+            content,
+            pos,
+            level
+        );
+        send_msg(
+            &self.tx,
+            FromNeovim::CmdlineShow {
+                content,
+                pos,
+                firstc,
+                prompt,
+                level,
+            },
+        );
+    }
+
+    /// cmdline_pos: [pos, level]
+    fn handle_cmdline_pos(&self, params: &Value) {
+        let Some(arr) = params.as_array() else {
+            log::debug!("[NVIM] cmdline_pos: expected array params");
+            return;
+        };
+        if arr.len() < 2 {
+            log::debug!("[NVIM] cmdline_pos: expected 2 params, got {}", arr.len());
+            return;
+        }
+        let pos = arr[0].as_u64().unwrap_or(0) as usize;
+        let level = arr[1].as_u64().unwrap_or(1);
+        log::trace!("[NVIM] cmdline_pos: pos={}, level={}", pos, level);
+        send_msg(&self.tx, FromNeovim::CmdlinePos { pos, level });
+    }
+
+    /// cmdline_hide: [level]
+    fn handle_cmdline_hide(&self, params: &Value) {
+        let Some(arr) = params.as_array() else {
+            log::debug!("[NVIM] cmdline_hide: expected array params");
+            return;
+        };
+        let level = arr.first().and_then(|v| v.as_u64()).unwrap_or(1);
+        log::debug!("[NVIM] cmdline_hide: level={}", level);
+        send_msg(&self.tx, FromNeovim::CmdlineHide { level });
     }
 }
 
@@ -350,6 +468,67 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     };
     nvim.exec_lua(completion_lua, vec![]).await?;
 
+    // Attach as UI client to receive ext_cmdline events (cmdline_show, etc.)
+    // This works in --embed --headless mode (unlike vim.ui_attach Lua API).
+    let ui_attached = match nvim
+        .call(
+            "nvim_ui_attach",
+            vec![
+                Value::from(80i64),
+                Value::from(24i64),
+                Value::Map(vec![(Value::from("ext_cmdline"), Value::from(true))]),
+            ],
+        )
+        .await
+    {
+        Ok(_) => {
+            log::info!("[NVIM] nvim_ui_attach succeeded with ext_cmdline");
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "[NVIM] nvim_ui_attach failed: {} (falling back to autocmd)",
+                e
+            );
+            false
+        }
+    };
+
+    // If nvim_ui_attach failed, register CmdlineChanged/CmdlineEnter autocmds
+    // as fallback so command-line display still works (without prompt text).
+    if !ui_attached {
+        nvim.exec_lua(
+            r#"
+            vim.api.nvim_create_autocmd('CmdlineChanged', {
+                callback = function()
+                    local cmdtype = vim.fn.getcmdtype()
+                    if cmdtype == ':' then
+                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
+                            type = 'update', cmdtype = ':', text = ':' .. vim.fn.getcmdline()
+                        })
+                    elseif cmdtype == '@' then
+                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
+                            type = 'update', cmdtype = '@', text = vim.fn.getcmdline()
+                        })
+                    end
+                end,
+            })
+            vim.api.nvim_create_autocmd('CmdlineEnter', {
+                callback = function()
+                    if vim.fn.getcmdtype() == '@' then
+                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
+                            type = 'update', cmdtype = '@', text = vim.fn.getcmdline()
+                        })
+                    end
+                end,
+            })
+            "#,
+            vec![],
+        )
+        .await?;
+        log::info!("[NVIM] Registered fallback CmdlineChanged/CmdlineEnter autocmds");
+    }
+
     // Start in insert mode if configured
     if config.behavior.auto_startinsert {
         nvim.command("startinsert").await?;
@@ -417,17 +596,14 @@ async fn handle_key(
         return Ok(());
     }
 
-    // ":" in normal mode enters command-line mode.
-    if key == ":" && last_mode.as_str() == "n" {
+    // ":", "/", "?" in normal mode enter command-line mode.
+    // Display update comes via cmdline_show (ext_cmdline).
+    // Must set PENDING synchronously to prevent handle_snapshot_response
+    // from escaping command-line mode before cmdline_show arrives.
+    if matches!(key, ":" | "/" | "?") && last_mode.as_str() == "n" {
         PENDING.store(PendingState::CommandLine);
-        log::debug!("[NVIM] Entered command-line mode");
-        send_msg(
-            tx,
-            FromNeovim::CmdlineUpdate {
-                text: ":".to_string(),
-                cmdtype: ":".to_string(),
-            },
-        );
+        log::debug!("[NVIM] Entered command-line mode ({})", key);
+        send_msg(tx, FromNeovim::KeyProcessed);
         return Ok(());
     }
 
