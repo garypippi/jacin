@@ -809,8 +809,9 @@ async fn run_neovim(
                 Ok(Err(e)) => log::error!("[NVIM] I/O loop error: {}", e),
                 Err(e) => log::error!("[NVIM] I/O task panicked: {}", e),
             }
-            exited.store(true, Ordering::SeqCst);
-            send_msg(&tx, FromNeovim::NvimExited);
+            if !exited.swap(true, Ordering::SeqCst) {
+                send_msg(&tx, FromNeovim::NvimExited);
+            }
         });
     }
 
@@ -838,6 +839,9 @@ async fn run_neovim(
                 log::info!("[NVIM] Shutting down...");
                 if !exited.load(Ordering::SeqCst) {
                     let _ = nvim.command("qa!").await;
+                }
+                if !exited.swap(true, Ordering::SeqCst) {
+                    send_msg(&tx, FromNeovim::NvimExited);
                 }
                 break;
             }

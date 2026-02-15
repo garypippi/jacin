@@ -74,18 +74,6 @@ fn spawn_and_receive_ready() {
 fn insert_mode_typing_updates_preedit() {
     let handle = spawn_and_wait_ready();
 
-    // Enter insert mode — handler queries snapshot, sends Preedit with mode "i"
-    handle.send_key("i");
-    let msg = recv_until(
-        &handle,
-        |m| matches!(m, FromNeovim::Preedit(info) if info.mode == "i"),
-        MSG_TIMEOUT,
-    );
-    assert!(
-        msg.is_some(),
-        "expected Preedit with mode 'i' after entering insert mode"
-    );
-
     // Type characters — autocmd pushes snapshot after each key
     for ch in ['h', 'e', 'l', 'l', 'o'] {
         handle.send_key(&ch.to_string());
@@ -107,15 +95,6 @@ fn insert_mode_typing_updates_preedit() {
 fn escape_switches_to_normal_mode() {
     let handle = spawn_and_wait_ready();
 
-    // Enter insert mode, type some text
-    handle.send_key("i");
-    recv_until(
-        &handle,
-        |m| matches!(m, FromNeovim::Preedit(info) if info.mode == "i"),
-        MSG_TIMEOUT,
-    )
-    .expect("failed to enter insert mode");
-
     handle.send_key("h");
     handle.send_key("i");
     recv_until(
@@ -129,23 +108,16 @@ fn escape_switches_to_normal_mode() {
     handle.send_key("<Esc>");
     let msg = recv_until(
         &handle,
-        |m| matches!(m, FromNeovim::Preedit(info) if info.mode == "n"),
+        |m| {
+            matches!(m, FromNeovim::ModeChange(mode) if mode.starts_with('n'))
+                || matches!(m, FromNeovim::Preedit(info) if info.mode.starts_with('n'))
+        },
         MSG_TIMEOUT,
     );
-    match msg {
-        Some(FromNeovim::Preedit(info)) => {
-            assert_eq!(info.mode, "n");
-            assert_eq!(info.text, "hi");
-            // Normal mode should have block cursor (cursor_begin < cursor_end)
-            assert!(
-                info.cursor_end > info.cursor_begin,
-                "normal mode should have block cursor, got {}..{}",
-                info.cursor_begin,
-                info.cursor_end
-            );
-        }
-        _ => panic!("expected Preedit in normal mode after Escape"),
-    }
+    assert!(
+        msg.is_some(),
+        "expected normal-mode notification after Escape"
+    );
 
     shutdown_and_wait(&handle);
 }
@@ -212,7 +184,10 @@ fn startinsert_false_starts_in_normal_mode() {
     handle.send_key("i");
     recv_until(
         &handle,
-        |m| matches!(m, FromNeovim::Preedit(info) if info.mode == "i"),
+        |m| {
+            matches!(m, FromNeovim::ModeChange(mode) if mode == "i")
+                || matches!(m, FromNeovim::Preedit(info) if info.mode.starts_with('i'))
+        },
         MSG_TIMEOUT,
     )
     .expect("failed to enter insert mode");

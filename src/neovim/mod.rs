@@ -53,7 +53,11 @@ impl NeovimHandle {
 
     /// Shutdown Neovim (non-blocking: best-effort if channel full)
     pub fn shutdown(&self) {
-        let _ = self.sender.try_send(ToNeovim::Shutdown);
+        // Avoid dropping shutdown silently under backpressure, but also avoid
+        // blocking indefinitely if receiver thread is stalled.
+        let _ = self
+            .sender
+            .send_timeout(ToNeovim::Shutdown, Duration::from_millis(200));
     }
 
     /// Get the receiver for use with calloop event source
