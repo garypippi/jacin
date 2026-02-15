@@ -67,23 +67,14 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
         if vim.v.event.abort then
             vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'cancelled', cmdtype = ':' })
         else
-            -- Snapshot last message before command executes
-            local old_msg = vim.fn.execute('1messages')
+            -- Command output messages are captured via ext_messages (msg_show redraw event)
             vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'executed', cmdtype = ':' })
-            vim.schedule(function()
-                -- Check if command produced a new message
-                local new_msg = vim.fn.execute('1messages')
-                if new_msg ~= old_msg and new_msg ~= '' then
-                    local text = vim.trim(new_msg)
-                    if text ~= '' then
-                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'message', cmdtype = ':', text = text })
-                    end
-                end
-                if vim.g.ime_auto_startinsert then
+            if vim.g.ime_auto_startinsert then
+                vim.schedule(function()
                     vim.cmd('startinsert')
                     vim.rpcnotify(vim.g.ime_channel, 'ime_snapshot', collect_snapshot())
-                end
-            end)
+                end)
+            end
         end
     end,
 })

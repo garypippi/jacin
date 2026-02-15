@@ -251,7 +251,11 @@ impl State {
         if !self.ime.is_fully_enabled() {
             return;
         }
-        self.ime.set_transient_message(text);
+        if text.is_empty() {
+            self.ime.clear_transient_message();
+        } else {
+            self.ime.set_transient_message(text);
+        }
         self.update_popup();
     }
 

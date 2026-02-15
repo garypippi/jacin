@@ -169,13 +169,6 @@ impl Handler for NvimHandler {
                         FromNeovim::CmdlineCancelled { cmdtype, executed },
                     );
                 }
-                Some("message") => {
-                    if let Some(text) = get_str("text") {
-                        let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
-                        log::debug!("[NVIM] Cmdline message ({}): {:?}", cmdtype, text);
-                        send_msg(&self.tx, FromNeovim::CmdlineMessage { text, cmdtype });
-                    }
-                }
                 other => {
                     log::warn!("[NVIM] Unknown cmdline type: {:?}", other);
                 }
@@ -205,6 +198,8 @@ impl NvimHandler {
                     "popupmenu_show" => self.handle_popupmenu_show(params),
                     "popupmenu_select" => self.handle_popupmenu_select(params),
                     "popupmenu_hide" => self.handle_popupmenu_hide(),
+                    "msg_show" => self.handle_msg_show(params),
+                    "msg_clear" => self.handle_msg_clear(),
                     _ => {
                         log::trace!("[NVIM] Ignoring redraw event: {}", event_name);
                     }
@@ -375,6 +370,80 @@ impl NvimHandler {
         log::debug!("[NVIM] popupmenu_hide");
         self.last_popupmenu_items.lock().unwrap().clear();
         send_msg(&self.tx, FromNeovim::Candidates(CandidateInfo::empty()));
+    }
+
+    /// Blocklist of msg_show kinds to ignore.
+    const MSG_KIND_BLOCKLIST: &[&str] = &[
+        "return_prompt",  // Press ENTER prompt
+        "search_count",   // [N/M] search count
+        "quickfix",       // quickfix navigation
+        "more_prompt",    // -- More -- prompt
+    ];
+
+    /// msg_show: [kind, content, replace_last]
+    /// content: [[attr_id, text], ...]
+    fn handle_msg_show(&self, params: &Value) {
+        let Some(arr) = params.as_array() else {
+            log::debug!("[NVIM] msg_show: expected array params");
+            return;
+        };
+        if arr.len() < 2 {
+            log::debug!("[NVIM] msg_show: expected >= 2 params, got {}", arr.len());
+            return;
+        }
+        let kind = arr[0].as_str().unwrap_or("");
+
+        // Log all kinds for debugging (Codex: observe in real environment)
+        log::debug!("[NVIM] msg_show: kind={:?}", kind);
+
+        // Blocklist filter
+        if Self::MSG_KIND_BLOCKLIST.contains(&kind) {
+            log::trace!("[NVIM] msg_show: blocked kind={:?}", kind);
+            return;
+        }
+
+        // Parse content: array of [attr_id, text] chunks
+        let text = if let Some(chunks) = arr[1].as_array() {
+            chunks
+                .iter()
+                .filter_map(|chunk| {
+                    chunk
+                        .as_array()
+                        .and_then(|c| c.get(1))
+                        .and_then(|v| v.as_str())
+                })
+                .collect::<Vec<&str>>()
+                .join("")
+        } else {
+            log::debug!("[NVIM] msg_show: raw content={:?}", arr[1]);
+            return;
+        };
+
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+
+        log::debug!("[NVIM] msg_show: kind={:?}, text={:?}", kind, text);
+        send_msg(
+            &self.tx,
+            FromNeovim::CmdlineMessage {
+                text,
+                cmdtype: String::new(),
+            },
+        );
+    }
+
+    /// msg_clear
+    fn handle_msg_clear(&self) {
+        log::debug!("[NVIM] msg_clear");
+        send_msg(
+            &self.tx,
+            FromNeovim::CmdlineMessage {
+                text: String::new(),
+                cmdtype: String::new(),
+            },
+        );
     }
 
     /// cmdline_hide: [level]
@@ -549,12 +618,13 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
                 Value::Map(vec![
                     (Value::from("ext_cmdline"), Value::from(true)),
                     (Value::from("ext_popupmenu"), Value::from(true)),
+                    (Value::from("ext_messages"), Value::from(true)),
                 ]),
             ],
         )
         .await?
     {
-        Ok(_) => log::info!("[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu"),
+        Ok(_) => log::info!("[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu, ext_messages"),
         Err(e) => anyhow::bail!("nvim_ui_attach failed: {e:?}"),
     }
 
