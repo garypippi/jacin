@@ -374,16 +374,31 @@ impl NvimHandler {
     }
 
     /// mode_change: [mode, mode_idx]
+    /// mode is a UI-namespace name (e.g., "normal", "insert", "cmdline_normal")
+    /// which differs from nvim_get_mode() short forms ("n", "i", "c").
     fn handle_mode_change(&self, params: &Value) {
-        let mode = params
+        let ui_mode = params
             .as_array()
             .and_then(|a| a.first())
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        log::debug!("[NVIM] mode_change: {:?}", mode);
-        if !mode.is_empty() {
-            send_msg(&self.tx, FromNeovim::ModeChange(mode.to_string()));
-        }
+        log::debug!("[NVIM] mode_change: {:?}", ui_mode);
+        // Convert UI mode name to short mode string used by jacin
+        let short_mode = match ui_mode {
+            "normal" => "n",
+            "insert" => "i",
+            "visual" => "v",
+            "visual_line" => "V",
+            "visual_block" => "\x16",
+            "replace" => "R",
+            "cmdline_normal" | "cmdline_insert" => "c",
+            "operator" => "no",
+            _ => {
+                log::trace!("[NVIM] mode_change: unmapped UI mode {:?}", ui_mode);
+                return;
+            }
+        };
+        send_msg(&self.tx, FromNeovim::ModeChange(short_mode.to_string()));
     }
 
     /// Blocklist of msg_show kinds to ignore.
