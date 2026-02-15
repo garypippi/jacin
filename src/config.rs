@@ -35,6 +35,10 @@ pub struct Behavior {
     /// If true, the REC indicator dot blinks while recording a macro.
     /// Default: true.
     pub recording_blink: bool,
+    /// If true, `:w` commits preedit text to the application.
+    /// Also works with `:wq` and `:x`.
+    /// Default: false.
+    pub write_to_commit: bool,
 }
 
 impl Default for Behavior {
@@ -42,6 +46,7 @@ impl Default for Behavior {
         Self {
             startinsert: true,
             recording_blink: true,
+            write_to_commit: false,
         }
     }
 }
@@ -130,6 +135,7 @@ mod tests {
         assert_eq!(config.completion.adapter, "native");
         assert!(config.behavior.startinsert);
         assert!(config.behavior.recording_blink);
+        assert!(!config.behavior.write_to_commit);
         assert!(!config.clean);
         assert!(config.font.family.is_none());
         assert!(config.font.mono_family.is_none());
@@ -201,6 +207,20 @@ mod tests {
     }
 
     #[test]
+    fn write_to_commit_enabled() {
+        let config: Config = toml::from_str(
+            r#"
+            [behavior]
+            write_to_commit = true
+            "#,
+        )
+        .unwrap();
+        assert!(config.behavior.write_to_commit);
+        assert!(config.behavior.startinsert); // default preserved
+        assert!(config.behavior.recording_blink); // default preserved
+    }
+
+    #[test]
     fn recording_blink_disabled() {
         let config: Config = toml::from_str(
             r#"
@@ -224,6 +244,7 @@ mod tests {
 
             [behavior]
             startinsert = true
+            write_to_commit = true
 
             [font]
             family = "Noto Sans CJK JP"
@@ -235,6 +256,7 @@ mod tests {
         assert_eq!(config.keybinds.commit, "<C-;>");
         assert_eq!(config.completion.adapter, "cmp");
         assert!(config.behavior.startinsert);
+        assert!(config.behavior.write_to_commit);
         assert_eq!(config.font.family.as_deref(), Some("Noto Sans CJK JP"));
         assert_eq!(config.font.mono_family.as_deref(), Some("JetBrains Mono"));
         assert_eq!(config.font.size, Some(18.0));

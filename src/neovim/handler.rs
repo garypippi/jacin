@@ -833,9 +833,15 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     // Disable "-- More --" prompt — in embedded mode nobody can dismiss it,
     // so any long message (e.g. denops error) would block Neovim forever.
     nvim.command("set nomore").await?;
-    // Mark buffer as scratch — prevents E37 "No write since last change" on :q
-    // bufhidden=wipe cleans up the buffer completely when hidden
-    nvim.command("set buftype=nofile bufhidden=wipe").await?;
+    // Mark buffer as scratch with bufhidden=wipe to clean up when hidden.
+    // buftype=acwrite (when write_to_commit) hooks :w via BufWriteCmd for commit;
+    // buftype=nofile (default) prevents E37 "No write since last change" on :q.
+    if config.behavior.write_to_commit {
+        nvim.command("file jacin").await?;
+        nvim.command("set buftype=acwrite bufhidden=wipe").await?;
+    } else {
+        nvim.command("set buftype=nofile bufhidden=wipe").await?;
+    }
 
     // Store jacin's channel ID so Lua rpcnotify targets only this client
     // (channel 0 broadcasts to ALL clients, including denops etc.)
@@ -859,6 +865,12 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
         .await?;
     nvim.exec_lua(include_str!("lua/autocmds.lua"), vec![])
         .await?;
+
+    // Write-to-commit: hook :w via BufWriteCmd to commit preedit
+    if config.behavior.write_to_commit {
+        nvim.exec_lua(include_str!("lua/write_commit.lua"), vec![])
+            .await?;
+    }
 
     // Completion adapter — nvim-cmp requires Lua hooks; native uses ext_popupmenu
     if config.completion.adapter == "nvim-cmp" {
