@@ -11,6 +11,7 @@ use crossbeam_channel::{Receiver, Sender};
 use tokio::runtime::Runtime;
 
 use nvim_rs::create::tokio::new_child_cmd;
+use nvim_rs::error::CallError;
 use nvim_rs::{Handler, Neovim, Value};
 use tokio::process::Command;
 
@@ -87,7 +88,7 @@ impl Handler for NvimHandler {
         &self,
         name: String,
         args: Vec<nvim_rs::Value>,
-        _neovim: Neovim<NvimWriter>,
+        neovim: Neovim<NvimWriter>,
     ) {
         if name == "ime_snapshot"
             && let Some(value) = args.first()
@@ -151,26 +152,23 @@ impl Handler for NvimHandler {
             && let Some(value) = args.first()
             && let Some(map) = value.as_map()
         {
-            let get_str = |field: &str| -> Option<String> {
-                map.iter()
-                    .find(|(k, _)| k.as_str() == Some(field))
-                    .and_then(|(_, v)| v.as_str().map(std::string::ToString::to_string))
-            };
-
-            match get_str("type").as_deref() {
-                Some("cancelled" | "executed") => {
-                    let event = get_str("type").unwrap_or_default();
-                    let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
-                    let executed = event == "executed";
-                    PENDING.clear();
-                    log::debug!("[NVIM] Cmdline left ({}, cmdtype={})", event, cmdtype);
-                    send_msg(
-                        &self.tx,
-                        FromNeovim::CmdlineCancelled { cmdtype, executed },
-                    );
-                }
-                other => {
-                    log::warn!("[NVIM] Unknown cmdline type: {:?}", other);
+            if let Some((executed, cmdtype)) = self.handle_ime_cmdline(map) {
+                PENDING.clear();
+                // After a ':' command executes, the buffer may have changed
+                // (e.g. :tabnew, :bnext). Query snapshot to update preedit.
+                if executed
+                    && cmdtype == ":"
+                    && let Err(e) = query_snapshot(&neovim, &self.tx).await
+                {
+                    // :q/:wq exit Neovim; channel closed errors are expected
+                    let is_channel_closed = e
+                        .downcast_ref::<Box<CallError>>()
+                        .is_some_and(|ce| ce.is_channel_closed());
+                    if is_channel_closed {
+                        log::debug!("[NVIM] Snapshot after command skipped (Neovim exiting)");
+                    } else {
+                        log::warn!("[NVIM] Failed to query snapshot after command: {}", e);
+                    }
                 }
             }
         } else if name == "redraw" {
@@ -488,6 +486,41 @@ impl NvimHandler {
         log::debug!("[NVIM] cmdline_hide: level={}", level);
         send_msg(&self.tx, FromNeovim::CmdlineHide { level });
     }
+
+    /// Handle ime_cmdline notification (CmdlineLeave autocmd).
+    /// Returns Some((executed, cmdtype)) if the event was processed, None otherwise.
+    /// Note: caller is responsible for clearing PENDING state.
+    fn handle_ime_cmdline(
+        &self,
+        map: &[(Value, Value)],
+    ) -> Option<(bool, String)> {
+        let get_str = |field: &str| -> Option<String> {
+            map.iter()
+                .find(|(k, _)| k.as_str() == Some(field))
+                .and_then(|(_, v)| v.as_str().map(std::string::ToString::to_string))
+        };
+
+        match get_str("type").as_deref() {
+            Some("cancelled" | "executed") => {
+                let event = get_str("type").unwrap_or_default();
+                let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
+                let executed = event == "executed";
+                log::debug!("[NVIM] Cmdline left ({}, cmdtype={})", event, cmdtype);
+                send_msg(
+                    &self.tx,
+                    FromNeovim::CmdlineCancelled {
+                        cmdtype: cmdtype.clone(),
+                        executed,
+                    },
+                );
+                Some((executed, cmdtype))
+            }
+            other => {
+                log::warn!("[NVIM] Unknown cmdline type: {:?}", other);
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -641,6 +674,51 @@ mod tests {
                 assert!(cmdtype.is_empty());
             }
             other => panic!("expected CmdlineMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ime_cmdline_executed_sends_cmdline_cancelled_and_signals_snapshot_needed() {
+        let (handler, rx) = make_handler();
+
+        let map = vec![
+            (Value::from("type"), Value::from("executed")),
+            (Value::from("cmdtype"), Value::from(":")),
+        ];
+        let result = handler.handle_ime_cmdline(&map);
+
+        // Should return (executed=true, cmdtype=":") to signal snapshot is needed
+        assert_eq!(result, Some((true, ":".to_string())));
+
+        // CmdlineCancelled message should be sent
+        match rx.try_recv().unwrap() {
+            FromNeovim::CmdlineCancelled { cmdtype, executed } => {
+                assert_eq!(cmdtype, ":");
+                assert!(executed);
+            }
+            other => panic!("expected CmdlineCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ime_cmdline_cancelled_does_not_signal_snapshot() {
+        let (handler, rx) = make_handler();
+
+        let map = vec![
+            (Value::from("type"), Value::from("cancelled")),
+            (Value::from("cmdtype"), Value::from(":")),
+        ];
+        let result = handler.handle_ime_cmdline(&map);
+
+        // Should return (executed=false, cmdtype=":") — no snapshot needed
+        assert_eq!(result, Some((false, ":".to_string())));
+
+        match rx.try_recv().unwrap() {
+            FromNeovim::CmdlineCancelled { cmdtype, executed } => {
+                assert_eq!(cmdtype, ":");
+                assert!(!executed);
+            }
+            other => panic!("expected CmdlineCancelled, got {other:?}"),
         }
     }
 }
