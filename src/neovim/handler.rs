@@ -708,7 +708,7 @@ async fn run_neovim(
     }
 
     // Track last known vim mode for insert-mode fire-and-forget optimization.
-    let mut last_mode = if config.behavior.auto_startinsert {
+    let mut last_mode = if config.behavior.startinsert {
         String::from("i")
     } else {
         String::from("n")
@@ -770,20 +770,6 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     nvim.exec_lua(include_str!("lua/key_handlers.lua"), vec![])
         .await?;
 
-    // Set behavior config as Lua globals
-    nvim.exec_lua(
-        &format!(
-            "vim.g.ime_auto_startinsert = {}",
-            if config.behavior.auto_startinsert {
-                "true"
-            } else {
-                "false"
-            }
-        ),
-        vec![],
-    )
-    .await?;
-
     nvim.exec_lua(include_str!("lua/auto_commit.lua"), vec![])
         .await?;
     nvim.exec_lua(include_str!("lua/autocmds.lua"), vec![])
@@ -816,7 +802,7 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     }
 
     // Start in insert mode if configured
-    if config.behavior.auto_startinsert {
+    if config.behavior.startinsert {
         nvim.command("startinsert").await?;
     }
 

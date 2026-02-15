@@ -69,12 +69,6 @@ vim.api.nvim_create_autocmd('CmdlineLeave', {
         else
             -- Command output messages are captured via ext_messages (msg_show redraw event)
             vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', { type = 'executed', cmdtype = ':' })
-            if vim.g.ime_auto_startinsert then
-                vim.schedule(function()
-                    vim.cmd('startinsert')
-                    vim.rpcnotify(vim.g.ime_channel, 'ime_snapshot', collect_snapshot())
-                end)
-            end
         end
     end,
 })

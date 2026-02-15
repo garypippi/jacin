@@ -19,6 +19,12 @@ fn clean_config() -> Config {
     }
 }
 
+fn clean_config_with_startinsert(startinsert: bool) -> Config {
+    let mut config = clean_config();
+    config.behavior.startinsert = startinsert;
+    config
+}
+
 /// Drain messages until one matches the predicate, or timeout.
 fn recv_until(
     handle: &super::NeovimHandle,
@@ -157,4 +163,70 @@ fn shutdown_exits_cleanly() {
         MSG_TIMEOUT,
     );
     assert!(msg.is_some(), "expected NvimExited after shutdown");
+}
+
+#[test]
+#[ignore]
+fn startinsert_true_starts_in_insert_mode() {
+    let config = clean_config_with_startinsert(true);
+    let handle = spawn_neovim(config).expect("failed to spawn neovim");
+    recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
+        .expect("Neovim did not send Ready");
+
+    // With startinsert=true, typing 'h' should produce preedit directly (no 'i' needed)
+    handle.send_key("h");
+    let msg = recv_until(
+        &handle,
+        |m| matches!(m, FromNeovim::Preedit(info) if info.text == "h" && info.mode == "i"),
+        MSG_TIMEOUT,
+    );
+    assert!(
+        msg.is_some(),
+        "expected Preedit with text 'h' in insert mode (startinsert=true)"
+    );
+
+    shutdown_and_wait(&handle);
+}
+
+#[test]
+#[ignore]
+fn startinsert_false_starts_in_normal_mode() {
+    let config = clean_config_with_startinsert(false);
+    let handle = spawn_neovim(config).expect("failed to spawn neovim");
+    recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
+        .expect("Neovim did not send Ready");
+
+    // With startinsert=false, 'h' is a normal-mode motion — should NOT produce preedit with text 'h'
+    handle.send_key("h");
+    let msg = recv_until(
+        &handle,
+        |m| matches!(m, FromNeovim::Preedit(info) if info.text == "h"),
+        Duration::from_secs(2),
+    );
+    assert!(
+        msg.is_none(),
+        "expected no Preedit with text 'h' in normal mode (startinsert=false)"
+    );
+
+    // Now enter insert mode explicitly, then type 'h'
+    handle.send_key("i");
+    recv_until(
+        &handle,
+        |m| matches!(m, FromNeovim::Preedit(info) if info.mode == "i"),
+        MSG_TIMEOUT,
+    )
+    .expect("failed to enter insert mode");
+
+    handle.send_key("h");
+    let msg = recv_until(
+        &handle,
+        |m| matches!(m, FromNeovim::Preedit(info) if info.text == "h" && info.mode == "i"),
+        MSG_TIMEOUT,
+    );
+    assert!(
+        msg.is_some(),
+        "expected Preedit with text 'h' after explicit 'i' (startinsert=false)"
+    );
+
+    shutdown_and_wait(&handle);
 }

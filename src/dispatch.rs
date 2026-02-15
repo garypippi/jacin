@@ -287,7 +287,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             state.wayland.clear_modifiers();
 
                             // Complete enabling if transitioning
-                            let initial_mode = if state.config.behavior.auto_startinsert {
+                            let initial_mode = if state.config.behavior.startinsert {
                                 VimMode::Insert
                             } else {
                                 VimMode::Normal
@@ -296,14 +296,14 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                 || state.ime.is_fully_enabled()
                             {
                                 // Set vim_mode for popup display to match initial mode
-                                if state.config.behavior.auto_startinsert {
+                                if state.config.behavior.startinsert {
                                     state.keypress.set_vim_mode("i");
                                 } else {
                                     state.keypress.set_vim_mode("n");
                                 }
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {
-                                    if state.config.behavior.auto_startinsert {
+                                    if state.config.behavior.startinsert {
                                         log::debug!("[IME] Restoring insert mode");
                                         nvim.send_key("<Esc>i");
                                     } else {

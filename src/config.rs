@@ -28,10 +28,10 @@ pub struct FontConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Behavior {
-    /// If true, IME starts in insert mode and returns to insert mode after commands.
+    /// If true, IME starts in insert mode.
     /// If false, IME starts in normal mode.
-    /// Default: false.
-    pub auto_startinsert: bool,
+    /// Default: true.
+    pub startinsert: bool,
     /// If true, the REC indicator dot blinks while recording a macro.
     /// Default: true.
     pub recording_blink: bool,
@@ -40,7 +40,7 @@ pub struct Behavior {
 impl Default for Behavior {
     fn default() -> Self {
         Self {
-            auto_startinsert: false,
+            startinsert: true,
             recording_blink: true,
         }
     }
@@ -128,7 +128,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.keybinds.commit, "<C-CR>");
         assert_eq!(config.completion.adapter, "native");
-        assert!(!config.behavior.auto_startinsert);
+        assert!(config.behavior.startinsert);
         assert!(config.behavior.recording_blink);
         assert!(!config.clean);
         assert!(config.font.family.is_none());
@@ -141,7 +141,7 @@ mod tests {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.keybinds.commit, "<C-CR>");
         assert_eq!(config.completion.adapter, "native");
-        assert!(!config.behavior.auto_startinsert);
+        assert!(config.behavior.startinsert);
         assert!(config.behavior.recording_blink);
         assert!(config.font.family.is_none());
     }
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(config.keybinds.commit, "<A-;>");
         // Other sections use defaults
         assert_eq!(config.completion.adapter, "native");
-        assert!(!config.behavior.auto_startinsert);
+        assert!(config.behavior.startinsert);
     }
 
     #[test]
@@ -179,13 +179,25 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [behavior]
-            auto_startinsert = true
+            startinsert = true
             "#,
         )
         .unwrap();
-        assert!(config.behavior.auto_startinsert);
+        assert!(config.behavior.startinsert);
         assert!(config.behavior.recording_blink); // default true even when not specified
         assert_eq!(config.keybinds.commit, "<C-CR>");
+    }
+
+    #[test]
+    fn startinsert_disabled() {
+        let config: Config = toml::from_str(
+            r#"
+            [behavior]
+            startinsert = false
+            "#,
+        )
+        .unwrap();
+        assert!(!config.behavior.startinsert);
     }
 
     #[test]
@@ -211,7 +223,7 @@ mod tests {
             adapter = "cmp"
 
             [behavior]
-            auto_startinsert = true
+            startinsert = true
 
             [font]
             family = "Noto Sans CJK JP"
@@ -222,7 +234,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.keybinds.commit, "<C-;>");
         assert_eq!(config.completion.adapter, "cmp");
-        assert!(config.behavior.auto_startinsert);
+        assert!(config.behavior.startinsert);
         assert_eq!(config.font.family.as_deref(), Some("Noto Sans CJK JP"));
         assert_eq!(config.font.mono_family.as_deref(), Some("JetBrains Mono"));
         assert_eq!(config.font.size, Some(18.0));

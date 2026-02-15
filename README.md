@@ -34,7 +34,7 @@ commit = "<C-CR>"    # Commit preedit text to application
 adapter = "native"   # "native" (CompleteChanged/CompleteDone) or "nvim-cmp"
 
 [behavior]
-auto_startinsert = false  # true: start in insert mode, false: start in normal mode
+startinsert = true  # true: start in insert mode, false: start in normal mode
 ```
 
 All fields are optional and fall back to the defaults shown above.

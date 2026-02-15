@@ -55,7 +55,7 @@ src/
 
 ## Key Components
 
-- **Config module**: TOML config at `~/.config/jacin/config.toml` with configurable commit keybind, completion adapter, and behavior options (auto_startinsert). `--clean` flag for vanilla Neovim.
+- **Config module**: TOML config at `~/.config/jacin/config.toml` with configurable commit keybind, completion adapter, and behavior options (startinsert). `--clean` flag for vanilla Neovim.
 - **State modules**: Separate concerns into `WaylandState`, `KeyboardState`, `KeyRepeatState`, `ImeState`, `KeypressState`
 - **ImeMode state machine**: Explicit states (Disabled, Enabling, Enabled) replacing boolean flags
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
@@ -93,7 +93,7 @@ Working:
 - Auto-commit preedit on line addition (CR, o, O in normal mode)
 - Command output messages shown in popup after execution
 - `--clean` flag: start with vanilla Neovim (no user config/plugins)
-- `auto_startinsert` config: when true, IME starts in insert mode and returns to insert mode after commands (default: false, starts in normal mode)
+- `startinsert` config: when true, IME starts in insert mode (default: true)
 
 Known Issues:
 - Multiline operations (yy, dd, cc, p, P) not yet supported (single-line preedit only)
