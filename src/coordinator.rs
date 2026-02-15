@@ -305,6 +305,14 @@ impl State {
 
     /// Update the unified popup with current state
     pub(crate) fn update_popup(&mut self) {
+        // IME disabled: skip content generation entirely and ensure popup is hidden.
+        // After toggle-off, Neovim sends a burst of push notifications (<Esc>ggdG
+        // triggers mode changes and autocmds) — without this guard, each notification
+        // would rebuild PopupContent and potentially recreate/destroy surfaces.
+        if !self.ime.is_enabled() {
+            self.hide_popup();
+            return;
+        }
         let t = std::time::Instant::now();
         let content = PopupContent {
             preedit: self.ime.preedit.clone(),

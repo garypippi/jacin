@@ -35,10 +35,17 @@ struct Buffer {
     height: u32,
 }
 
-/// Unified popup window
-pub struct UnifiedPopup {
+/// Surface pair: wl_surface + popup role (created/destroyed together)
+struct PopupSurface {
     surface: wl_surface::WlSurface,
     popup_surface: zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
+}
+
+/// Unified popup window
+pub struct UnifiedPopup {
+    surfaces: Option<PopupSurface>,
+    compositor: wayland_client::protocol::wl_compositor::WlCompositor,
+    input_method: zwp_input_method_v2::ZwpInputMethodV2,
     pool: wl_shm_pool::WlShmPool,
     pool_data: MmapMut,
     buffers: [Option<Buffer>; 2],
@@ -61,26 +68,15 @@ impl UnifiedPopup {
         renderer: TextRenderer,
         mono_renderer: TextRenderer,
     ) -> Option<Self> {
-        // Create surface
-        let surface = compositor.create_surface(qh, ());
-
-        // Set empty input region so compositor ignores mouse events on the popup.
-        // Without this, compositors may crash trying to route input to a popup
-        // surface that has no associated window (e.g. Hyprland SEGV in
-        // getWindowFromSurface on mouse wheel).
-        let empty_region = compositor.create_region(qh, ());
-        surface.set_input_region(Some(&empty_region));
-        empty_region.destroy();
-
-        // Create input popup surface - compositor positions this near cursor
-        let popup_surface = input_method.get_input_popup_surface(&surface, qh, ());
+        let surfaces = Self::create_surfaces(compositor, input_method, qh);
 
         // Create shm pool for double-buffered rendering
         let (pool, pool_data) = create_shm_pool(shm, qh, POOL_SIZE, "ime-unified-popup")?;
 
         Some(Self {
-            surface,
-            popup_surface,
+            surfaces: Some(surfaces),
+            compositor: compositor.clone(),
+            input_method: input_method.clone(),
             pool,
             pool_data,
             buffers: [None, None],
@@ -94,11 +90,41 @@ impl UnifiedPopup {
         })
     }
 
+    /// Create a new wl_surface + popup_surface pair
+    fn create_surfaces(
+        compositor: &wayland_client::protocol::wl_compositor::WlCompositor,
+        input_method: &zwp_input_method_v2::ZwpInputMethodV2,
+        qh: &QueueHandle<State>,
+    ) -> PopupSurface {
+        let surface = compositor.create_surface(qh, ());
+
+        // Set empty input region so compositor ignores mouse events on the popup.
+        let empty_region = compositor.create_region(qh, ());
+        surface.set_input_region(Some(&empty_region));
+        empty_region.destroy();
+
+        let popup_surface = input_method.get_input_popup_surface(&surface, qh, ());
+
+        PopupSurface {
+            surface,
+            popup_surface,
+        }
+    }
+
     /// Update the popup with new content
     pub fn update(&mut self, content: &PopupContent, qh: &QueueHandle<State>) {
         if content.is_empty() {
             self.hide();
             return;
+        }
+
+        // Recreate surface pair if it was destroyed on hide
+        if self.surfaces.is_none() {
+            self.surfaces = Some(Self::create_surfaces(
+                &self.compositor,
+                &self.input_method,
+                qh,
+            ));
         }
 
         // Adjust scroll offset to keep selection visible
@@ -126,8 +152,18 @@ impl UnifiedPopup {
     /// Hide the popup
     pub fn hide(&mut self) {
         if self.visible {
-            self.surface.attach(None, 0, 0);
-            self.surface.commit();
+            // First unmap the surface for immediate visual feedback, then
+            // destroy both the popup surface role and wl_surface so the
+            // compositor stops tracking them for hit-testing. Without the
+            // destroy, the unmapped popup surface can absorb pointer clicks
+            // and prevent refocusing text fields. Both are recreated on
+            // next update().
+            if let Some(s) = self.surfaces.take() {
+                s.surface.attach(None, 0, 0);
+                s.surface.commit();
+                s.popup_surface.destroy();
+                s.surface.destroy();
+            }
             self.visible = false;
             self.scroll_offset = 0;
         }
@@ -145,8 +181,10 @@ impl UnifiedPopup {
         for slot in self.buffers.into_iter().flatten() {
             slot.buffer.destroy();
         }
-        self.popup_surface.destroy();
-        self.surface.destroy();
+        if let Some(s) = self.surfaces {
+            s.popup_surface.destroy();
+            s.surface.destroy();
+        }
         self.pool.destroy();
     }
 
@@ -246,11 +284,14 @@ impl UnifiedPopup {
         }
 
         // Attach and commit
+        let Some(ref s) = self.surfaces else {
+            return;
+        };
         let buffer = &self.buffers[buffer_idx].as_ref().unwrap().buffer;
-        self.surface.attach(Some(buffer), 0, 0);
-        self.surface
+        s.surface.attach(Some(buffer), 0, 0);
+        s.surface
             .damage_buffer(0, 0, self.width as i32, self.height as i32);
-        self.surface.commit();
+        s.surface.commit();
 
         self.current_buffer = buffer_idx;
         log::trace!(
