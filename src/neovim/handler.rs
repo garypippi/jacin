@@ -2,7 +2,7 @@
 //!
 //! Runs Neovim in embedded mode as a pure Wayland↔Neovim bridge for input processing.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{error::Error, fmt};
 
@@ -75,6 +75,8 @@ fn send_msg(tx: &Sender<FromNeovim>, msg: FromNeovim) {
 #[derive(Clone)]
 pub struct NvimHandler {
     tx: Sender<FromNeovim>,
+    /// Cached popupmenu items for popupmenu_select (ext_popupmenu).
+    last_popupmenu_items: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -185,7 +187,7 @@ impl Handler for NvimHandler {
 }
 
 impl NvimHandler {
-    /// Parse and dispatch redraw notification events (ext_cmdline).
+    /// Parse and dispatch redraw notification events (ext_cmdline, ext_popupmenu).
     fn handle_redraw(&self, args: &[Value]) {
         for event_group in args {
             let Some(arr) = event_group.as_array() else {
@@ -200,6 +202,9 @@ impl NvimHandler {
                     "cmdline_show" => self.handle_cmdline_show(params),
                     "cmdline_pos" => self.handle_cmdline_pos(params),
                     "cmdline_hide" => self.handle_cmdline_hide(params),
+                    "popupmenu_show" => self.handle_popupmenu_show(params),
+                    "popupmenu_select" => self.handle_popupmenu_select(params),
+                    "popupmenu_hide" => self.handle_popupmenu_hide(),
                     _ => {
                         log::trace!("[NVIM] Ignoring redraw event: {}", event_name);
                     }
@@ -281,6 +286,97 @@ impl NvimHandler {
         send_msg(&self.tx, FromNeovim::CmdlinePos { pos, level });
     }
 
+    /// popupmenu_show: [items, selected, row, col, grid]
+    /// items: [[word, kind, menu, info], ...]
+    fn handle_popupmenu_show(&self, params: &Value) {
+        let Some(arr) = params.as_array() else {
+            log::debug!("[NVIM] popupmenu_show: expected array params");
+            return;
+        };
+        if arr.len() < 2 {
+            log::debug!(
+                "[NVIM] popupmenu_show: expected >= 2 params, got {}",
+                arr.len()
+            );
+            return;
+        }
+        let items = arr[0].as_array();
+        let selected = arr[1].as_i64().unwrap_or(-1);
+
+        let words: Vec<String> = items
+            .map(|item_arr| {
+                item_arr
+                    .iter()
+                    .map(|item| {
+                        let fields = match item.as_array() {
+                            Some(f) => f,
+                            None => return String::new(),
+                        };
+                        // Try word first, then menu, then kind (Codex: kind is label-like)
+                        let word = fields.first().and_then(|v| v.as_str()).unwrap_or("");
+                        if !word.is_empty() {
+                            return word.to_string();
+                        }
+                        let menu = fields.get(2).and_then(|v| v.as_str()).unwrap_or("");
+                        if !menu.is_empty() {
+                            return menu.to_string();
+                        }
+                        let kind = fields.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                        kind.to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        log::debug!(
+            "[NVIM] popupmenu_show: {} items, selected={}",
+            words.len(),
+            selected
+        );
+
+        // Cache items for popupmenu_select
+        *self.last_popupmenu_items.lock().unwrap() = words.clone();
+
+        if words.is_empty() {
+            send_msg(&self.tx, FromNeovim::Candidates(CandidateInfo::empty()));
+        } else {
+            let sel = selected.max(0) as usize;
+            let mut info = CandidateInfo::new(words, sel);
+            info.selected = info.selected.min(info.candidates.len().saturating_sub(1));
+            send_msg(&self.tx, FromNeovim::Candidates(info));
+        }
+    }
+
+    /// popupmenu_select: [selected]
+    fn handle_popupmenu_select(&self, params: &Value) {
+        let selected = params
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+
+        let items = self.last_popupmenu_items.lock().unwrap();
+        log::trace!("[NVIM] popupmenu_select: selected={}", selected);
+
+        if items.is_empty() {
+            send_msg(&self.tx, FromNeovim::Candidates(CandidateInfo::empty()));
+        } else {
+            // selected = -1 means no selection; clamp to 0
+            let sel = (selected.max(0) as usize).min(items.len().saturating_sub(1));
+            send_msg(
+                &self.tx,
+                FromNeovim::Candidates(CandidateInfo::new(items.clone(), sel)),
+            );
+        }
+    }
+
+    /// popupmenu_hide
+    fn handle_popupmenu_hide(&self) {
+        log::debug!("[NVIM] popupmenu_hide");
+        self.last_popupmenu_items.lock().unwrap().clear();
+        send_msg(&self.tx, FromNeovim::Candidates(CandidateInfo::empty()));
+    }
+
     /// cmdline_hide: [level]
     fn handle_cmdline_hide(&self, params: &Value) {
         let Some(arr) = params.as_array() else {
@@ -324,7 +420,10 @@ async fn run_neovim(
         cmd.arg("--clean");
     }
 
-    let handler = NvimHandler { tx: tx.clone() };
+    let handler = NvimHandler {
+        tx: tx.clone(),
+        last_popupmenu_items: Arc::new(Mutex::new(Vec::new())),
+    };
     let (nvim, io_handler, _child) = new_child_cmd(&mut cmd, handler)
         .await
         .map_err(|e| NvimError::Backend(e.into()))?;
@@ -434,28 +533,28 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     nvim.exec_lua(include_str!("lua/autocmds.lua"), vec![])
         .await?;
 
-    // Completion adapter — branch on config
-    let use_cmp = config.completion.adapter == "nvim-cmp";
-    let completion_lua = if use_cmp {
-        include_str!("lua/completion_cmp.lua")
-    } else {
-        include_str!("lua/completion_native.lua")
-    };
-    nvim.exec_lua(completion_lua, vec![]).await?;
+    // Completion adapter — nvim-cmp requires Lua hooks; native uses ext_popupmenu
+    if config.completion.adapter == "nvim-cmp" {
+        nvim.exec_lua(include_str!("lua/completion_cmp.lua"), vec![])
+            .await?;
+    }
 
-    // Attach as UI client to receive redraw events (ext_cmdline, etc.)
+    // Attach as UI client to receive redraw events (ext_cmdline, ext_popupmenu)
     match nvim
         .call(
             "nvim_ui_attach",
             vec![
                 Value::from(80i64),
                 Value::from(24i64),
-                Value::Map(vec![(Value::from("ext_cmdline"), Value::from(true))]),
+                Value::Map(vec![
+                    (Value::from("ext_cmdline"), Value::from(true)),
+                    (Value::from("ext_popupmenu"), Value::from(true)),
+                ]),
             ],
         )
         .await?
     {
-        Ok(_) => log::info!("[NVIM] nvim_ui_attach succeeded with ext_cmdline"),
+        Ok(_) => log::info!("[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu"),
         Err(e) => anyhow::bail!("nvim_ui_attach failed: {e:?}"),
     }
 
