@@ -162,11 +162,7 @@ impl KeypressState {
         if self.cmdline_level != Some(level) {
             return false;
         }
-        let display_len = self
-            .entries
-            .first()
-            .map(|e| e.text.len())
-            .unwrap_or(0);
+        let display_len = self.entries.first().map(|e| e.text.len()).unwrap_or(0);
         self.cmdline_cursor_byte = Some((self.cmdline_prefix_len + pos).min(display_len));
         true
     }
@@ -389,5 +385,4 @@ mod tests {
         state.set_cmdline_text(display, prefix_len + pos, prefix_len, 1);
         assert_eq!(state.cmdline_cursor_byte(), Some(16)); // 14 + 2
     }
-
 }

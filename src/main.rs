@@ -104,8 +104,7 @@ fn main() -> anyhow::Result<()> {
         .filter(|s| s.is_finite() && *s > 0.0)
         .map(|s| s.clamp(8.0, 48.0))
         .unwrap_or(16.0);
-    let text_renderer =
-        TextRenderer::new_with_family(font_size, config.font.family.as_deref());
+    let text_renderer = TextRenderer::new_with_family(font_size, config.font.family.as_deref());
     let mono_renderer =
         TextRenderer::new_monospace_with_family(font_size, config.font.mono_family.as_deref());
     if text_renderer.is_none() {
@@ -248,11 +247,10 @@ fn main() -> anyhow::Result<()> {
 
         // Insert on-demand keypress display timeout timer
         // Also drives REC blink and transient message expiry
-        let needs_blink = state.config.behavior.recording_blink
-            && !state.keypress.recording.is_empty();
-        let needs_timer = state.keypress.should_show()
-            || needs_blink
-            || state.ime.has_transient_message();
+        let needs_blink =
+            state.config.behavior.recording_blink && !state.keypress.recording.is_empty();
+        let needs_timer =
+            state.keypress.should_show() || needs_blink || state.ime.has_transient_message();
         if needs_timer && state.keypress_timer_token.is_none() {
             match handle.insert_source(
                 Timer::from_duration(std::time::Duration::from_millis(100)),
@@ -262,10 +260,7 @@ fn main() -> anyhow::Result<()> {
 
                     // Advance all animations (currently: REC blink)
                     if state.config.behavior.recording_blink {
-                        changed |= state.animations.update_all(
-                            now,
-                            &state.keypress.recording,
-                        );
+                        changed |= state.animations.update_all(now, &state.keypress.recording);
                     }
 
                     // Expire transient message

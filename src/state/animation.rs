@@ -162,8 +162,7 @@ mod tests {
         assert!(!a.update_all(t0, "q"));
 
         // Backdate and tick again.
-        a.rec_blink.last_toggle =
-            Some(t0 - REC_BLINK_INTERVAL - Duration::from_millis(1));
+        a.rec_blink.last_toggle = Some(t0 - REC_BLINK_INTERVAL - Duration::from_millis(1));
         assert!(a.update_all(t0, "q"));
         assert!(!a.rec_blink.on);
     }

@@ -189,7 +189,8 @@ pub(crate) fn calculate_layout(
     // Keypress row is always present when IME is enabled
     let has_keypress = content.ime_enabled;
     let has_candidates = !content.candidates.is_empty();
-    let has_transient_message = content.candidates.is_empty() && content.transient_message.is_some();
+    let has_transient_message =
+        content.candidates.is_empty() && content.transient_message.is_some();
 
     let line_height = renderer.line_height();
     let mut y = PADDING;

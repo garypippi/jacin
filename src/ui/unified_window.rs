@@ -14,11 +14,11 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 pub use super::layout::PopupContent;
 use super::layout::{
     BG_COLOR, BORDER_COLOR, CURSOR_BG, ICON_SEPARATOR_GAP, ICON_SEPARATOR_WIDTH,
-    KEYPRESS_ENTRY_GAP, KEYPRESS_TEXT_COLOR, Layout,
-    MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING,
-    REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH,
-    SELECTED_BG, TEXT_COLOR, VISUAL_BG, calculate_layout, format_recording_label, mode_label,
-    preedit_scroll_offset, rgba, scrollbar_thumb_geometry,
+    KEYPRESS_ENTRY_GAP, KEYPRESS_TEXT_COLOR, Layout, MAX_VISIBLE_CANDIDATES, MODE_GAP,
+    MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING, REC_CIRCLE_RADIUS,
+    REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH, SELECTED_BG, TEXT_COLOR,
+    VISUAL_BG, calculate_layout, format_recording_label, mode_label, preedit_scroll_offset, rgba,
+    scrollbar_thumb_geometry,
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
@@ -553,9 +553,7 @@ impl UnifiedPopup {
                     .get(cursor_char)
                     .copied()
                     .unwrap_or(text_left);
-                if let Some(rect) =
-                    Rect::from_xywh(cursor_x, layout.keypress_y, 2.0, line_height)
-                {
+                if let Some(rect) = Rect::from_xywh(cursor_x, layout.keypress_y, 2.0, line_height) {
                     let mut paint = Paint::default();
                     paint.set_color(text_color);
                     pixmap.fill_rect(rect, &paint, Transform::identity(), None);

@@ -205,11 +205,7 @@ impl State {
             return;
         }
         // Build display text: prompt + content for @-mode, firstc + content for :/?
-        let prefix = if !prompt.is_empty() {
-            &prompt
-        } else {
-            &firstc
-        };
+        let prefix = if !prompt.is_empty() { &prompt } else { &firstc };
         let prefix_len = prefix.len();
         let display_text = format!("{}{}", prefix, content);
         let cursor_byte = prefix_len + pos;
@@ -237,7 +233,11 @@ impl State {
     }
 
     fn on_cmdline_cancelled(&mut self, cmdtype: String, executed: bool) {
-        log::debug!("[NVIM] CmdlineCancelled ({}, executed={})", cmdtype, executed);
+        log::debug!(
+            "[NVIM] CmdlineCancelled ({}, executed={})",
+            cmdtype,
+            executed
+        );
         self.keypress.clear();
         // ':' commands usually return to normal mode; '@' input() prompts return
         // to insert mode. ModeChanged snapshot will still correct this if needed.
@@ -343,7 +343,11 @@ impl State {
             cursor_end: self.ime.cursor_end,
             vim_mode: self.keypress.vim_mode.clone(),
             keypress_entries: if self.keypress.should_show() {
-                self.keypress.entries().iter().map(|e| e.text.clone()).collect()
+                self.keypress
+                    .entries()
+                    .iter()
+                    .map(|e| e.text.clone())
+                    .collect()
             } else {
                 Vec::new()
             },
@@ -456,16 +460,16 @@ mod replay_tests {
                     level,
                 } => {
                     if self.ime.is_fully_enabled() {
-                        let prefix = if !prompt.is_empty() {
-                            &prompt
-                        } else {
-                            &firstc
-                        };
+                        let prefix = if !prompt.is_empty() { &prompt } else { &firstc };
                         let prefix_len = prefix.len();
                         let display_text = format!("{}{}", prefix, content);
                         let cursor_byte = prefix_len + pos;
-                        self.keypress
-                            .set_cmdline_text(display_text, cursor_byte, prefix_len, level);
+                        self.keypress.set_cmdline_text(
+                            display_text,
+                            cursor_byte,
+                            prefix_len,
+                            level,
+                        );
                         self.keypress.set_vim_mode("c");
                     }
                 }

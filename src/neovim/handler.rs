@@ -2,8 +2,8 @@
 //!
 //! Runs Neovim in embedded mode as a pure Wayland↔Neovim bridge for input processing.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::{error::Error, fmt};
 
 use async_trait::async_trait;
@@ -168,7 +168,9 @@ impl Handler for NvimHandler {
                                 .downcast_ref::<Box<CallError>>()
                                 .is_some_and(|ce| ce.is_channel_closed());
                             if is_channel_closed {
-                                log::debug!("[NVIM] Snapshot after command skipped (Neovim exiting)");
+                                log::debug!(
+                                    "[NVIM] Snapshot after command skipped (Neovim exiting)"
+                                );
                             } else {
                                 log::warn!("[NVIM] Failed to query snapshot after command: {}", e);
                             }
@@ -409,10 +411,10 @@ impl NvimHandler {
 
     /// Blocklist of msg_show kinds to ignore.
     const MSG_KIND_BLOCKLIST: &[&str] = &[
-        "return_prompt",  // Press ENTER prompt
-        "search_count",   // [N/M] search count
-        "quickfix",       // quickfix navigation
-        "more_prompt",    // -- More -- prompt
+        "return_prompt", // Press ENTER prompt
+        "search_count",  // [N/M] search count
+        "quickfix",      // quickfix navigation
+        "more_prompt",   // -- More -- prompt
     ];
 
     /// msg_show: [kind, content, replace_last]
@@ -495,10 +497,7 @@ impl NvimHandler {
     /// Handle ime_cmdline notification (CmdlineLeave autocmd).
     /// Returns Some((executed, cmdtype)) if the event was processed, None otherwise.
     /// Note: caller is responsible for clearing PENDING state.
-    fn handle_ime_cmdline(
-        &self,
-        map: &[(Value, Value)],
-    ) -> Option<(bool, String)> {
+    fn handle_ime_cmdline(&self, map: &[(Value, Value)]) -> Option<(bool, String)> {
         let get_str = |field: &str| -> Option<String> {
             map.iter()
                 .find(|(k, _)| k.as_str() == Some(field))
@@ -546,8 +545,14 @@ mod tests {
 
     #[test]
     fn ui_mode_mapping_covers_cmdline_and_operator() {
-        assert_eq!(NvimHandler::ui_mode_to_short_mode("cmdline_normal"), Some("c"));
-        assert_eq!(NvimHandler::ui_mode_to_short_mode("cmdline_insert"), Some("c"));
+        assert_eq!(
+            NvimHandler::ui_mode_to_short_mode("cmdline_normal"),
+            Some("c")
+        );
+        assert_eq!(
+            NvimHandler::ui_mode_to_short_mode("cmdline_insert"),
+            Some("c")
+        );
         assert_eq!(NvimHandler::ui_mode_to_short_mode("operator"), Some("no"));
     }
 
@@ -555,7 +560,10 @@ mod tests {
     fn ui_mode_mapping_covers_visual_line_and_block() {
         assert_eq!(NvimHandler::ui_mode_to_short_mode("visual"), Some("v"));
         assert_eq!(NvimHandler::ui_mode_to_short_mode("visual_line"), Some("V"));
-        assert_eq!(NvimHandler::ui_mode_to_short_mode("visual_block"), Some("\x16"));
+        assert_eq!(
+            NvimHandler::ui_mode_to_short_mode("visual_block"),
+            Some("\x16")
+        );
     }
 
     #[test]
@@ -645,7 +653,10 @@ mod tests {
 
         match rx.try_recv().unwrap() {
             FromNeovim::Candidates(info) => {
-                assert_eq!(info.candidates, vec!["漢字".to_string(), "感じ".to_string()]);
+                assert_eq!(
+                    info.candidates,
+                    vec!["漢字".to_string(), "感じ".to_string()]
+                );
                 assert_eq!(info.selected, 0);
             }
             other => panic!("expected Candidates from popupmenu_show, got {other:?}"),
@@ -654,7 +665,10 @@ mod tests {
         handler.handle_popupmenu_select(&Value::Array(vec![Value::from(1)]));
         match rx.try_recv().unwrap() {
             FromNeovim::Candidates(info) => {
-                assert_eq!(info.candidates, vec!["漢字".to_string(), "感じ".to_string()]);
+                assert_eq!(
+                    info.candidates,
+                    vec!["漢字".to_string(), "感じ".to_string()]
+                );
                 assert_eq!(info.selected, 1);
             }
             other => panic!("expected Candidates from popupmenu_select, got {other:?}"),
@@ -667,7 +681,10 @@ mod tests {
 
         handler.handle_msg_show(&Value::Array(vec![
             Value::from("search_count"),
-            Value::Array(vec![Value::Array(vec![Value::from(0), Value::from("[1/2]")])]),
+            Value::Array(vec![Value::Array(vec![
+                Value::from(0),
+                Value::from("[1/2]"),
+            ])]),
             Value::from(false),
         ]));
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
@@ -899,7 +916,9 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
         )
         .await?
     {
-        Ok(_) => log::info!("[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu, ext_messages"),
+        Ok(_) => log::info!(
+            "[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu, ext_messages"
+        ),
         Err(e) => anyhow::bail!("nvim_ui_attach failed: {e:?}"),
     }
 
