@@ -331,8 +331,11 @@ impl UnifiedPopup {
             .copied()
             .unwrap_or(chars.len());
 
-        let is_normal_mode =
-            content.vim_mode == "n" || content.vim_mode == "v" || content.vim_mode.starts_with('v');
+        let is_normal_mode = content.vim_mode == "n"
+            || content.vim_mode == "v"
+            || content.vim_mode == "V"
+            || content.vim_mode == "\x16"
+            || content.vim_mode.starts_with('v');
 
         // Calculate character positions (absolute, starting from preedit_left)
         let mut char_x_positions: Vec<f32> = Vec::with_capacity(chars.len() + 1);

@@ -366,6 +366,22 @@ mod tests {
         assert!(snap.to_visual_selection().is_none());
     }
 
+    #[test]
+    fn snapshot_linewise_visual_full_line() {
+        // Linewise visual: snapshot.lua sets visual_begin=1, visual_end=strlen(line)+1
+        // For "hello" (5 bytes): visual_begin=1, visual_end=6
+        let mut snap = make_snapshot(5, 1, "V");
+        snap.visual_begin = Some(1);
+        snap.visual_end = Some(6);
+        let sel = snap.to_visual_selection().unwrap();
+        match sel {
+            VisualSelection::Charwise { begin, end } => {
+                assert_eq!(begin, 0); // 1 - 1 = 0 (start of line)
+                assert_eq!(end, 5); // 6 - 1 = 5 (end of "hello")
+            }
+        }
+    }
+
     // --- Serde roundtrip tests ---
 
     fn roundtrip_from_neovim(msg: &FromNeovim) -> FromNeovim {

@@ -547,6 +547,13 @@ mod tests {
     }
 
     #[test]
+    fn ui_mode_mapping_covers_visual_line_and_block() {
+        assert_eq!(NvimHandler::ui_mode_to_short_mode("visual"), Some("v"));
+        assert_eq!(NvimHandler::ui_mode_to_short_mode("visual_line"), Some("V"));
+        assert_eq!(NvimHandler::ui_mode_to_short_mode("visual_block"), Some("\x16"));
+    }
+
+    #[test]
     fn mode_change_emits_short_mode_message() {
         let (handler, rx) = make_handler();
 
