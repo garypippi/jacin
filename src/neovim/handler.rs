@@ -156,31 +156,6 @@ impl Handler for NvimHandler {
             };
 
             match get_str("type").as_deref() {
-                Some("update") => {
-                    // Fallback path: only fires when nvim_ui_attach failed and
-                    // CmdlineChanged/CmdlineEnter autocmds are registered.
-                    // Convert to CmdlineShow for uniform downstream handling.
-                    if let Some(text) = get_str("text") {
-                        let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
-                        let (firstc, content) = if cmdtype == ":" && text.starts_with(':') {
-                            (":".to_string(), text[1..].to_string())
-                        } else {
-                            (cmdtype.clone(), text)
-                        };
-                        PENDING.store(PendingState::CommandLine);
-                        log::debug!("[NVIM] Cmdline update fallback ({}): {:?}", cmdtype, content);
-                        send_msg(
-                            &self.tx,
-                            FromNeovim::CmdlineShow {
-                                content,
-                                pos: 0,
-                                firstc,
-                                prompt: String::new(),
-                                level: 1,
-                            },
-                        );
-                    }
-                }
                 Some("cancelled" | "executed") => {
                     let event = get_str("type").unwrap_or_default();
                     let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
@@ -468,9 +443,8 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     };
     nvim.exec_lua(completion_lua, vec![]).await?;
 
-    // Attach as UI client to receive ext_cmdline events (cmdline_show, etc.)
-    // This works in --embed --headless mode (unlike vim.ui_attach Lua API).
-    let ui_attached = match nvim
+    // Attach as UI client to receive redraw events (ext_cmdline, etc.)
+    match nvim
         .call(
             "nvim_ui_attach",
             vec![
@@ -479,54 +453,10 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
                 Value::Map(vec![(Value::from("ext_cmdline"), Value::from(true))]),
             ],
         )
-        .await
+        .await?
     {
-        Ok(_) => {
-            log::info!("[NVIM] nvim_ui_attach succeeded with ext_cmdline");
-            true
-        }
-        Err(e) => {
-            log::warn!(
-                "[NVIM] nvim_ui_attach failed: {} (falling back to autocmd)",
-                e
-            );
-            false
-        }
-    };
-
-    // If nvim_ui_attach failed, register CmdlineChanged/CmdlineEnter autocmds
-    // as fallback so command-line display still works (without prompt text).
-    if !ui_attached {
-        nvim.exec_lua(
-            r#"
-            vim.api.nvim_create_autocmd('CmdlineChanged', {
-                callback = function()
-                    local cmdtype = vim.fn.getcmdtype()
-                    if cmdtype == ':' then
-                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
-                            type = 'update', cmdtype = ':', text = ':' .. vim.fn.getcmdline()
-                        })
-                    elseif cmdtype == '@' then
-                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
-                            type = 'update', cmdtype = '@', text = vim.fn.getcmdline()
-                        })
-                    end
-                end,
-            })
-            vim.api.nvim_create_autocmd('CmdlineEnter', {
-                callback = function()
-                    if vim.fn.getcmdtype() == '@' then
-                        vim.rpcnotify(vim.g.ime_channel, 'ime_cmdline', {
-                            type = 'update', cmdtype = '@', text = vim.fn.getcmdline()
-                        })
-                    end
-                end,
-            })
-            "#,
-            vec![],
-        )
-        .await?;
-        log::info!("[NVIM] Registered fallback CmdlineChanged/CmdlineEnter autocmds");
+        Ok(_) => log::info!("[NVIM] nvim_ui_attach succeeded with ext_cmdline"),
+        Err(e) => anyhow::bail!("nvim_ui_attach failed: {e:?}"),
     }
 
     // Start in insert mode if configured
