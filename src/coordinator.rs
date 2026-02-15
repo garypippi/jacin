@@ -271,7 +271,16 @@ impl State {
 
     fn on_auto_commit(&mut self, text: String) {
         log::debug!("[NVIM] AutoCommit: {:?}", text);
+        if text.is_empty() {
+            return;
+        }
+        // Allow auto-commit even if IME isn't fully enabled (e.g. :wq triggers
+        // Neovim exit before we process the commit notification).
         if !self.ime.is_fully_enabled() {
+            if !self.wayland.active {
+                return;
+            }
+            self.wayland.commit_string(&text);
             return;
         }
         self.wayland.commit_string(&text);
@@ -388,6 +397,7 @@ mod replay_tests {
         visual_display: Option<VisualSelection>,
         committed: Vec<String>,
         exited: bool,
+        wayland_active: bool,
     }
 
     impl ReplayState {
@@ -402,6 +412,7 @@ mod replay_tests {
                 visual_display: None,
                 committed: Vec::new(),
                 exited: false,
+                wayland_active: true,
             }
         }
 
@@ -482,7 +493,14 @@ mod replay_tests {
                     }
                 }
                 FromNeovim::AutoCommit(text) => {
-                    if self.ime.is_fully_enabled() {
+                    if text.is_empty() {
+                        return;
+                    }
+                    if !self.ime.is_fully_enabled() {
+                        if self.wayland_active {
+                            self.committed.push(text);
+                        }
+                    } else {
                         self.committed.push(text);
                         self.ime.clear_preedit();
                         self.ime.clear_candidates();
@@ -582,5 +600,22 @@ mod replay_tests {
     #[test]
     fn replay_nvim_exit() {
         run_fixture("tests/fixtures/nvim_exit.json");
+    }
+
+    #[test]
+    fn replay_auto_commit_after_nvim_exit_still_commits() {
+        let mut state = ReplayState::new();
+        state.apply(FromNeovim::NvimExited);
+        state.apply(FromNeovim::AutoCommit("hel lo".to_string()));
+
+        assert_eq!(state.committed, vec!["hel lo".to_string()]);
+    }
+
+    #[test]
+    fn replay_auto_commit_ignores_empty_text() {
+        let mut state = ReplayState::new();
+        state.apply(FromNeovim::AutoCommit(String::new()));
+
+        assert!(state.committed.is_empty());
     }
 }

@@ -156,19 +156,24 @@ impl Handler for NvimHandler {
                 PENDING.clear();
                 // After a ':' command executes, the buffer may have changed
                 // (e.g. :tabnew, :bnext). Query snapshot to update preedit.
-                if executed
-                    && cmdtype == ":"
-                    && let Err(e) = query_snapshot(&neovim, &self.tx).await
-                {
-                    // :q/:wq exit Neovim; channel closed errors are expected
-                    let is_channel_closed = e
-                        .downcast_ref::<Box<CallError>>()
-                        .is_some_and(|ce| ce.is_channel_closed());
-                    if is_channel_closed {
-                        log::debug!("[NVIM] Snapshot after command skipped (Neovim exiting)");
-                    } else {
-                        log::warn!("[NVIM] Failed to query snapshot after command: {}", e);
-                    }
+                if executed && cmdtype == ":" {
+                    // Avoid blocking notify processing here: :wq can emit
+                    // ime_auto_commit and then exit quickly.
+                    let tx = self.tx.clone();
+                    let nvim = neovim.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = query_snapshot(&nvim, &tx).await {
+                            // :q/:wq exit Neovim; channel closed errors are expected
+                            let is_channel_closed = e
+                                .downcast_ref::<Box<CallError>>()
+                                .is_some_and(|ce| ce.is_channel_closed());
+                            if is_channel_closed {
+                                log::debug!("[NVIM] Snapshot after command skipped (Neovim exiting)");
+                            } else {
+                                log::warn!("[NVIM] Failed to query snapshot after command: {}", e);
+                            }
+                        }
+                    });
                 }
             }
         } else if name == "redraw" {
