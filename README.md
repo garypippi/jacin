@@ -8,7 +8,8 @@ Requires a Wayland compositor that implements.
 - `zwp_virtual_keyboard_v1`
 - `zwp_input_popup_surface_v2`
 
-![DEMO](https://github.com/user-attachments/assets/6219c5cc-f832-4e0c-9f6d-2f0c69e8bf14)
+![DEMO](https://github.com/user-attachments/assets/789e383e-bc74-444e-b9ca-52169d024db4)
+
 
 ## Requirements
 
@@ -28,21 +29,28 @@ Config file: `~/.config/jacin/config.toml`
 
 ```toml
 [keybinds]
-commit = "<C-CR>"    # Commit preedit text to application
+commit = "<C-CR>"         # Commit preedit text to application
 
 [completion]
-adapter = "native"   # "native" (CompleteChanged/CompleteDone) or "nvim-cmp"
+adapter = "native"        # "native" (ext_popupmenu) or "nvim-cmp"
 
 [behavior]
-startinsert = true  # true: start in insert mode, false: start in normal mode
+startinsert = true        # true: start in insert mode, false: start in normal mode
+recording_blink = true    # Blink the REC indicator while recording a macro
+write_to_commit = false   # :w commits preedit text to the application (:wq, :x also work)
+
+[font]
+family = "Noto Sans CJK JP"   # Proportional font (preedit/candidates). Default: fontconfig auto
+mono_family = "JetBrains Mono" # Monospace font (keypress/mode display). Default: "monospace"
+size = 16.0                    # Font size in pixels
 ```
 
 All fields are optional and fall back to the defaults shown above.
 
 ### Completion adapters
 
-- **native** (default): Uses Vim's `CompleteChanged`/`CompleteDone` autocmds. Works with skkeleton henkan and any plugin that calls `complete()`, including ddc.vim with `ddc-ui-native`.
-- **nvim-cmp**: Hooks into nvim-cmp's Lua API directly for candidate extraction.
+- **native** (default): Uses Neovim's `ext_popupmenu` UI extension. Works with skkeleton henkan and any plugin that calls `complete()`, including ddc.vim with `ddc-ui-native`.
+- **nvim-cmp**: Hooks into nvim-cmp's Lua API directly for candidate extraction (nvim-cmp uses its own floating window, not the native popup menu).
 
 > **Note:** Since jacin sets `buftype=nofile` on its buffer, ddc.vim requires `specialBufferCompletion` enabled in your ddc config.
 
