@@ -180,6 +180,20 @@ impl Handler for NvimHandler {
 }
 
 impl NvimHandler {
+    fn ui_mode_to_short_mode(ui_mode: &str) -> Option<&'static str> {
+        match ui_mode {
+            "normal" => Some("n"),
+            "insert" => Some("i"),
+            "visual" => Some("v"),
+            "visual_line" => Some("V"),
+            "visual_block" => Some("\x16"),
+            "replace" => Some("R"),
+            "cmdline_normal" | "cmdline_insert" => Some("c"),
+            "operator" => Some("no"),
+            _ => None,
+        }
+    }
+
     /// Parse and dispatch redraw notification events (ext_cmdline, ext_popupmenu).
     fn handle_redraw(&self, args: &[Value]) {
         for event_group in args {
@@ -383,20 +397,9 @@ impl NvimHandler {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         log::debug!("[NVIM] mode_change: {:?}", ui_mode);
-        // Convert UI mode name to short mode string used by jacin
-        let short_mode = match ui_mode {
-            "normal" => "n",
-            "insert" => "i",
-            "visual" => "v",
-            "visual_line" => "V",
-            "visual_block" => "\x16",
-            "replace" => "R",
-            "cmdline_normal" | "cmdline_insert" => "c",
-            "operator" => "no",
-            _ => {
-                log::trace!("[NVIM] mode_change: unmapped UI mode {:?}", ui_mode);
-                return;
-            }
+        let Some(short_mode) = Self::ui_mode_to_short_mode(ui_mode) else {
+            log::trace!("[NVIM] mode_change: unmapped UI mode {:?}", ui_mode);
+            return;
         };
         send_msg(&self.tx, FromNeovim::ModeChange(short_mode.to_string()));
     }
@@ -484,6 +487,161 @@ impl NvimHandler {
         let level = arr.first().and_then(|v| v.as_u64()).unwrap_or(1);
         log::debug!("[NVIM] cmdline_hide: level={}", level);
         send_msg(&self.tx, FromNeovim::CmdlineHide { level });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossbeam_channel::{TryRecvError, unbounded};
+
+    fn make_handler() -> (NvimHandler, crossbeam_channel::Receiver<FromNeovim>) {
+        let (tx, rx) = unbounded();
+        (
+            NvimHandler {
+                tx,
+                last_popupmenu_items: Arc::new(Mutex::new(Vec::new())),
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn ui_mode_mapping_covers_cmdline_and_operator() {
+        assert_eq!(NvimHandler::ui_mode_to_short_mode("cmdline_normal"), Some("c"));
+        assert_eq!(NvimHandler::ui_mode_to_short_mode("cmdline_insert"), Some("c"));
+        assert_eq!(NvimHandler::ui_mode_to_short_mode("operator"), Some("no"));
+    }
+
+    #[test]
+    fn mode_change_emits_short_mode_message() {
+        let (handler, rx) = make_handler();
+
+        handler.handle_mode_change(&Value::Array(vec![
+            Value::from("cmdline_normal"),
+            Value::from(0),
+        ]));
+        match rx.try_recv().unwrap() {
+            FromNeovim::ModeChange(mode) => assert_eq!(mode, "c"),
+            other => panic!("expected ModeChange(\"c\"), got {other:?}"),
+        }
+
+        handler.handle_mode_change(&Value::Array(vec![Value::from("operator"), Value::from(0)]));
+        match rx.try_recv().unwrap() {
+            FromNeovim::ModeChange(mode) => assert_eq!(mode, "no"),
+            other => panic!("expected ModeChange(\"no\"), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cmdline_show_and_hide_emit_messages_and_set_pending_state() {
+        PENDING.clear();
+        let (handler, rx) = make_handler();
+
+        handler.handle_cmdline_show(&Value::Array(vec![
+            Value::Array(vec![Value::Array(vec![Value::from(0), Value::from("set")])]),
+            Value::from(3),
+            Value::from(":"),
+            Value::from(""),
+            Value::from(0),
+            Value::from(1),
+        ]));
+
+        assert_eq!(PENDING.load(), PendingState::CommandLine);
+        match rx.try_recv().unwrap() {
+            FromNeovim::CmdlineShow {
+                content,
+                pos,
+                firstc,
+                prompt,
+                level,
+            } => {
+                assert_eq!(content, "set");
+                assert_eq!(pos, 3);
+                assert_eq!(firstc, ":");
+                assert_eq!(prompt, "");
+                assert_eq!(level, 1);
+            }
+            other => panic!("expected CmdlineShow, got {other:?}"),
+        }
+
+        handler.handle_cmdline_hide(&Value::Array(vec![Value::from(1)]));
+        match rx.try_recv().unwrap() {
+            FromNeovim::CmdlineHide { level } => assert_eq!(level, 1),
+            other => panic!("expected CmdlineHide, got {other:?}"),
+        }
+        PENDING.clear();
+    }
+
+    #[test]
+    fn popupmenu_select_uses_cached_items() {
+        let (handler, rx) = make_handler();
+
+        handler.handle_popupmenu_show(&Value::Array(vec![
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::from("漢字"),
+                    Value::from(""),
+                    Value::from(""),
+                    Value::from(""),
+                ]),
+                Value::Array(vec![
+                    Value::from("感じ"),
+                    Value::from(""),
+                    Value::from(""),
+                    Value::from(""),
+                ]),
+            ]),
+            Value::from(0),
+            Value::from(0),
+            Value::from(0),
+            Value::from(0),
+        ]));
+
+        match rx.try_recv().unwrap() {
+            FromNeovim::Candidates(info) => {
+                assert_eq!(info.candidates, vec!["漢字".to_string(), "感じ".to_string()]);
+                assert_eq!(info.selected, 0);
+            }
+            other => panic!("expected Candidates from popupmenu_show, got {other:?}"),
+        }
+
+        handler.handle_popupmenu_select(&Value::Array(vec![Value::from(1)]));
+        match rx.try_recv().unwrap() {
+            FromNeovim::Candidates(info) => {
+                assert_eq!(info.candidates, vec!["漢字".to_string(), "感じ".to_string()]);
+                assert_eq!(info.selected, 1);
+            }
+            other => panic!("expected Candidates from popupmenu_select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn msg_show_filters_blocked_kinds_and_emits_normal_messages() {
+        let (handler, rx) = make_handler();
+
+        handler.handle_msg_show(&Value::Array(vec![
+            Value::from("search_count"),
+            Value::Array(vec![Value::Array(vec![Value::from(0), Value::from("[1/2]")])]),
+            Value::from(false),
+        ]));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+        handler.handle_msg_show(&Value::Array(vec![
+            Value::from("echo"),
+            Value::Array(vec![Value::Array(vec![
+                Value::from(0),
+                Value::from("applied"),
+            ])]),
+            Value::from(false),
+        ]));
+        match rx.try_recv().unwrap() {
+            FromNeovim::CmdlineMessage { text, cmdtype } => {
+                assert_eq!(text, "applied");
+                assert!(cmdtype.is_empty());
+            }
+            other => panic!("expected CmdlineMessage, got {other:?}"),
+        }
     }
 }
 

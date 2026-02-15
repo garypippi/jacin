@@ -264,6 +264,7 @@ impl State {
         if !self.ime.is_fully_enabled() {
             return;
         }
+        log::debug!("[NVIM] ModeChange -> {:?}", mode);
         self.keypress.set_vim_mode(&mode);
         self.update_popup();
     }
