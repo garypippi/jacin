@@ -1085,11 +1085,12 @@ async fn handle_commit_key(
         // Empty buffer — passthrough so the app receives the key (e.g., Ctrl+Enter to send)
         send_msg(tx, FromNeovim::PassthroughKey);
     }
+    send_msg(tx, FromNeovim::KeyProcessed);
     *last_mode = String::from("i");
     Ok(true)
 }
 
-/// Handle Backspace — detect empty buffer for DeleteSurrounding. Skip if motion-pending.
+/// Handle Backspace — in empty preedit, passthrough to app; otherwise process in Neovim.
 async fn handle_backspace(
     nvim: &Neovim<NvimWriter>,
     key: &str,
@@ -1100,14 +1101,9 @@ async fn handle_backspace(
         return Ok(false);
     }
     let result = nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
-    if get_map_str(&result, "type") == Some("delete_surrounding") {
-        send_msg(
-            tx,
-            FromNeovim::DeleteSurrounding {
-                before: 1,
-                after: 0,
-            },
-        );
+    if get_map_str(&result, "type") == Some("passthrough") {
+        send_msg(tx, FromNeovim::PassthroughKey);
+        send_msg(tx, FromNeovim::KeyProcessed);
     } else {
         send_msg(tx, FromNeovim::KeyProcessed);
     }
@@ -1128,9 +1124,8 @@ async fn handle_enter(
     let result = nvim.exec_lua("return ime_handle_enter()", vec![]).await?;
     if get_map_str(&result, "type") == Some("passthrough") {
         send_msg(tx, FromNeovim::PassthroughKey);
-    } else {
-        send_msg(tx, FromNeovim::KeyProcessed);
     }
+    send_msg(tx, FromNeovim::KeyProcessed);
     Ok(true)
 }
 

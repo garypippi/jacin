@@ -2,7 +2,7 @@
 function _G.ime_handle_bs()
     local line = vim.fn.getline('.')
     if line == '' then
-        return { type = 'delete_surrounding' }
+        return { type = 'passthrough' }
     end
     vim.api.nvim_input('<BS>')
     return { type = 'processing' }
