@@ -133,6 +133,8 @@ pub enum FromNeovim {
     AutoCommit(String),
     /// Command output message (e.g., from :s/foo/bar/g)
     CmdlineMessage { text: String, cmdtype: String },
+    /// Vim mode changed (from mode_change redraw event)
+    ModeChange(String),
     /// Key should be passed through to the application via virtual keyboard
     PassthroughKey,
     /// Neovim process exited (e.g., :q)

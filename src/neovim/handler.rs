@@ -200,6 +200,7 @@ impl NvimHandler {
                     "popupmenu_hide" => self.handle_popupmenu_hide(),
                     "msg_show" => self.handle_msg_show(params),
                     "msg_clear" => self.handle_msg_clear(),
+                    "mode_change" => self.handle_mode_change(params),
                     _ => {
                         log::trace!("[NVIM] Ignoring redraw event: {}", event_name);
                     }
@@ -370,6 +371,19 @@ impl NvimHandler {
         log::debug!("[NVIM] popupmenu_hide");
         self.last_popupmenu_items.lock().unwrap().clear();
         send_msg(&self.tx, FromNeovim::Candidates(CandidateInfo::empty()));
+    }
+
+    /// mode_change: [mode, mode_idx]
+    fn handle_mode_change(&self, params: &Value) {
+        let mode = params
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        log::debug!("[NVIM] mode_change: {:?}", mode);
+        if !mode.is_empty() {
+            send_msg(&self.tx, FromNeovim::ModeChange(mode.to_string()));
+        }
     }
 
     /// Blocklist of msg_show kinds to ignore.

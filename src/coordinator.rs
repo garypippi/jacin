@@ -92,6 +92,7 @@ impl State {
                 self.on_cmdline_cancelled(cmdtype, executed)
             }
             FromNeovim::CmdlineMessage { text, cmdtype } => self.on_cmdline_message(text, cmdtype),
+            FromNeovim::ModeChange(mode) => self.on_mode_change(mode),
             FromNeovim::AutoCommit(text) => self.on_auto_commit(text),
             FromNeovim::NvimExited => self.on_nvim_exited(),
         }
@@ -256,6 +257,14 @@ impl State {
         } else {
             self.ime.set_transient_message(text);
         }
+        self.update_popup();
+    }
+
+    fn on_mode_change(&mut self, mode: String) {
+        if !self.ime.is_fully_enabled() {
+            return;
+        }
+        self.keypress.set_vim_mode(&mode);
         self.update_popup();
     }
 
@@ -464,6 +473,11 @@ mod replay_tests {
                 FromNeovim::CmdlineMessage { text, .. } => {
                     if self.ime.is_fully_enabled() {
                         self.ime.set_transient_message(text);
+                    }
+                }
+                FromNeovim::ModeChange(mode) => {
+                    if self.ime.is_fully_enabled() {
+                        self.keypress.set_vim_mode(&mode);
                     }
                 }
                 FromNeovim::AutoCommit(text) => {
