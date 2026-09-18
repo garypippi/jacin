@@ -152,8 +152,22 @@ impl State {
         self.update_popup();
     }
 
-    /// Update the unified popup with current state
+    /// Request a popup redraw. Rendering is deferred to the end of the
+    /// event loop iteration (`flush_popup`), so the several messages one
+    /// key produces (snapshot, grid flush, candidates) render only once.
     pub(crate) fn update_popup(&mut self) {
+        self.popup_dirty = true;
+    }
+
+    /// Render the popup if a redraw was requested since the last flush
+    pub(crate) fn flush_popup(&mut self) {
+        if std::mem::take(&mut self.popup_dirty) {
+            self.render_popup();
+        }
+    }
+
+    /// Render the unified popup with current state
+    fn render_popup(&mut self) {
         // IME disabled: skip content generation entirely and ensure popup is hidden.
         // After toggle-off, Neovim sends a burst of push notifications (<Esc>ggdG
         // triggers mode changes and autocmds) — without this guard, each notification
@@ -216,7 +230,7 @@ impl State {
             popup.update(&content, &qh);
         }
         log::trace!(
-            "[PERF] update_popup: {:.2}ms",
+            "[PERF] render_popup: {:.2}ms",
             t.elapsed().as_secs_f64() * 1000.0
         );
     }

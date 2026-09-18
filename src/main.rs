@@ -155,6 +155,7 @@ fn main() -> anyhow::Result<()> {
         repeat_timer_token: None,
         keypress_timer_token: None,
         current_keycode: None,
+        popup_dirty: false,
     };
 
     // Set up calloop event loop
@@ -304,6 +305,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Render the popup once per iteration for all changes above
+        // (key handling, Neovim messages, timers)
+        state.flush_popup();
+
         if state.pending_exit
             && let Some(ref signal) = state.loop_signal
         {
@@ -349,6 +354,8 @@ pub struct State {
     // On-demand timer tokens (None = timer not running)
     pub(crate) repeat_timer_token: Option<RegistrationToken>,
     pub(crate) keypress_timer_token: Option<RegistrationToken>,
+    // Popup redraw requested; rendered once at the end of the loop iteration
+    pub(crate) popup_dirty: bool,
     // Raw evdev keycode of the currently-being-processed key (for passthrough)
     pub(crate) current_keycode: Option<u32>,
 }
