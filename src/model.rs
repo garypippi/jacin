@@ -5,7 +5,7 @@
 //! can be replayed in tests; `State::apply_effects` executes the effects.
 
 use crate::neovim::FromNeovim;
-use crate::state::{ImeState, KeypressState, NvimView, Screen};
+use crate::state::{BufferMirror, ImeState, KeypressState, NvimView, Screen};
 
 /// Side effect requested by `Model::reduce`
 #[derive(Debug, Clone, PartialEq)]
@@ -65,7 +65,6 @@ impl Model {
                 }
                 self.ime
                     .set_preedit(info.text, info.cursor_begin, info.cursor_end);
-                self.ime.buffer_text = info.buffer_text;
                 self.view.set_vim_mode(&info.mode);
                 self.view.recording = info.recording;
                 self.shadow_check();
@@ -190,8 +189,15 @@ impl Model {
                 // The mirrored screen belonged to the dead process; a respawned
                 // Neovim starts from scratch (otherwise it flashes on re-enable)
                 self.view.screen = Screen::default();
+                self.view.buffer = BufferMirror::default();
                 self.shadow_ok = None;
                 vec![Effect::NvimExited]
+            }
+            FromNeovim::BufLines { first, last, lines } => {
+                // Always applied: the mirror must follow Neovim even while
+                // disabled (e.g. the <Esc>ggdG sent on toggle-off)
+                self.view.buffer.apply(first, last, lines);
+                vec![]
             }
             FromNeovim::GridFlush(events) => {
                 for event in events {

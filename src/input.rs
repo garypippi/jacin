@@ -116,7 +116,6 @@ impl State {
             // Fallback: if no Neovim or no vim key, use local preedit
             if self.nvim.is_none() {
                 self.model.ime.preedit.push_str(&utf8);
-                self.model.ime.buffer_text.push_str(&utf8);
                 log::debug!("[PREEDIT] buffer={:?}", self.model.ime.preedit);
                 self.update_preedit();
             }

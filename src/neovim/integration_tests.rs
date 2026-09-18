@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::{FromNeovim, PendingState, spawn_neovim};
 use crate::config::Config;
+use crate::state::BufferMirror;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const MSG_TIMEOUT: Duration = Duration::from_secs(5);
@@ -429,6 +430,27 @@ fn send_keys_and_collect(handle: &super::NeovimHandle, keys: &[&str]) -> Vec<Fro
         .collect()
 }
 
+/// Apply the `BufLines` messages among `msgs` to `buffer`.
+fn apply_buf_lines(buffer: &mut BufferMirror, msgs: &[FromNeovim]) {
+    for msg in msgs {
+        if let FromNeovim::BufLines { first, last, lines } = msg {
+            buffer.apply(*first, *last, lines.clone());
+        }
+    }
+}
+
+/// Keep applying `BufLines` until the mirror holds `text`.
+fn wait_for_buffer(handle: &super::NeovimHandle, buffer: &mut BufferMirror, text: &str) {
+    let deadline = Instant::now() + MSG_TIMEOUT;
+    while buffer.text() != text {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let msg = handle
+            .recv_timeout(remaining)
+            .unwrap_or_else(|| panic!("mirror is {:?}, expected {text:?}", buffer.text()));
+        apply_buf_lines(buffer, &[msg]);
+    }
+}
+
 fn has_passthrough(msgs: &[FromNeovim]) -> bool {
     msgs.iter().any(|m| matches!(m, FromNeovim::PassthroughKey))
 }
@@ -447,12 +469,9 @@ fn grid_multiline_enter_and_commit() {
         !msgs.iter().any(|m| matches!(m, FromNeovim::AutoCommit(_))),
         "unexpected auto-commit: {msgs:?}"
     );
-    let msg = recv_until(
-        &handle,
-        |m| matches!(m, FromNeovim::Preedit(info) if info.buffer_text == "a\nb\n"),
-        MSG_TIMEOUT,
-    );
-    assert!(msg.is_some(), "expected buffer_text 'a\\nb\\n'");
+    let mut buffer = BufferMirror::default();
+    apply_buf_lines(&mut buffer, &msgs);
+    wait_for_buffer(&handle, &mut buffer, "a\nb\n");
 
     let msgs = send_and_collect(&handle, "<C-CR>");
     assert!(
@@ -495,6 +514,31 @@ fn snapshot_display_enter_auto_commits() {
         MSG_TIMEOUT,
     );
     assert!(msg.is_some(), "expected AutoCommit 'a'");
+
+    shutdown_and_wait(&handle);
+}
+
+/// The buffer mirror follows the current buffer after it is replaced
+/// (:enew wipes the old one → detach → re-attach).
+#[test]
+#[ignore]
+fn buffer_mirror_follows_enew() {
+    let handle = spawn_grid_and_wait_ready();
+    let mut buffer = BufferMirror::default();
+
+    let msgs = send_keys_and_collect(&handle, &["a", "<CR>", "b"]);
+    apply_buf_lines(&mut buffer, &msgs);
+    wait_for_buffer(&handle, &mut buffer, "a\nb");
+
+    let msgs = send_keys_and_collect(&handle, &["<Esc>", ":", "enew", "<CR>", "i", "x"]);
+    apply_buf_lines(&mut buffer, &msgs);
+    wait_for_buffer(&handle, &mut buffer, "x");
+
+    // Toggle-off clears the buffer with <Esc>ggdG
+    let msgs = send_keys_and_collect(&handle, &["<Esc>", "g", "g", "d", "G"]);
+    apply_buf_lines(&mut buffer, &msgs);
+    wait_for_buffer(&handle, &mut buffer, "");
+    assert!(buffer.is_empty());
 
     shutdown_and_wait(&handle);
 }

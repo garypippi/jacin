@@ -198,11 +198,47 @@ impl Handler for NvimHandler {
             }
         } else if name == "redraw" {
             self.handle_redraw(&args);
+        } else if name == "nvim_buf_lines_event" {
+            self.handle_buf_lines(&args);
+        } else if name == "nvim_buf_detach_event" {
+            // The attached buffer was wiped (e.g. :enew with bufhidden=wipe):
+            // follow the new current buffer. Spawned, not awaited, so this
+            // handler doesn't block further notifications.
+            log::debug!("[NVIM] Buffer detached, re-attaching to current buffer");
+            tokio::spawn(async move {
+                if let Err(e) = attach_buffer(&neovim).await {
+                    log::warn!("[NVIM] Failed to re-attach buffer: {}", e);
+                }
+            });
         }
     }
 }
 
 impl NvimHandler {
+    /// nvim_buf_lines_event: [buf, changedtick, firstline, lastline, linedata, more]
+    /// (lastline = -1: to the end of the buffer, sent for the initial content)
+    fn handle_buf_lines(&self, args: &[Value]) {
+        if args.len() < 5 {
+            log::debug!(
+                "[NVIM] nvim_buf_lines_event: expected >= 5 args, got {}",
+                args.len()
+            );
+            return;
+        }
+        let first = args[2].as_u64().unwrap_or(0) as usize;
+        let last = args[3].as_u64().map(|l| l as usize);
+        let lines: Vec<String> = args[4]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        log::trace!("[NVIM] buf_lines: [{}, {:?}) <- {:?}", first, last, lines);
+        send_msg(&self.tx, FromNeovim::BufLines { first, last, lines });
+    }
+
     fn ui_mode_to_short_mode(ui_mode: &str) -> Option<&'static str> {
         match ui_mode {
             "normal" => Some("n"),
@@ -981,6 +1017,9 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
         Err(e) => anyhow::bail!("nvim_ui_attach failed: {e:?}"),
     }
 
+    // Mirror the buffer lines (committed on IME off)
+    attach_buffer(nvim).await?;
+
     // Start in insert mode if configured
     if config.behavior.startinsert {
         nvim.command("startinsert").await?;
@@ -1299,6 +1338,22 @@ impl KeySession {
     }
 }
 
+/// Attach to the current buffer for `nvim_buf_lines_event`, starting with
+/// its whole content (mirrored in `BufferMirror`).
+async fn attach_buffer(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
+    let attached = nvim
+        .call(
+            "nvim_buf_attach",
+            vec![Value::from(0i64), Value::from(true), Value::Map(vec![])],
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("nvim_buf_attach: {e:?}"))?;
+    if attached.as_bool() != Some(true) {
+        anyhow::bail!("nvim_buf_attach returned {attached:?}");
+    }
+    Ok(())
+}
+
 /// Check if Neovim is blocked in getchar() via nvim_get_mode().
 /// This is a "fast" API call that works even when Neovim is blocked — unlike
 /// exec_lua which would deadlock.
@@ -1341,7 +1396,6 @@ fn parse_snapshot(value: &nvim_rs::Value) -> NvimResult<Snapshot> {
 
     let mut snapshot = Snapshot {
         preedit: String::new(),
-        buffer_text: String::new(),
         cursor_byte: 1,
         mode: "n".to_string(),
         blocking: false,
@@ -1356,9 +1410,6 @@ fn parse_snapshot(value: &nvim_rs::Value) -> NvimResult<Snapshot> {
         match key {
             "preedit" => {
                 snapshot.preedit = v.as_str().unwrap_or("").to_string();
-            }
-            "buffer_text" => {
-                snapshot.buffer_text = v.as_str().unwrap_or("").to_string();
             }
             "cursor_byte" => {
                 snapshot.cursor_byte = v.as_u64().unwrap_or(1) as usize;

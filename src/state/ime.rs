@@ -25,8 +25,6 @@ pub struct ImeState {
     pub cursor_begin: usize,
     /// Cursor end position (byte offset)
     pub cursor_end: usize,
-    /// Whole buffer (all lines joined with "\n"), committed on IME off
-    pub buffer_text: String,
 }
 
 impl ImeState {
@@ -37,7 +35,6 @@ impl ImeState {
             preedit: String::new(),
             cursor_begin: 0,
             cursor_end: 0,
-            buffer_text: String::new(),
         }
     }
 
@@ -82,7 +79,6 @@ impl ImeState {
     /// Clear preedit
     pub fn clear_preedit(&mut self) {
         self.preedit.clear();
-        self.buffer_text.clear();
         self.cursor_begin = 0;
         self.cursor_end = 0;
     }

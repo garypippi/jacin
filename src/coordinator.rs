@@ -56,9 +56,10 @@ impl State {
             // Disable IME - commit preedit text BEFORE releasing keyboard
             // (must match Commit handler order: commit first, then release)
             log::debug!("[IME] Releasing keyboard");
-            // Whole buffer, so multiline input (grid display) isn't cut to one line
-            if !self.model.ime.buffer_text.is_empty() {
-                self.wayland.commit_string(&self.model.ime.buffer_text);
+            // Whole buffer from the line-event mirror (no RPC: Neovim may be
+            // blocked in getchar)
+            if !self.model.view.buffer.is_empty() {
+                self.wayland.commit_string(&self.model.view.buffer.text());
             }
             self.reset_ime_state();
             // Clear Neovim buffer (must clear here, not rely on Deactivate —

@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::Screen;
+use super::{BufferMirror, Screen};
 use crate::neovim::VisualSelection;
 
 /// How long a transient message stays visible before auto-clearing
@@ -46,6 +46,8 @@ pub struct NvimView {
     transient_message_at: Option<Instant>,
     /// Mirror of Neovim's UI grids (Phase A: shadow only, not rendered)
     pub screen: Screen,
+    /// Mirror of the buffer lines (kept across `clear`, like `screen`)
+    pub buffer: BufferMirror,
 }
 
 impl NvimView {
