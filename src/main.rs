@@ -34,21 +34,17 @@ use ui::{TextRenderer, UnifiedPopup};
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    // Load configuration
     let mut config = config::Config::load();
     if std::env::args().any(|a| a == "--clean") {
         config.clean = true;
     }
 
-    // Connect to Wayland display
     let conn = Connection::connect_to_env()?;
     log::info!("Connected to Wayland display");
 
-    // Initialize registry and get globals
     let (globals, event_queue) = registry_queue_init::<State>(&conn)?;
     let qh = event_queue.handle();
 
-    // Bind input method manager
     let input_method_manager: zwp_input_method_manager_v2::ZwpInputMethodManagerV2 = globals
         .bind(&qh, 1..=1, ())
         .expect("zwp_input_method_manager_v2 not available - is this a wlroots compositor?");
@@ -58,14 +54,12 @@ fn main() -> anyhow::Result<()> {
     let seat: wayland_client::protocol::wl_seat::WlSeat =
         globals.bind(&qh, 1..=9, ()).expect("wl_seat not available");
 
-    // Bind compositor and shm for candidate window
     let compositor: wl_compositor::WlCompositor = globals
         .bind(&qh, 4..=6, ())
         .expect("wl_compositor not available");
 
     let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("wl_shm not available");
 
-    // Create input method for this seat
     let input_method = input_method_manager.get_input_method(&seat, &qh, ());
     log::info!("Created zwp_input_method_v2");
 
@@ -90,7 +84,6 @@ fn main() -> anyhow::Result<()> {
     // Ping used by the Neovim thread to wake the event loop after sending a message
     let (nvim_wake, nvim_wake_source) = make_ping()?;
 
-    // Spawn Neovim backend
     let nvim = match neovim::spawn_neovim(config.clone(), Some(nvim_wake.clone())) {
         Ok(handle) => {
             log::info!("Neovim backend spawned");
@@ -102,7 +95,6 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Try to create text renderers for unified popup window
     let font_size = config
         .font
         .size
@@ -116,7 +108,6 @@ fn main() -> anyhow::Result<()> {
         log::warn!("Font not available, popup window disabled");
     }
 
-    // Create unified popup window using input method popup surface
     // The popup surface is automatically positioned near the cursor by the compositor
     let mut popup = if let (Some(renderer), Some(mono)) = (text_renderer, mono_renderer) {
         match UnifiedPopup::new(&compositor, &input_method, &shm, &qh, renderer, mono) {
@@ -141,7 +132,6 @@ fn main() -> anyhow::Result<()> {
         nvim.resize_ui(cols, rows);
     }
 
-    // Create application state
     let mut state = State {
         loop_signal: None,
         wayland: {
@@ -166,14 +156,11 @@ fn main() -> anyhow::Result<()> {
         popup_dirty: false,
     };
 
-    // Set up calloop event loop
     let mut event_loop: EventLoop<State> = EventLoop::try_new()?;
     state.loop_signal = Some(event_loop.get_signal());
 
-    // Insert Wayland event source
     WaylandSource::new(conn, event_queue).insert(event_loop.handle())?;
 
-    // Set up signal handling for clean exit
     let loop_signal = state.loop_signal.clone();
     let exit_signals = Signals::new(&[Signal::SIGINT, Signal::SIGTERM])?;
     event_loop
@@ -215,15 +202,12 @@ fn main() -> anyhow::Result<()> {
     log::info!("Entering event loop... (Ctrl+C to exit)");
     log::info!("Focus a text input field to activate the IME");
 
-    // Run the event loop
     let handle = event_loop.handle();
     event_loop.run(None, &mut state, |state| {
-        // Check for IME toggle signal (SIGUSR1)
         if state.toggle_flag.swap(false, Ordering::SeqCst) {
             state.handle_ime_toggle();
         }
 
-        // Check for messages from Neovim
         // Collect messages first to avoid borrow conflict
         let messages: Vec<_> = state
             .nvim
@@ -324,7 +308,6 @@ fn main() -> anyhow::Result<()> {
         }
     })?;
 
-    // Cleanup
     state.wayland.release_keyboard();
     if let Some(ref nvim) = state.nvim {
         nvim.shutdown();
@@ -341,19 +324,16 @@ fn main() -> anyhow::Result<()> {
 
 pub struct State {
     pub(crate) loop_signal: Option<LoopSignal>,
-    // Component state structs
     pub(crate) wayland: WaylandState,
     pub(crate) keyboard: KeyboardState,
     pub(crate) repeat: KeyRepeatState,
     // IME model driven by Neovim messages (keypress display, NvimView)
     pub(crate) model: Model,
     pub(crate) animations: Animations,
-    // Exit and toggle flags
     pub(crate) pending_exit: bool,
     pub(crate) toggle_flag: Arc<AtomicBool>,
     // Config (needed for Neovim respawn after :q)
     pub(crate) config: config::Config,
-    // Neovim backend
     pub(crate) nvim: Option<NeovimHandle>,
     // Wakes the event loop when the Neovim thread sends a message (reused on respawn)
     pub(crate) nvim_wake: Ping,

@@ -175,7 +175,6 @@ impl TextRenderer {
         }
     }
 
-    /// Measure text width
     pub fn measure_text(&mut self, text: &str) -> f32 {
         let mut width = 0.0;
         for c in text.chars() {
@@ -190,18 +189,15 @@ impl TextRenderer {
         self.font_size * 1.4
     }
 
-    /// Draw text at position
     pub fn draw_text(&mut self, pixmap: &mut Pixmap, text: &str, x: f32, y: f32, color: Color) {
         let mut cursor_x = x;
 
         for c in text.chars() {
             let glyph = self.get_glyph(c);
 
-            // Calculate glyph position
             let glyph_x = cursor_x + glyph.metrics.xmin as f32;
             let glyph_y = y - glyph.metrics.ymin as f32 - glyph.metrics.height as f32;
 
-            // Draw glyph bitmap
             if glyph.metrics.width > 0 && glyph.metrics.height > 0 {
                 draw_glyph_bitmap(
                     pixmap,
@@ -269,7 +265,6 @@ pub fn create_shm_pool(
 ) -> Option<(wl_shm_pool::WlShmPool, MmapMut)> {
     use std::os::fd::FromRawFd;
 
-    // Create anonymous file with memfd_create
     let fd = unsafe {
         let c_name = std::ffi::CString::new(name).ok()?;
         libc::memfd_create(c_name.as_ptr(), libc::MFD_CLOEXEC)
@@ -282,16 +277,13 @@ pub fn create_shm_pool(
 
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
 
-    // Set file size
     if file.set_len(size as u64).is_err() {
         log::error!("[SHM] Failed to set memfd size for {}", name);
         return None;
     }
 
-    // Memory map the file
     let mmap = unsafe { MmapMut::map_mut(&file) }.ok()?;
 
-    // Create wl_shm_pool
     let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
 
     // Keep file alive by leaking it (pool owns the fd now)
@@ -319,19 +311,15 @@ pub fn draw_border(pixmap: &mut Pixmap, width: u32, height: u32, color: Color) {
     let mut paint = Paint::default();
     paint.set_color(color);
 
-    // Top
     if let Some(rect) = Rect::from_xywh(0.0, 0.0, width as f32, 1.0) {
         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }
-    // Bottom
     if let Some(rect) = Rect::from_xywh(0.0, height as f32 - 1.0, width as f32, 1.0) {
         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }
-    // Left
     if let Some(rect) = Rect::from_xywh(0.0, 0.0, 1.0, height as f32) {
         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }
-    // Right
     if let Some(rect) = Rect::from_xywh(width as f32 - 1.0, 0.0, 1.0, height as f32) {
         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }

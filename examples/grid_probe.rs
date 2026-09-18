@@ -1,4 +1,4 @@
-//! Probe Neovim's UI events with ext_multigrid, for Phase B design.
+//! Probe Neovim's UI events with ext_multigrid.
 //!
 //! Usage: cargo run --example grid_probe -- [--clean] [KEY...]
 //!

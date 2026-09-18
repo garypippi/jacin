@@ -160,7 +160,8 @@ impl NvimHandler {
         }
     }
 
-    /// Parse and dispatch redraw notification events (ext_cmdline, ext_popupmenu).
+    /// Parse and dispatch redraw notification events (grid, cmdline,
+    /// popupmenu, messages, mode).
     fn handle_redraw(&self, args: &[Value]) {
         for event_group in args {
             let Some(arr) = event_group.as_array() else {
@@ -213,7 +214,6 @@ impl NvimHandler {
             log::debug!("[NVIM] cmdline_show: expected 6 params, got {}", arr.len());
             return;
         }
-        // Parse content: array of [attr_id, text] chunks
         let content = if let Some(chunks) = arr[0].as_array() {
             chunks
                 .iter()
@@ -301,7 +301,7 @@ impl NvimHandler {
                             Some(f) => f,
                             None => return String::new(),
                         };
-                        // Try word first, then menu, then kind (Codex: kind is label-like)
+                        // Try word first, then menu, then kind
                         let word = fields.first().and_then(|v| v.as_str()).unwrap_or("");
                         if !word.is_empty() {
                             return word.to_string();
@@ -323,7 +323,6 @@ impl NvimHandler {
             selected
         );
 
-        // Cache items for popupmenu_select
         *self.last_popupmenu_items.lock().unwrap() = words.clone();
 
         if words.is_empty() {
@@ -404,16 +403,14 @@ impl NvimHandler {
         }
         let kind = arr[0].as_str().unwrap_or("");
 
-        // Log all kinds for debugging (Codex: observe in real environment)
+        // Log all kinds for debugging
         log::debug!("[NVIM] msg_show: kind={:?}", kind);
 
-        // Blocklist filter
         if Self::MSG_KIND_BLOCKLIST.contains(&kind) {
             log::trace!("[NVIM] msg_show: blocked kind={:?}", kind);
             return;
         }
 
-        // Parse content: array of [attr_id, text] chunks
         let text = if let Some(chunks) = arr[1].as_array() {
             chunks
                 .iter()
@@ -683,7 +680,6 @@ pub fn run_blocking(rx: Receiver<ToNeovim>, tx: MainTx, config: Config) {
 async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> NvimResult<()> {
     log::info!("[NVIM] Starting Neovim...");
 
-    // Start Neovim in embedded mode
     let mut cmd = Command::new("nvim");
     cmd.args(["--embed", "--headless"]);
     // Lets user config detect jacin (`if vim.g.jacin then ... end`);
@@ -707,7 +703,6 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
 
     log::info!("[NVIM] Connected to Neovim");
 
-    // Initialize
     init_neovim(&nvim, config).await.map_err(NvimError::from)?;
 
     send_msg(&tx, FromNeovim::Ready);
@@ -741,7 +736,6 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
         },
     };
 
-    // Main loop - process messages from IME
     loop {
         match rx.recv() {
             Ok(ToNeovim::Key(key)) => {
@@ -794,7 +788,7 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     // buftype=nofile prevents E37 "No write since last change" on :q.
     nvim.command("set buftype=nofile bufhidden=wipe").await?;
 
-    // Attach as UI client to receive redraw events (ext_cmdline, ext_popupmenu)
+    // Attach as UI client to receive redraw events
     match nvim
         .call(
             "nvim_ui_attach",
@@ -824,7 +818,6 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     // Mirror the buffer lines (committed on IME off)
     attach_buffer(nvim).await?;
 
-    // Start in insert mode if configured
     if config.behavior.startinsert {
         nvim.command("startinsert").await?;
     }

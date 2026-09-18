@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn win_float_pos_uses_screen_position() {
-        // Observed from nvim-cmp: [5, win, "NW", 1, 2, 0, true, 1001, 1, 2, 0]
+        // A float like an nvim-cmp menu, placed by Neovim at screen (2, 0)
         let params = arr(vec![
             Value::from(5),
             Value::from(1000),
@@ -252,7 +252,6 @@ mod tests {
 
     #[test]
     fn win_viewport_parses_line_count() {
-        // Observed: [2, win, 0, 3, 1, 0, 2, 0]
         let params = arr(vec![
             Value::from(2),
             Value::from(1000),

@@ -41,7 +41,6 @@ impl PendingState {
         }
     }
 
-    /// Check if any pending state is active
     pub fn is_pending(self) -> bool {
         self != Self::None
     }
@@ -61,22 +60,18 @@ impl PendingState {
 pub struct AtomicPendingState(AtomicU8);
 
 impl AtomicPendingState {
-    /// Create with `PendingState::None`.
     pub const fn new() -> Self {
         Self(AtomicU8::new(PendingState::None as u8))
     }
 
-    /// Load the current pending state.
     pub fn load(&self) -> PendingState {
         PendingState::from_u8(self.0.load(Ordering::SeqCst))
     }
 
-    /// Store a new pending state.
     pub fn store(&self, state: PendingState) {
         self.0.store(state as u8, Ordering::SeqCst);
     }
 
-    /// Clear to `PendingState::None`.
     pub fn clear(&self) {
         self.store(PendingState::None);
     }
@@ -245,17 +240,13 @@ pub enum FromNeovim {
     },
 }
 
-/// Candidate information
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CandidateInfo {
-    /// List of candidate words
     pub candidates: Vec<String>,
-    /// Currently selected index
     pub selected: usize,
 }
 
 impl CandidateInfo {
-    /// Create new candidate info
     pub fn new(candidates: Vec<String>, selected: usize) -> Self {
         Self {
             candidates,
@@ -263,7 +254,6 @@ impl CandidateInfo {
         }
     }
 
-    /// Create empty candidate info
     pub fn empty() -> Self {
         Self::default()
     }

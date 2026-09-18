@@ -47,26 +47,22 @@ impl State {
             self.keyboard.ctrl_pressed
         );
 
-        // Handle key releases
         if key_state != wl_keyboard::KeyState::Pressed {
             self.keyboard.handle_key_release(key);
             return;
         }
 
-        // Check if key should be ignored
         if self.keyboard.should_ignore_key(key) {
             log::debug!("[KEY] Ignoring key {}", key);
             return;
         }
 
-        // Get keysym and UTF-8
         let Some((keysym, utf8)) = self.keyboard.get_key_info(key) else {
             log::warn!("No xkb state, cannot process key");
             return;
         };
         log::debug!("[KEY] keysym={:?}, utf8={:?}", keysym, utf8);
 
-        // Convert key to Vim notation and send to Neovim
         let vim_key = keysym_to_vim(
             self.keyboard.ctrl_pressed,
             self.keyboard.alt_pressed,
@@ -90,7 +86,6 @@ impl State {
                 .wait_for_nvim_response()
                 .unwrap_or(self.model.keypress.pending_type);
 
-            // Clear keycode after processing
             self.current_keycode = None;
 
             // Command-line mode: display updates come via ext_cmdline (cmdline_show)
@@ -147,7 +142,6 @@ impl State {
 
         let _perf = PerfGuard::new("nvim_rpc");
 
-        // Loop until KeyProcessed or deadline (200ms)
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());

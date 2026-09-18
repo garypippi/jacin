@@ -1,9 +1,6 @@
-//! Lightweight animation infrastructure.
-//!
-//! Provides a thin abstraction to centralise timer-driven visual updates
-//! (currently REC-dot blink) behind a uniform `update(now) -> changed` API.
-//! Future animations (cursor blink, fade-outs, …) can be added here without
-//! touching the main-loop timer wiring.
+//! Timer-driven visual updates (REC indicator blink) behind an
+//! `update(now) -> changed` API, so new animations need no main-loop
+//! timer changes.
 
 use std::time::{Duration, Instant};
 

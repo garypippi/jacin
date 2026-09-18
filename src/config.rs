@@ -170,26 +170,13 @@ mod tests {
     }
 
     #[test]
-    fn removed_write_to_commit_key_is_ignored() {
-        // write_to_commit was removed; old configs must still load
+    fn unknown_keys_are_ignored() {
+        // Unknown keys and sections are ignored, so configs written for
+        // other versions still load
         let config: Config = toml::from_str(
             r#"
             [behavior]
             write_to_commit = true
-            "#,
-        )
-        .unwrap();
-        assert!(config.behavior.startinsert); // default preserved
-        assert!(config.behavior.recording_blink); // default preserved
-    }
-
-    #[test]
-    fn removed_display_and_completion_keys_are_ignored() {
-        // display (grid only now) and completion.adapter were removed;
-        // old configs must still load
-        let config: Config = toml::from_str(
-            r#"
-            [behavior]
             display = "grid"
             startinsert = false
 

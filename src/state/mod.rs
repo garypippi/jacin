@@ -1,10 +1,4 @@
-//! State management module
-//!
-//! Separates IME state into distinct components:
-//! - WaylandState: Protocol handles and serial tracking
-//! - KeyboardState: XKB context and modifier tracking
-//! - ImeState: IME mode state machine
-//! - NvimView: Display state observed from Neovim
+//! IME state, split into Wayland, keyboard, IME mode and Neovim-observed components
 
 mod animation;
 mod buffer;

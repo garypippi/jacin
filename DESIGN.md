@@ -183,4 +183,4 @@ Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and
 Neovim buffer = N lines → app preedit = none → popup = window grid (up to MAX_GRID_ROWS rows, scrolled to the cursor)
 ```
 
-`<CR>` is a native newline. `<CR>`/`<BS>`/commit key pass through only when the whole buffer is empty. The commit key and IME off commit all lines joined with `\n` (IME off uses `BufferMirror`). Trailing empty lines are kept. See `MULTILINE.md` "Commit Behavior" and "Phase C".
+`<CR>` is a native newline. `<CR>`/`<BS>`/commit key pass through only when the whole buffer is empty. The commit key and IME off commit all lines joined with `\n` (IME off uses `BufferMirror`). Trailing empty lines are kept.

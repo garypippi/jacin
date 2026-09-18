@@ -1,6 +1,6 @@
 //! IME state machine
 //!
-//! Explicit state machine for IME mode transitions, replacing scattered boolean flags.
+//! Explicit state machine for IME mode transitions.
 
 /// Main IME mode state machine
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -18,12 +18,10 @@ pub enum ImeMode {
 /// IME lifecycle (the application gets no preedit: text is shown in the
 /// popup and only committed)
 pub struct ImeState {
-    /// Current IME mode
     pub mode: ImeMode,
 }
 
 impl ImeState {
-    /// Create new IME state
     pub fn new() -> Self {
         Self {
             mode: ImeMode::Disabled,
@@ -40,7 +38,6 @@ impl ImeState {
         matches!(self.mode, ImeMode::Enabled)
     }
 
-    /// Start enabling the IME
     pub fn start_enabling(&mut self) {
         self.mode = ImeMode::Enabling;
     }

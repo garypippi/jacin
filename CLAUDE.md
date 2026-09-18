@@ -63,7 +63,7 @@ src/
 - **nvim_ui_attach extensions**: `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `ext_multigrid`, `mode_change` — Neovim's UI protocol drives command-line, completion, messages, mode, and the window display
 - **Display**: popup renders the window grid from ext_multigrid events (`Screen`/`WindowView`); the app gets no preedit; Neovim is started with `g:jacin = 1` for user config
 - **Multiline**: `<CR>` is a native newline; commit key joins all lines with `\n`; IME off commits the `nvim_buf_attach` mirror (`BufferMirror`); `<CR>`/`<BS>`/commit pass through only when the whole buffer is empty
-- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, font, startinsert, recording_blink (removed keys like `display`/`completion.adapter` are ignored)
+- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, font, startinsert, recording_blink (unknown keys are ignored)
 
 ## Architecture
 

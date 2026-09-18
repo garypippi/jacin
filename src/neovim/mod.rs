@@ -48,7 +48,6 @@ impl NeovimHandle {
         self.receiver.try_recv().ok()
     }
 
-    /// Receive with timeout
     pub fn recv_timeout(&self, timeout: Duration) -> Option<FromNeovim> {
         self.receiver.recv_timeout(timeout).ok()
     }

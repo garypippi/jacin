@@ -17,7 +17,6 @@ use crate::State;
 pub struct WaylandState {
     /// Queue handle for creating new protocol objects
     pub qh: QueueHandle<State>,
-    /// Input method protocol instance
     pub input_method: ZwpInputMethodV2,
     /// Active keyboard grab (when IME is enabled)
     pub keyboard_grab: Option<ZwpInputMethodKeyboardGrabV2>,
@@ -36,7 +35,6 @@ pub struct WaylandState {
 }
 
 impl WaylandState {
-    /// Create new Wayland state
     pub fn new(qh: QueueHandle<State>, input_method: ZwpInputMethodV2) -> Self {
         Self {
             qh,
@@ -51,7 +49,6 @@ impl WaylandState {
         }
     }
 
-    /// Grab the keyboard for input processing
     pub fn grab_keyboard(&mut self) -> bool {
         if self.keyboard_grab.is_some() {
             return false;
@@ -61,7 +58,6 @@ impl WaylandState {
         true
     }
 
-    /// Release the keyboard grab
     pub fn release_keyboard(&mut self) -> bool {
         if let Some(grab) = self.keyboard_grab.take() {
             grab.release();
@@ -96,14 +92,12 @@ impl WaylandState {
         }
     }
 
-    /// Commit text to the application
     pub fn commit_string(&mut self, text: &str) {
         self.input_method.commit_string(text.to_string());
         self.input_method.set_preedit_string(String::new(), 0, 0);
         self.input_method.commit(self.serial);
     }
 
-    /// Delete surrounding text
     pub fn delete_surrounding(&mut self, before: u32, after: u32) {
         self.input_method.delete_surrounding_text(before, after);
         self.input_method.commit(self.serial);
@@ -127,13 +121,10 @@ impl WaylandState {
             log::warn!("[VK] Cannot send virtual key — no virtual keyboard");
             return;
         };
-        // Set current modifier state
         vk.modifiers(mods_depressed, mods_latched, mods_locked, mods_group);
         // Key press (time=0 is fine for synthetic events)
         vk.key(0, keycode, 1); // 1 = pressed
-        // Key release
         vk.key(0, keycode, 0); // 0 = released
-        // Clear modifiers after the key event
         vk.modifiers(0, 0, 0, 0);
         log::debug!(
             "[VK] Sent virtual key: keycode={}, mods_depressed=0x{:x}",

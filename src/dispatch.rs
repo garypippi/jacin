@@ -32,7 +32,6 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     }
 }
 
-// Dispatch for seat
 impl Dispatch<wayland_client::protocol::wl_seat::WlSeat, ()> for State {
     fn event(
         _state: &mut Self,
@@ -46,7 +45,6 @@ impl Dispatch<wayland_client::protocol::wl_seat::WlSeat, ()> for State {
     }
 }
 
-// Dispatch for compositor
 impl Dispatch<wl_compositor::WlCompositor, ()> for State {
     fn event(
         _state: &mut Self,
@@ -56,11 +54,9 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for State {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        // Compositor has no events
     }
 }
 
-// Dispatch for shm
 impl Dispatch<wl_shm::WlShm, ()> for State {
     fn event(
         _state: &mut Self,
@@ -76,7 +72,6 @@ impl Dispatch<wl_shm::WlShm, ()> for State {
     }
 }
 
-// Dispatch for shm pool
 impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
     fn event(
         _state: &mut Self,
@@ -86,11 +81,9 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for State {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        // Pool has no events
     }
 }
 
-// Dispatch for region (no events)
 impl Dispatch<wl_region::WlRegion, ()> for State {
     fn event(
         _state: &mut Self,
@@ -103,7 +96,6 @@ impl Dispatch<wl_region::WlRegion, ()> for State {
     }
 }
 
-// Dispatch for surface
 impl Dispatch<wl_surface::WlSurface, ()> for State {
     fn event(
         _state: &mut Self,
@@ -147,7 +139,6 @@ impl Dispatch<wl_buffer::WlBuffer, usize> for State {
     }
 }
 
-// Dispatch for input popup surface (candidate window)
 impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for State {
     fn event(
         _state: &mut Self,
@@ -177,7 +168,6 @@ impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for State 
     }
 }
 
-// Dispatch for input method manager
 impl Dispatch<zwp_input_method_manager_v2::ZwpInputMethodManagerV2, ()> for State {
     fn event(
         _state: &mut Self,
@@ -187,11 +177,9 @@ impl Dispatch<zwp_input_method_manager_v2::ZwpInputMethodManagerV2, ()> for Stat
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        // Manager has no events
     }
 }
 
-// Dispatch for input method - this is where the action happens!
 impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
     fn event(
         state: &mut Self,
@@ -255,7 +243,6 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
     }
 }
 
-// Dispatch for keyboard grab
 impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, ()> for State {
     fn event(
         state: &mut Self,
@@ -275,7 +262,6 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                         unsafe { memmap_keymap(fd.as_fd().as_raw_fd(), size as usize) };
 
                     if let Some(data) = keymap_data {
-                        // Parse the keymap using KeyboardState
                         if state.keyboard.load_keymap(&data) {
                             log::info!("Keymap loaded successfully");
 
@@ -285,7 +271,6 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             // (e.g., Alt leaked to the app before the grab started)
                             state.wayland.clear_modifiers();
 
-                            // Complete enabling if transitioning
                             if state.model.ime.complete_enabling()
                                 || state.model.ime.is_fully_enabled()
                             {
@@ -352,7 +337,6 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
     }
 }
 
-// Dispatch for virtual keyboard manager (no events)
 impl Dispatch<zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1, ()> for State {
     fn event(
         _state: &mut Self,
@@ -365,7 +349,6 @@ impl Dispatch<zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1, ()> 
     }
 }
 
-// Dispatch for virtual keyboard (no events)
 impl Dispatch<zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1, ()> for State {
     fn event(
         _state: &mut Self,
@@ -378,7 +361,6 @@ impl Dispatch<zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1, ()> for State {
     }
 }
 
-/// Memory-map a keymap file descriptor
 unsafe fn memmap_keymap(fd: std::os::fd::RawFd, size: usize) -> Option<String> {
     unsafe {
         let ptr = libc::mmap(

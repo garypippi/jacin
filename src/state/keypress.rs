@@ -21,7 +21,6 @@ pub struct KeypressEntry {
 /// State for keypress display window
 #[derive(Debug)]
 pub struct KeypressState {
-    /// Individual keypress entries
     entries: Vec<KeypressEntry>,
     /// Timestamp of the last entry addition (None when empty)
     last_added_at: Option<Instant>,
@@ -30,7 +29,6 @@ pub struct KeypressState {
 }
 
 impl KeypressState {
-    /// Create a new keypress state
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -39,13 +37,11 @@ impl KeypressState {
         }
     }
 
-    /// Push a key to the entries
     pub fn push_key(&mut self, key: &str) {
         self.entries.push(KeypressEntry {
             text: key.to_string(),
         });
         self.last_added_at = Some(Instant::now());
-        // Trim oldest entries if over limit
         if self.entries.len() > MAX_DISPLAY_ENTRIES {
             let excess = self.entries.len() - MAX_DISPLAY_ENTRIES;
             self.entries.drain(..excess);
@@ -59,7 +55,6 @@ impl KeypressState {
         self.pending_type = PendingState::None;
     }
 
-    /// Set the pending type
     pub fn set_pending(&mut self, pending_type: PendingState) {
         self.pending_type = pending_type;
     }
@@ -83,7 +78,6 @@ impl KeypressState {
         !self.entries.is_empty()
     }
 
-    /// Get entries for rendering
     pub fn entries(&self) -> &[KeypressEntry] {
         &self.entries
     }

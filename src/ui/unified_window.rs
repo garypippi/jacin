@@ -60,7 +60,6 @@ pub struct UnifiedPopup {
 }
 
 impl UnifiedPopup {
-    /// Create a new unified popup window
     pub fn new(
         compositor: &wayland_client::protocol::wl_compositor::WlCompositor,
         input_method: &zwp_input_method_v2::ZwpInputMethodV2,
@@ -71,7 +70,6 @@ impl UnifiedPopup {
     ) -> Option<Self> {
         let surfaces = Self::create_surfaces(compositor, input_method, qh);
 
-        // Create shm pool for double-buffered rendering
         let (pool, pool_data) = create_shm_pool(shm, qh, POOL_SIZE, "ime-unified-popup")?;
 
         Some(Self {
@@ -112,12 +110,11 @@ impl UnifiedPopup {
         }
     }
 
-    /// Neovim UI size (columns, rows): the window
-    /// section at the maximum popup size. Rows must leave room below the
-    /// cursor for floats — nvim-cmp won't open a menu of 8+ entries unless
-    /// `lines - cursor_row > 10`, so sizing rows to the visible window grid
-    /// alone (9) hides such menus. Floats are clamped to `lines` by their
-    /// owners, so they still fit the popup.
+    /// Neovim UI size (columns, rows): the window section at the maximum
+    /// popup size. Rows exceed the visible window grid to leave room below
+    /// the cursor for floats (nvim-cmp opens a menu below only when
+    /// `lines - cursor_row > min(10, entries)`). Floats are clamped to
+    /// `lines` by their owners, so they still fit the popup.
     pub fn grid_ui_size(&mut self) -> (usize, usize) {
         let cell_width = self.mono_renderer.measure_text(" ").max(1.0);
         let cols = ((MAX_POPUP_WIDTH as f32 - PADDING * 2.0) / cell_width).floor() as usize;
@@ -129,7 +126,6 @@ impl UnifiedPopup {
         (cols.max(20), rows.max(MAX_GRID_ROWS + 1))
     }
 
-    /// Update the popup with new content
     pub fn update(&mut self, content: &PopupContent, qh: &QueueHandle<State>) {
         if content.is_empty() {
             self.hide();
@@ -157,17 +153,14 @@ impl UnifiedPopup {
             self.scroll_offset = 0;
         }
 
-        // Calculate layout and size
         let layout = calculate_layout(content, &mut self.renderer, &mut self.mono_renderer);
         self.width = layout.width;
         self.height = layout.height;
 
-        // Render
         self.render(content, &layout, qh);
         self.visible = true;
     }
 
-    /// Hide the popup
     pub fn hide(&mut self) {
         if self.visible {
             // First unmap the surface for immediate visual feedback, then
@@ -194,7 +187,6 @@ impl UnifiedPopup {
         }
     }
 
-    /// Destroy the window
     pub fn destroy(self) {
         for slot in self.buffers.into_iter().flatten() {
             slot.buffer.destroy();
@@ -206,7 +198,6 @@ impl UnifiedPopup {
         self.pool.destroy();
     }
 
-    /// Render the popup content
     fn render(&mut self, content: &PopupContent, layout: &Layout, qh: &QueueHandle<State>) {
         let _perf_start = std::time::Instant::now();
         let buffer_size = (self.width * self.height * 4) as usize;
@@ -219,11 +210,9 @@ impl UnifiedPopup {
             return;
         }
 
-        // Find available buffer slot
         let buffer_idx = self.find_available_buffer();
         let offset = buffer_idx * buffer_size;
 
-        // Create pixmap
         let Some(mut pixmap) = Pixmap::new(self.width, self.height) else {
             log::warn!(
                 "[POPUP] Failed to allocate pixmap ({}x{}), skipping render",
@@ -233,13 +222,10 @@ impl UnifiedPopup {
             return;
         };
 
-        // Background
         pixmap.fill(rgba(BG_COLOR));
 
-        // Border
         draw_border(&mut pixmap, self.width, self.height, rgba(BORDER_COLOR));
 
-        // Render sections
         if layout.has_window {
             let window_rows = content
                 .window_view
@@ -274,7 +260,6 @@ impl UnifiedPopup {
             self.render_transient_message(&mut pixmap, content, layout);
         }
 
-        // Copy to SHM buffer
         let dest = &mut self.pool_data[offset..offset + buffer_size];
         copy_pixmap_to_shm(&pixmap, dest);
 
@@ -306,7 +291,6 @@ impl UnifiedPopup {
             self.buffers[buffer_idx].as_mut().unwrap().in_use = true;
         }
 
-        // Attach and commit
         let Some(ref s) = self.surfaces else {
             return;
         };
@@ -447,13 +431,11 @@ impl UnifiedPopup {
         let line_height = self.renderer.line_height();
         let y_baseline = layout.keypress_y + line_height * 0.75;
 
-        // Draw mode label using monospace font
         let (mode_text, mode_color) = mode_label(&content.vim_mode);
         let mode_x = PADDING;
         self.mono_renderer
             .draw_text(pixmap, mode_text, mode_x, y_baseline, rgba(mode_color));
 
-        // Draw recording indicator if active
         let mode_text_width = self.mono_renderer.measure_text(mode_text);
         let mut after_mode_x = mode_x + mode_text_width;
         if !content.recording.is_empty() {
@@ -472,7 +454,6 @@ impl UnifiedPopup {
                 );
             }
 
-            // Draw @reg text using monospace font
             let rec_label = format_recording_label(&content.recording);
             let text_x = rec_x + REC_CIRCLE_RADIUS * 2.0 + REC_CIRCLE_TEXT_GAP;
             self.mono_renderer.draw_text(
@@ -485,7 +466,6 @@ impl UnifiedPopup {
             after_mode_x = text_x + self.mono_renderer.measure_text(&rec_label);
         }
 
-        // Draw vertical separator
         let sep_x = (after_mode_x + ICON_SEPARATOR_GAP).round();
         if let Some(rect) =
             Rect::from_xywh(sep_x, layout.keypress_y, ICON_SEPARATOR_WIDTH, line_height)
@@ -504,7 +484,6 @@ impl UnifiedPopup {
                 let text_left = layout.keypress_icon_width;
                 let text_color = rgba(KEYPRESS_TEXT_COLOR);
 
-                // Build byte-to-char mapping
                 let chars: Vec<char> = text.chars().collect();
                 let mut byte_to_char: Vec<usize> = Vec::with_capacity(text.len() + 1);
                 for (i, c) in chars.iter().enumerate() {
@@ -519,7 +498,6 @@ impl UnifiedPopup {
                     .copied()
                     .unwrap_or(chars.len());
 
-                // Calculate character x positions
                 let mut char_x_positions: Vec<f32> = Vec::with_capacity(chars.len() + 1);
                 let mut x = text_left;
                 for c in &chars {
@@ -528,7 +506,6 @@ impl UnifiedPopup {
                 }
                 char_x_positions.push(x);
 
-                // Draw characters
                 for (i, c) in chars.iter().enumerate() {
                     let char_x = char_x_positions[i];
                     self.mono_renderer.draw_text(
@@ -598,7 +575,6 @@ impl UnifiedPopup {
         let line_height = self.renderer.line_height();
         let total_count = content.candidates.len();
 
-        // Render visible candidates
         for (visible_idx, candidate) in content
             .candidates
             .iter()
@@ -610,7 +586,6 @@ impl UnifiedPopup {
             let y_base = layout.candidates_y + (visible_idx as f32 * line_height);
             let y_text = y_base + line_height * 0.75;
 
-            // Draw selection highlight
             if actual_idx == content.selected {
                 let highlight_width = if layout.has_scrollbar {
                     self.width as f32 - SCROLLBAR_WIDTH - 4.0
@@ -624,12 +599,10 @@ impl UnifiedPopup {
                 }
             }
 
-            // Draw number
             let number = format!("{}.", actual_idx + 1);
             self.renderer
                 .draw_text(pixmap, &number, PADDING, y_text, number_color);
 
-            // Draw candidate text
             self.renderer.draw_text(
                 pixmap,
                 candidate,
@@ -639,12 +612,10 @@ impl UnifiedPopup {
             );
         }
 
-        // Draw scrollbar if needed
         if layout.has_scrollbar {
             let scrollbar_x = self.width as f32 - SCROLLBAR_WIDTH - 2.0;
             let scrollbar_height = layout.visible_count as f32 * line_height;
 
-            // Scrollbar track
             if let Some(rect) = Rect::from_xywh(
                 scrollbar_x,
                 layout.candidates_y,
@@ -656,7 +627,6 @@ impl UnifiedPopup {
                 pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
 
-            // Scrollbar thumb
             let thumb = scrollbar_thumb_geometry(
                 layout.visible_count,
                 total_count,
@@ -689,7 +659,6 @@ impl UnifiedPopup {
         }
     }
 
-    /// Find an available buffer slot
     fn find_available_buffer(&mut self) -> usize {
         let other = 1 - self.current_buffer;
         if self.buffers[other]

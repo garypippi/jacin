@@ -44,7 +44,6 @@ impl State {
                     }
                 }
             }
-            // Enable IME - grab keyboard
             if self.wayland.active && self.wayland.keyboard_grab.is_none() {
                 log::debug!("[IME] Grabbing keyboard");
                 self.wayland.grab_keyboard();
@@ -137,7 +136,6 @@ impl State {
         }
     }
 
-    /// Render the unified popup with current state
     fn render_popup(&mut self) {
         // IME disabled: skip content generation entirely and ensure popup is hidden.
         // After toggle-off, Neovim sends a burst of push notifications (<Esc>ggdG
@@ -197,7 +195,6 @@ impl State {
         );
     }
 
-    /// Hide the unified popup
     pub(crate) fn hide_popup(&mut self) {
         if let Some(ref mut popup) = self.popup {
             popup.hide();

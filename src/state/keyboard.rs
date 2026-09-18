@@ -10,13 +10,10 @@ use xkbcommon::xkb;
 
 /// Keyboard state including XKB and modifier tracking
 pub struct KeyboardState {
-    /// XKB context for keymap parsing
     pub xkb_context: xkb::Context,
     /// Current XKB state (after keymap loaded)
     pub xkb_state: Option<xkb::State>,
-    /// Ctrl modifier pressed
     pub ctrl_pressed: bool,
-    /// Alt modifier pressed
     pub alt_pressed: bool,
     /// Keys that should be ignored (pressed before we were ready)
     pub ignored_keys: HashSet<u32>,
@@ -40,7 +37,6 @@ pub struct KeyboardState {
 }
 
 impl KeyboardState {
-    /// Create new keyboard state
     pub fn new() -> Self {
         Self {
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
@@ -68,7 +64,6 @@ impl KeyboardState {
         let hash = hasher.finish();
 
         if self.keymap_hash == Some(hash) {
-            // Same keymap — skip XKB reload
             log::debug!("Keymap unchanged (cache hit, skipped XKB reload)");
             self.pending_keymap = false;
             return true;
@@ -89,7 +84,6 @@ impl KeyboardState {
         }
     }
 
-    /// Update modifier state
     pub fn update_modifiers(
         &mut self,
         mods_depressed: u32,
@@ -116,13 +110,11 @@ impl KeyboardState {
 
     /// Check if a key should be ignored (pressed before ready or during debounce)
     pub fn should_ignore_key(&mut self, key: u32) -> bool {
-        // Check if waiting for keymap
         if self.pending_keymap {
             self.ignored_keys.insert(key);
             return true;
         }
 
-        // Check if in ignored set
         if self.ignored_keys.contains(&key) {
             return true;
         }
@@ -173,7 +165,6 @@ impl KeyboardState {
         self.mods_group = 0;
     }
 
-    /// Store compositor repeat info
     pub fn set_repeat_info(&mut self, rate: i32, delay: i32) {
         self.repeat_rate = rate;
         self.repeat_delay = delay;

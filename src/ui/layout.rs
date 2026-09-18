@@ -1,8 +1,4 @@
 //! Layout calculation and constants for the unified popup
-//!
-//! Layout logic extracted from unified_window.rs. `calculate_layout` still
-//! depends on `TextRenderer` for text measurement; a future step can make it
-//! fully pure by accepting measurement results as parameters.
 
 use crate::state::WindowView;
 
@@ -15,7 +11,7 @@ pub(crate) fn rgba(c: Rgba) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.0, c.1, c.2, c.3)
 }
 
-// Colors (matching existing windows)
+// Colors
 pub(crate) const BG_COLOR: Rgba = (40, 44, 52, 240);
 pub(crate) const TEXT_COLOR: Rgba = (220, 223, 228, 255);
 pub(crate) const BORDER_COLOR: Rgba = (80, 84, 92, 255);
@@ -165,7 +161,6 @@ pub(crate) fn calculate_layout(
     // Hide keypress text when candidates are shown, but keypress row itself
     // is always visible when IME is enabled (shows mode/REC icons)
     let has_keypress_text = !content.keypress_entries.is_empty() && content.candidates.is_empty();
-    // Keypress row is always present when IME is enabled
     let has_keypress = content.ime_enabled;
     let has_candidates = !content.candidates.is_empty();
     let has_transient_message =
@@ -253,7 +248,6 @@ pub(crate) fn calculate_layout(
             0.0
         };
 
-        // Calculate max candidate width
         for candidate in content.candidates.iter().take(MAX_VISIBLE_CANDIDATES) {
             let text_width = renderer.measure_text(candidate);
             max_width = max_width.max(text_width + NUMBER_WIDTH + PADDING * 2.0 + scrollbar_space);
