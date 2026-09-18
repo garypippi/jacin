@@ -266,6 +266,9 @@ pub struct PreeditInfo {
     pub mode: String,
     /// Currently recording macro register ("" when not recording)
     pub recording: String,
+    /// All buffer lines joined with "\n" (committed on IME off)
+    #[serde(default)]
+    pub buffer_text: String,
 }
 
 /// Candidate information
@@ -292,6 +295,7 @@ impl PreeditInfo {
             cursor_end,
             mode,
             recording,
+            buffer_text: String::new(),
         }
     }
 
@@ -322,6 +326,9 @@ impl CandidateInfo {
 pub struct Snapshot {
     /// Current line text (preedit)
     pub preedit: String,
+    /// All buffer lines joined with "\n" (committed on IME off)
+    #[serde(default)]
+    pub buffer_text: String,
     /// Cursor byte position (1-indexed, from col('.'))
     pub cursor_byte: usize,
     /// Vim mode string ("i", "n", "no", "v", "c", etc.)
@@ -352,13 +359,16 @@ impl Snapshot {
         } else {
             cursor_begin
         };
-        PreeditInfo::new(
-            self.preedit.clone(),
-            cursor_begin,
-            cursor_end,
-            self.mode.clone(),
-            self.recording.clone(),
-        )
+        PreeditInfo {
+            buffer_text: self.buffer_text.clone(),
+            ..PreeditInfo::new(
+                self.preedit.clone(),
+                cursor_begin,
+                cursor_end,
+                self.mode.clone(),
+                self.recording.clone(),
+            )
+        }
     }
 
     /// Convert visual fields to VisualSelection (1-indexed Lua → 0-indexed byte offsets).
@@ -417,6 +427,7 @@ mod tests {
     fn make_snapshot(cursor_byte: usize, char_width: usize, mode: &str) -> Snapshot {
         Snapshot {
             preedit: "hello".into(),
+            buffer_text: "hello".into(),
             cursor_byte,
             mode: mode.into(),
             blocking: false,

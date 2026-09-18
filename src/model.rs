@@ -65,6 +65,7 @@ impl Model {
                 }
                 self.ime
                     .set_preedit(info.text, info.cursor_begin, info.cursor_end);
+                self.ime.buffer_text = info.buffer_text;
                 self.view.set_vim_mode(&info.mode);
                 self.view.recording = info.recording;
                 self.shadow_check();

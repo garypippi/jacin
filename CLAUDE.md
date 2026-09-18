@@ -70,7 +70,7 @@ src/
 
 ## Known Limitations
 
-- Multiline operations (yy, dd, cc, p, P) not yet supported (single-line preedit only)
+- Snapshot display only: multiline operations (yy, dd, cc, p, P) not supported (single-line preedit, `<CR>` auto-commits). Grid display supports multiline input (`ime_context.multiline`; commit joins all lines with `\n`)
 
 ## Architecture
 

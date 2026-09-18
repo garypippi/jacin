@@ -5,6 +5,8 @@ function _G.collect_snapshot()
 
     local snapshot = {
         preedit = line,
+        -- All lines joined, committed on IME off
+        buffer_text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n'),
         cursor_byte = col,
         mode = mode.mode,
         blocking = mode.blocking,

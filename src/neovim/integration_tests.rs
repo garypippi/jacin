@@ -413,3 +413,88 @@ fn g_jacin_is_set_for_user_config() {
 
     shutdown_and_wait(&handle);
 }
+
+fn spawn_grid_and_wait_ready() -> super::NeovimHandle {
+    let mut config = clean_config();
+    config.behavior.display = crate::config::DisplayMode::Grid;
+    let handle = spawn_neovim(config, None).expect("failed to spawn neovim");
+    recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
+        .expect("Neovim did not send Ready");
+    handle
+}
+
+fn send_keys_and_collect(handle: &super::NeovimHandle, keys: &[&str]) -> Vec<FromNeovim> {
+    keys.iter()
+        .flat_map(|k| send_and_collect(handle, k))
+        .collect()
+}
+
+fn has_passthrough(msgs: &[FromNeovim]) -> bool {
+    msgs.iter().any(|m| matches!(m, FromNeovim::PassthroughKey))
+}
+
+/// Grid display (multiline): <CR> is a native newline (no auto-commit),
+/// <CR>/<BS> on an empty 2nd line stay in Neovim, and the commit key
+/// commits all lines joined with "\n" (trailing empty line kept).
+#[test]
+#[ignore]
+fn grid_multiline_enter_and_commit() {
+    let handle = spawn_grid_and_wait_ready();
+
+    let msgs = send_keys_and_collect(&handle, &["a", "<CR>", "<CR>", "<BS>", "b", "<CR>"]);
+    assert!(!has_passthrough(&msgs), "unexpected passthrough: {msgs:?}");
+    assert!(
+        !msgs.iter().any(|m| matches!(m, FromNeovim::AutoCommit(_))),
+        "unexpected auto-commit: {msgs:?}"
+    );
+    let msg = recv_until(
+        &handle,
+        |m| matches!(m, FromNeovim::Preedit(info) if info.buffer_text == "a\nb\n"),
+        MSG_TIMEOUT,
+    );
+    assert!(msg.is_some(), "expected buffer_text 'a\\nb\\n'");
+
+    let msgs = send_and_collect(&handle, "<C-CR>");
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, FromNeovim::Commit(text) if text == "a\nb\n")),
+        "expected Commit 'a\\nb\\n', got {msgs:?}"
+    );
+
+    shutdown_and_wait(&handle);
+}
+
+/// Passthrough only when the whole buffer is empty.
+#[test]
+#[ignore]
+fn empty_buffer_passes_through_enter_bs_and_commit() {
+    let handle = spawn_grid_and_wait_ready();
+
+    for key in ["<CR>", "<BS>", "<C-CR>"] {
+        let msgs = send_and_collect(&handle, key);
+        assert!(
+            has_passthrough(&msgs),
+            "expected passthrough for {key}: {msgs:?}"
+        );
+    }
+
+    shutdown_and_wait(&handle);
+}
+
+/// Snapshot display keeps single-line input: <CR> auto-commits the line.
+#[test]
+#[ignore]
+fn snapshot_display_enter_auto_commits() {
+    let handle = spawn_and_wait_ready();
+
+    handle.send_key("a");
+    handle.send_key("<CR>");
+    let msg = recv_until(
+        &handle,
+        |m| matches!(m, FromNeovim::AutoCommit(text) if text == "a"),
+        MSG_TIMEOUT,
+    );
+    assert!(msg.is_some(), "expected AutoCommit 'a'");
+
+    shutdown_and_wait(&handle);
+}

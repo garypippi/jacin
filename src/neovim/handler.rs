@@ -934,6 +934,11 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
 
     nvim.exec_lua(include_str!("lua/auto_commit.lua"), vec![])
         .await?;
+    if config.behavior.display == DisplayMode::Grid {
+        // Multiline input: <CR> is a native newline, not an auto-commit
+        nvim.exec_lua("ime_context.multiline = true", vec![])
+            .await?;
+    }
     nvim.exec_lua(include_str!("lua/autocmds.lua"), vec![])
         .await?;
 
@@ -1336,6 +1341,7 @@ fn parse_snapshot(value: &nvim_rs::Value) -> NvimResult<Snapshot> {
 
     let mut snapshot = Snapshot {
         preedit: String::new(),
+        buffer_text: String::new(),
         cursor_byte: 1,
         mode: "n".to_string(),
         blocking: false,
@@ -1350,6 +1356,9 @@ fn parse_snapshot(value: &nvim_rs::Value) -> NvimResult<Snapshot> {
         match key {
             "preedit" => {
                 snapshot.preedit = v.as_str().unwrap_or("").to_string();
+            }
+            "buffer_text" => {
+                snapshot.buffer_text = v.as_str().unwrap_or("").to_string();
             }
             "cursor_byte" => {
                 snapshot.cursor_byte = v.as_u64().unwrap_or(1) as usize;

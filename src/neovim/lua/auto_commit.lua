@@ -1,7 +1,8 @@
-_G.ime_context = { last_line_count = 1, clearing = false }
+-- multiline: set in grid display, where <CR> is a native newline
+_G.ime_context = { last_line_count = 1, clearing = false, multiline = false }
 
 function _G.check_line_added()
-    if ime_context.clearing then return end
+    if ime_context.clearing or ime_context.multiline then return end
     local line_count = vim.fn.line('$')
     if line_count > ime_context.last_line_count then
         -- Line added: commit the adjacent non-cursor line

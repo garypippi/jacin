@@ -58,6 +58,7 @@ All fields are optional and fall back to the defaults shown above.
 
 - **snapshot** (default): The popup shows the current line read from Neovim, and the same text is sent to the application as preedit.
 - **grid** (experimental): The popup renders Neovim's window directly from UI events (`ext_multigrid`), including your colorscheme highlights and floating windows such as the nvim-cmp menu. Neovim's UI is resized to fit the popup, so long lines wrap there. The application receives no preedit; text is only inserted on commit.
+  - Input can span multiple lines: `<CR>` inserts a newline instead of committing, and the commit key (or turning the IME off) commits the whole buffer joined with `\n`. `<CR>`/`<BS>`/commit key are passed to the application only when the buffer is completely empty. Note that in terminals a committed newline acts like Enter.
   - Whatever Neovim draws in its window (including floats) appears in the grid; externalized UI (native popup menu, command line, messages) keeps using jacin's own sections. Therefore the `nvim-cmp` completion adapter is not loaded in grid mode, since its menu is already visible as a floating window.
 
 ### Neovim configuration for jacin
@@ -100,7 +101,7 @@ RUST_LOG=debug ./target/release/jacin
 
 ## Limitations
 
-Preedit is single-line only. Multiline operations (`yy`, `dd`, `cc`, `p`, `P`) are not supported.
+In snapshot display, preedit is single-line only: `<CR>` commits the current line, and multiline operations (`yy`, `dd`, `cc`, `p`, `P`) are not supported. Use grid display for multiline input.
 
 ## Security Warning
 

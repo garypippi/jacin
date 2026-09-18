@@ -168,8 +168,8 @@ Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and
 ## 5. Extension Notes: Multiline
 
 ```
-Current: Neovim buffer = 1 line → preedit = 1 line → popup = h-scroll
-Future:  Neovim buffer = N lines → app preedit = current line only → popup = multiline
+Snapshot display: Neovim buffer = 1 line → preedit = 1 line → popup = h-scroll (<CR> auto-commits)
+Grid display:     Neovim buffer = N lines → app preedit = none → popup = window grid
 ```
 
-Modules requiring changes: `handler.rs` (multiline snapshot), `protocol.rs` (multiline PreeditInfo), `ime.rs` (multiline storage), `coordinator.rs` (extract current line for compositor), `unified_window.rs` (multiline rendering).
+Grid display sets `ime_context.multiline`, which disables `check_line_added` so `<CR>` is a native newline. `<CR>`/`<BS>`/commit key pass through only when the whole buffer is empty. The commit key and IME off commit all lines joined with `\n` (IME off uses the snapshot's `buffer_text`). Trailing empty lines are kept. See `MULTILINE.md` "Commit Behavior".
