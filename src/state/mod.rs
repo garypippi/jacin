@@ -4,11 +4,13 @@
 //! - WaylandState: Protocol handles and serial tracking
 //! - KeyboardState: XKB context and modifier tracking
 //! - ImeState: IME mode state machine and preedit
+//! - NvimView: Display state observed from Neovim
 
 mod animation;
 mod ime;
 mod keyboard;
 mod keypress;
+mod nvim_view;
 mod repeat;
 mod wayland;
 
@@ -16,5 +18,6 @@ pub use animation::Animations;
 pub use ime::ImeState;
 pub use keyboard::KeyboardState;
 pub use keypress::KeypressState;
+pub use nvim_view::NvimView;
 pub use repeat::KeyRepeatState;
 pub use wayland::WaylandState;

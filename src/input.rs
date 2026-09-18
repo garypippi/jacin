@@ -101,7 +101,7 @@ impl State {
             // Keypress display: in insert mode, only show Ctrl/Alt modified keys
             // (e.g., <C-r>a, <C-w>) and pending register names (key after <C-r>);
             // suppress normal typing, <BS>, <CR>, etc.
-            let should_show_keypress = !self.keypress.vim_mode.starts_with('i')
+            let should_show_keypress = !self.view.vim_mode.starts_with('i')
                 || self.keyboard.ctrl_pressed
                 || self.keyboard.alt_pressed
                 || self.keypress.pending_type == PendingState::InsertRegister;
@@ -125,7 +125,7 @@ impl State {
                 self.keyboard.ctrl_pressed
             );
         }
-        _perf.mode = self.keypress.vim_mode.clone();
+        _perf.mode = self.view.vim_mode.clone();
     }
 
     pub(crate) fn send_to_nvim(&self, key: &str) {

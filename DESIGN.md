@@ -20,6 +20,7 @@
 │                                                                │
 │  State:                                                        │
 │    ImeState      mode (Disabled/Enabling/Enabled), preedit     │
+│    NvimView      observed vim mode, cmdline, candidates, msgs  │
 │    KeyboardState XKB context, modifiers                        │
 │    KeypressState accumulated key sequences, display timeout    │
 │    WaylandState  protocol handles, serial, virtual keyboard    │
@@ -102,20 +103,20 @@ Single `exec_lua("return ime_handle_*()")` — combines check and action in one 
 
 ```
               SIGUSR1             keymap event
- Disabled ──────────> Enabling ──────────────> Enabled {vim_mode}
+ Disabled ──────────> Enabling ──────────────> Enabled         
      ^                                             │
      │              disable() (toggle-off/commit)  │
      └─────────────────────────────────────────────┘
 ```
 
 - Deactivate/Activate cycle: Enabled → release grab → re-grab → Enabling → keymap → Enabled (state restored)
-- `reactivation_count` caps consecutive re-grabs at 2 to prevent infinite loops
+- Activate/Deactivate are deferred to the `Done` event and processed together (deactivate first), so a window switch becomes a single release + re-grab
 
-### VimMode (Axis 2, inside Enabled)
+### Vim mode (Axis 2, observed)
 
-Insert ←→ Normal. Visual/operator-pending are observed from Neovim's mode string, not tracked as VimMode variants.
+Not tracked by the IME state machine. `NvimView.vim_mode` mirrors Neovim (`mode_change` redraw event and snapshots).
 
-### PendingState (Axis 3, atomic cross-thread)
+### PendingState (Axis 3, per Neovim session)
 
 ```
              None
@@ -131,6 +132,8 @@ Insert ←→ Normal. Visual/operator-pending are observed from Neovim's mode st
 ```
 
 All pending states resolve back to None after the sequence completes. `CommandLine` resolves on `CmdlineLeave` autocmd.
+
+Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and the notification handler, recreated on each spawn). The main thread only sees it through `FromNeovim::KeyProcessed { pending }`, sent exactly once per key after all data messages for that key.
 
 ## 4. Core Design Principles
 

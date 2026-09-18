@@ -25,8 +25,10 @@ mod neovim;
 mod state;
 mod ui;
 
-use neovim::{NeovimHandle, VisualSelection};
-use state::{Animations, ImeState, KeyRepeatState, KeyboardState, KeypressState, WaylandState};
+use neovim::NeovimHandle;
+use state::{
+    Animations, ImeState, KeyRepeatState, KeyboardState, KeypressState, NvimView, WaylandState,
+};
 use ui::{TextRenderer, UnifiedPopup};
 
 fn main() -> anyhow::Result<()> {
@@ -143,13 +145,13 @@ fn main() -> anyhow::Result<()> {
         repeat: KeyRepeatState::new(),
         ime: ImeState::new(),
         keypress: KeypressState::new(),
+        view: NvimView::new(),
         animations: Animations::new(),
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
         config: config.clone(),
         nvim,
         nvim_wake,
-        visual_display: None,
         popup,
         repeat_timer_token: None,
         keypress_timer_token: None,
@@ -256,10 +258,9 @@ fn main() -> anyhow::Result<()> {
 
         // Insert on-demand keypress display timeout timer
         // Also drives REC blink and transient message expiry
-        let needs_blink =
-            state.config.behavior.recording_blink && !state.keypress.recording.is_empty();
+        let needs_blink = state.config.behavior.recording_blink && !state.view.recording.is_empty();
         let needs_timer =
-            state.keypress.should_show() || needs_blink || state.ime.has_transient_message();
+            state.keypress.should_show() || needs_blink || state.view.has_transient_message();
         if needs_timer && state.keypress_timer_token.is_none() {
             match handle.insert_source(
                 Timer::from_duration(std::time::Duration::from_millis(100)),
@@ -269,17 +270,17 @@ fn main() -> anyhow::Result<()> {
 
                     // Advance all animations (currently: REC blink)
                     if state.config.behavior.recording_blink {
-                        changed |= state.animations.update_all(now, &state.keypress.recording);
+                        changed |= state.animations.update_all(now, &state.view.recording);
                     }
 
                     // Expire transient message
-                    changed |= state.ime.expire_transient_message();
+                    changed |= state.view.expire_transient_message();
 
-                    let needs_blink = state.config.behavior.recording_blink
-                        && !state.keypress.recording.is_empty();
+                    let needs_blink =
+                        state.config.behavior.recording_blink && !state.view.recording.is_empty();
                     let keep_running = state.keypress.should_show()
                         || needs_blink
-                        || state.ime.has_transient_message();
+                        || state.view.has_transient_message();
                     if !keep_running {
                         state.update_popup();
                         state.keypress_timer_token = None;
@@ -330,6 +331,8 @@ pub struct State {
     pub(crate) repeat: KeyRepeatState,
     pub(crate) ime: ImeState,
     pub(crate) keypress: KeypressState,
+    // Display state observed from Neovim (mode, cmdline, candidates, messages)
+    pub(crate) view: NvimView,
     pub(crate) animations: Animations,
     // Exit and toggle flags
     pub(crate) pending_exit: bool,
@@ -340,8 +343,6 @@ pub struct State {
     pub(crate) nvim: Option<NeovimHandle>,
     // Wakes the event loop when the Neovim thread sends a message (reused on respawn)
     pub(crate) nvim_wake: Ping,
-    // Transient visual selection display state (observed from Neovim, not IME-owned)
-    pub(crate) visual_display: Option<VisualSelection>,
     // Unified popup window (preedit, keypress, candidates)
     pub(crate) popup: Option<UnifiedPopup>,
     // On-demand timer tokens (None = timer not running)

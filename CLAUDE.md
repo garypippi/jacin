@@ -34,14 +34,14 @@ src/
     wayland.rs               # WaylandState (protocol handles, serial, virtual keyboard)
     keyboard.rs              # KeyboardState (XKB, modifiers, debouncing, repeat params)
     repeat.rs                # KeyRepeatState (key repeat timing/tracking)
-    ime.rs                   # ImeState, ImeMode state machine, VimMode
+    ime.rs                   # ImeState, ImeMode state machine, preedit sent to app
+    nvim_view.rs             # NvimView (observed vim mode, cmdline, candidates, messages, visual)
     keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
     animation.rs             # AnimationState (blinking indicators, transient display)
   neovim/
     mod.rs                   # NeovimHandle (public API)
     protocol.rs              # ToNeovim, FromNeovim typed messages (serde), Snapshot
     handler.rs               # Tokio-side Neovim message handling (redraw events, sub-handlers)
-    event_source.rs          # Calloop event source (infrastructure)
     integration_tests.rs     # Headless nvim integration tests
     lua/
       snapshot.lua           # collect_snapshot() function

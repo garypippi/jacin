@@ -11,11 +11,9 @@ impl State {
         self.repeat.cancel();
         self.repeat_timer_token = None;
         self.ime.clear_preedit();
-        self.ime.clear_candidates();
+        self.view.clear();
         self.keypress.clear();
         self.keypress_timer_token = None;
-        self.keypress.recording.clear();
-        self.visual_display = None;
         self.hide_popup();
         self.wayland.release_keyboard();
         self.keyboard.reset_modifiers();
@@ -112,15 +110,15 @@ impl State {
         }
         self.ime
             .set_preedit(info.text, info.cursor_begin, info.cursor_end);
-        self.keypress.set_vim_mode(&info.mode);
-        self.keypress.recording = info.recording;
+        self.view.set_vim_mode(&info.mode);
+        self.view.recording = info.recording;
         self.update_preedit();
     }
 
     fn on_commit(&mut self, text: String) {
         log::debug!("[NVIM] Commit: {:?}", text);
         self.ime.clear_preedit();
-        self.ime.clear_candidates();
+        self.view.clear_candidates();
         self.wayland.commit_string(&text);
         self.keypress.clear();
         self.keypress_timer_token = None;
@@ -156,7 +154,7 @@ impl State {
         if info.candidates.is_empty() {
             self.hide_candidates();
         } else {
-            self.ime.set_candidates(info.candidates, info.selected);
+            self.view.set_candidates(info.candidates, info.selected);
             self.update_popup();
         }
     }
@@ -166,7 +164,7 @@ impl State {
         if !self.ime.is_fully_enabled() {
             return;
         }
-        self.visual_display = selection;
+        self.view.visual = selection;
         self.update_popup();
     }
 
@@ -204,14 +202,10 @@ impl State {
         if !self.ime.is_fully_enabled() {
             return;
         }
-        // Build display text: prompt + content for @-mode, firstc + content for :/?
+        // Display prompt + content for @-mode, firstc + content for :/?
         let prefix = if !prompt.is_empty() { &prompt } else { &firstc };
-        let prefix_len = prefix.len();
-        let display_text = format!("{}{}", prefix, content);
-        let cursor_byte = prefix_len + pos;
-        self.keypress
-            .set_cmdline_text(display_text, cursor_byte, prefix_len, level);
-        self.keypress.set_vim_mode("c");
+        self.view.show_cmdline(prefix, &content, pos, level);
+        self.keypress.clear();
         self.update_popup();
     }
 
@@ -219,7 +213,7 @@ impl State {
         if !self.ime.is_fully_enabled() {
             return;
         }
-        if self.keypress.update_cmdline_cursor(pos, level) {
+        if self.view.update_cmdline_cursor(pos, level) {
             self.update_popup();
         }
     }
@@ -227,7 +221,8 @@ impl State {
     fn on_cmdline_hide(&mut self, level: u64) {
         log::debug!("[NVIM] CmdlineHide (level={})", level);
         // Only clear if the level matches the active cmdline
-        if self.keypress.clear_cmdline_if_level(level) {
+        if self.view.hide_cmdline(level) {
+            self.keypress.clear();
             self.update_popup();
         }
     }
@@ -239,9 +234,10 @@ impl State {
             executed
         );
         self.keypress.clear();
+        self.view.cmdline = None;
         // ':' commands usually return to normal mode; '@' input() prompts return
         // to insert mode. ModeChanged snapshot will still correct this if needed.
-        self.keypress
+        self.view
             .set_vim_mode(if cmdtype == "@" { "i" } else { "n" });
         self.keypress_timer_token = None;
         self.update_popup();
@@ -253,9 +249,9 @@ impl State {
             return;
         }
         if text.is_empty() {
-            self.ime.clear_transient_message();
+            self.view.clear_transient_message();
         } else {
-            self.ime.set_transient_message(text);
+            self.view.set_transient_message(text);
         }
         self.update_popup();
     }
@@ -265,7 +261,7 @@ impl State {
             return;
         }
         log::debug!("[NVIM] ModeChange -> {:?}", mode);
-        self.keypress.set_vim_mode(&mode);
+        self.view.set_vim_mode(&mode);
         self.update_popup();
     }
 
@@ -285,10 +281,10 @@ impl State {
         }
         self.wayland.commit_string(&text);
         self.ime.clear_preedit();
-        self.ime.clear_candidates();
+        self.view.clear_candidates();
+        self.view.visual = None;
         self.keypress.clear();
         self.keypress_timer_token = None;
-        self.visual_display = None;
         self.update_popup();
     }
 
@@ -341,8 +337,10 @@ impl State {
             preedit: self.ime.preedit.clone(),
             cursor_begin: self.ime.cursor_begin,
             cursor_end: self.ime.cursor_end,
-            vim_mode: self.keypress.vim_mode.clone(),
-            keypress_entries: if self.keypress.should_show() {
+            vim_mode: self.view.vim_mode.clone(),
+            keypress_entries: if let Some(ref cmdline) = self.view.cmdline {
+                vec![cmdline.text.clone()]
+            } else if self.keypress.should_show() {
                 self.keypress
                     .entries()
                     .iter()
@@ -351,18 +349,18 @@ impl State {
             } else {
                 Vec::new()
             },
-            candidates: self.ime.candidates.clone(),
-            selected: self.ime.selected_candidate,
-            transient_message: if self.ime.candidates.is_empty() {
-                self.ime.transient_message.clone()
+            candidates: self.view.candidates.clone(),
+            selected: self.view.selected_candidate,
+            transient_message: if self.view.candidates.is_empty() {
+                self.view.transient_message.clone()
             } else {
                 None
             },
-            visual_selection: self.visual_display.clone(),
+            visual_selection: self.view.visual.clone(),
             ime_enabled: self.ime.is_enabled(),
-            recording: self.keypress.recording.clone(),
+            recording: self.view.recording.clone(),
             rec_blink_on: self.animations.rec_blink.on,
-            cmdline_cursor_pos: self.keypress.cmdline_cursor_byte(),
+            cmdline_cursor_pos: self.view.cmdline.as_ref().map(|c| c.cursor_byte),
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();
@@ -382,7 +380,7 @@ impl State {
     }
 
     pub(crate) fn hide_candidates(&mut self) {
-        self.ime.clear_candidates();
+        self.view.clear_candidates();
         self.update_popup();
     }
 }
@@ -391,14 +389,14 @@ impl State {
 mod replay_tests {
     use serde::Deserialize;
 
-    use crate::neovim::{FromNeovim, VisualSelection};
-    use crate::state::{ImeState, KeypressState};
+    use crate::neovim::FromNeovim;
+    use crate::state::{ImeState, KeypressState, NvimView};
 
     /// Minimal state for replaying FromNeovim messages without Wayland/popup.
     struct ReplayState {
         ime: ImeState,
         keypress: KeypressState,
-        visual_display: Option<VisualSelection>,
+        view: NvimView,
         committed: Vec<String>,
         exited: bool,
         wayland_active: bool,
@@ -413,7 +411,7 @@ mod replay_tests {
             Self {
                 ime,
                 keypress: KeypressState::new(),
-                visual_display: None,
+                view: NvimView::new(),
                 committed: Vec::new(),
                 exited: false,
                 wayland_active: true,
@@ -430,28 +428,28 @@ mod replay_tests {
                     if self.ime.is_fully_enabled() {
                         self.ime
                             .set_preedit(info.text, info.cursor_begin, info.cursor_end);
-                        self.keypress.set_vim_mode(&info.mode);
-                        self.keypress.recording = info.recording;
+                        self.view.set_vim_mode(&info.mode);
+                        self.view.recording = info.recording;
                     }
                 }
                 FromNeovim::Commit(text) => {
                     self.committed.push(text);
                     self.ime.clear_preedit();
-                    self.ime.clear_candidates();
+                    self.view.clear_candidates();
                     self.keypress.clear();
                 }
                 FromNeovim::Candidates(info) => {
                     if self.ime.is_fully_enabled() {
                         if info.candidates.is_empty() {
-                            self.ime.clear_candidates();
+                            self.view.clear_candidates();
                         } else {
-                            self.ime.set_candidates(info.candidates, info.selected);
+                            self.view.set_candidates(info.candidates, info.selected);
                         }
                     }
                 }
                 FromNeovim::VisualRange(selection) => {
                     if self.ime.is_fully_enabled() {
-                        self.visual_display = selection;
+                        self.view.visual = selection;
                     }
                 }
                 FromNeovim::CmdlineShow {
@@ -463,39 +461,34 @@ mod replay_tests {
                 } => {
                     if self.ime.is_fully_enabled() {
                         let prefix = if !prompt.is_empty() { &prompt } else { &firstc };
-                        let prefix_len = prefix.len();
-                        let display_text = format!("{}{}", prefix, content);
-                        let cursor_byte = prefix_len + pos;
-                        self.keypress.set_cmdline_text(
-                            display_text,
-                            cursor_byte,
-                            prefix_len,
-                            level,
-                        );
-                        self.keypress.set_vim_mode("c");
+                        self.view.show_cmdline(prefix, &content, pos, level);
+                        self.keypress.clear();
                     }
                 }
                 FromNeovim::CmdlinePos { pos, level } => {
                     if self.ime.is_fully_enabled() {
-                        self.keypress.update_cmdline_cursor(pos, level);
+                        self.view.update_cmdline_cursor(pos, level);
                     }
                 }
                 FromNeovim::CmdlineHide { level } => {
-                    self.keypress.clear_cmdline_if_level(level);
+                    if self.view.hide_cmdline(level) {
+                        self.keypress.clear();
+                    }
                 }
                 FromNeovim::CmdlineCancelled { cmdtype, .. } => {
                     self.keypress.clear();
-                    self.keypress
+                    self.view.cmdline = None;
+                    self.view
                         .set_vim_mode(if cmdtype == "@" { "i" } else { "n" });
                 }
                 FromNeovim::CmdlineMessage { text, .. } => {
                     if self.ime.is_fully_enabled() {
-                        self.ime.set_transient_message(text);
+                        self.view.set_transient_message(text);
                     }
                 }
                 FromNeovim::ModeChange(mode) => {
                     if self.ime.is_fully_enabled() {
-                        self.keypress.set_vim_mode(&mode);
+                        self.view.set_vim_mode(&mode);
                     }
                 }
                 FromNeovim::AutoCommit(text) => {
@@ -509,17 +502,15 @@ mod replay_tests {
                     } else {
                         self.committed.push(text);
                         self.ime.clear_preedit();
-                        self.ime.clear_candidates();
+                        self.view.clear_candidates();
+                        self.view.visual = None;
                         self.keypress.clear();
-                        self.visual_display = None;
                     }
                 }
                 FromNeovim::NvimExited => {
                     self.ime.clear_preedit();
-                    self.ime.clear_candidates();
+                    self.view.clear();
                     self.keypress.clear();
-                    self.keypress.recording.clear();
-                    self.visual_display = None;
                     self.ime.disable();
                     self.exited = true;
                 }
@@ -573,11 +564,11 @@ mod replay_tests {
             "cursor_end mismatch in {path}"
         );
         assert_eq!(
-            state.keypress.vim_mode, expect.vim_mode,
+            state.view.vim_mode, expect.vim_mode,
             "vim_mode mismatch in {path}"
         );
         assert_eq!(
-            state.ime.candidates.len(),
+            state.view.candidates.len(),
             expect.candidates_count,
             "candidates_count mismatch in {path}"
         );
