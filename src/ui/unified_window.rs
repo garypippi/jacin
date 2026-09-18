@@ -230,7 +230,8 @@ impl UnifiedPopup {
             // Draw separator below preedit if more sections follow
             if layout.has_keypress || layout.has_candidates || layout.has_transient_message {
                 let line_height = self.renderer.line_height();
-                let sep_y = layout.preedit_y + line_height;
+                // Pixel-align 1px lines (fractional positions trip tiny-skia's AA hairline path)
+                let sep_y = (layout.preedit_y + line_height).round();
                 if let Some(rect) =
                     Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
                 {
@@ -494,7 +495,7 @@ impl UnifiedPopup {
         }
 
         // Draw vertical separator
-        let sep_x = after_mode_x + ICON_SEPARATOR_GAP;
+        let sep_x = (after_mode_x + ICON_SEPARATOR_GAP).round();
         if let Some(rect) =
             Rect::from_xywh(sep_x, layout.keypress_y, ICON_SEPARATOR_WIDTH, line_height)
         {
@@ -579,7 +580,7 @@ impl UnifiedPopup {
 
         // Draw separator if candidates follow
         if layout.has_candidates {
-            let sep_y = layout.keypress_y + line_height;
+            let sep_y = (layout.keypress_y + line_height).round();
             if let Some(rect) =
                 Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
             {
