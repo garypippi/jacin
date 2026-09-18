@@ -17,7 +17,8 @@ cargo run            # Run (requires Hyprland)
 cargo run -- --clean # Run with vanilla Neovim (no user config/plugins)
 cargo clippy         # Lint
 cargo fmt            # Format
-cargo test           # Unit + integration tests
+cargo test           # Unit tests
+cargo test -- --ignored # Integration tests (spawn headless nvim)
 ```
 
 ## Module Structure
@@ -52,6 +53,9 @@ src/
     unified_window.rs        # Unified popup (window grid, keypress, candidates)
     layout.rs                # Popup layout calculation and sizing
     text_render.rs           # Font rendering with fontdue, SHM utilities
+examples/
+  grid_probe.rs              # Print ext_multigrid redraw events for given keys
+tests/fixtures/              # FromNeovim message sequences replayed through Model::reduce
 ```
 
 ## Key Design

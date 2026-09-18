@@ -1,12 +1,7 @@
 # jacin
 
 Hobby IME toy project bridging Wayland and Neovim.\
-No Fcitx/IBus needed.\
-Requires a Wayland compositor that implements.
-
-- `zwp_input_method_v2`
-- `zwp_virtual_keyboard_v1`
-- `zwp_input_popup_surface_v2`
+No Fcitx/IBus needed.
 
 ![DEMO](https://github.com/user-attachments/assets/789e383e-bc74-444e-b9ca-52169d024db4)
 
@@ -37,11 +32,11 @@ recording_blink = true    # Blink the REC indicator while recording a macro
 
 [font]
 family = "Noto Sans CJK JP"   # Proportional font (candidates/messages). Default: fontconfig auto
-mono_family = "JetBrains Mono" # Monospace font (keypress/mode display). Default: "monospace"
+mono_family = "JetBrains Mono" # Monospace font (Neovim window, command line, keypress/mode). Default: "monospace"
 size = 16.0                    # Font size in pixels
 ```
 
-All fields are optional and fall back to the defaults shown above.
+All fields are optional; omitted ones use the defaults noted in the comments (`keybinds` and `behavior` values above are the defaults).
 
 ### How text is shown and committed
 

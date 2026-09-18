@@ -17,7 +17,8 @@ pub struct FontConfig {
     /// Proportional font family name (for candidates and messages).
     /// Default: fontconfig auto-detection.
     pub family: Option<String>,
-    /// Monospace font family name (for keypress/mode display).
+    /// Monospace font family name (for the Neovim window, command line
+    /// and keypress/mode display).
     /// Default: fontconfig "monospace" match.
     pub mono_family: Option<String>,
     /// Font size in pixels. Default: 16.0.
