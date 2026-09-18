@@ -21,7 +21,7 @@ use super::protocol::{
     ToNeovim,
 };
 use super::redraw_grid::parse_grid_event;
-use crate::config::Config;
+use crate::config::{Config, DisplayMode};
 
 type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
 type NvimResult<T> = Result<T, NvimError>;
@@ -939,8 +939,14 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
 
     // Completion adapter — nvim-cmp requires Lua hooks; native uses ext_popupmenu
     if config.completion.adapter == "nvim-cmp" {
-        nvim.exec_lua(include_str!("lua/completion_cmp.lua"), vec![])
-            .await?;
+        if config.behavior.display == DisplayMode::Grid {
+            // nvim-cmp draws its menu as a floating window, which grid display
+            // already shows; listing it again would duplicate the candidates
+            log::info!("[NVIM] Grid display: nvim-cmp adapter not loaded (menu shown in grid)");
+        } else {
+            nvim.exec_lua(include_str!("lua/completion_cmp.lua"), vec![])
+                .await?;
+        }
     }
 
     // Attach as UI client to receive redraw events (ext_cmdline, ext_popupmenu)

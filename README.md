@@ -58,6 +58,7 @@ All fields are optional and fall back to the defaults shown above.
 
 - **snapshot** (default): The popup shows the current line read from Neovim, and the same text is sent to the application as preedit.
 - **grid** (experimental): The popup renders Neovim's window directly from UI events (`ext_multigrid`), including your colorscheme highlights and floating windows such as the nvim-cmp menu. Neovim's UI is resized to fit the popup, so long lines wrap there. The application receives no preedit; text is only inserted on commit.
+  - Whatever Neovim draws in its window (including floats) appears in the grid; externalized UI (native popup menu, command line, messages) keeps using jacin's own sections. Therefore the `nvim-cmp` completion adapter is not loaded in grid mode, since its menu is already visible as a floating window.
 
 ### Neovim configuration for jacin
 
