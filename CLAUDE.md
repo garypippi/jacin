@@ -65,7 +65,8 @@ src/
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
 - **Optimized RPC**: Insert mode uses fire-and-forget (`nvim_input` + push notification via autocmds); normal mode uses 2-RPC pull (`nvim_input` + `collect_snapshot()`)
 - **nvim_ui_attach extensions**: `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `mode_change` — Neovim's UI protocol drives command-line, completion, messages, and mode updates
-- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, completion adapter, font, startinsert, recording_blink
+- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, completion adapter, font, startinsert, recording_blink, display (snapshot/grid)
+- **Grid display (Phase B, experimental)**: popup renders the window grid from ext_multigrid events (`Screen`/`WindowView`); app gets no preedit; Neovim is started with `g:jacin = 1` for user config
 
 ## Known Limitations
 

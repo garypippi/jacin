@@ -391,3 +391,25 @@ fn resized_ui_wraps_long_line_in_window_view() {
 
     shutdown_and_wait(&handle);
 }
+
+/// Neovim is started with `g:jacin = 1` so user config can detect jacin.
+#[test]
+#[ignore]
+fn g_jacin_is_set_for_user_config() {
+    let handle =
+        spawn_neovim(clean_config_with_startinsert(false), None).expect("failed to spawn neovim");
+    recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
+        .expect("Neovim did not send Ready");
+
+    for key in [":", "echo g:jacin", "<CR>"] {
+        handle.send_key(key);
+    }
+    let msg = recv_until(
+        &handle,
+        |m| matches!(m, FromNeovim::CmdlineMessage { text, .. } if text == "1"),
+        MSG_TIMEOUT,
+    );
+    assert!(msg.is_some(), "expected `:echo g:jacin` to print 1");
+
+    shutdown_and_wait(&handle);
+}

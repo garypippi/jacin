@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut cmd = Command::new("nvim");
-    cmd.args(["--embed", "--headless"]);
+    cmd.args(["--embed", "--headless", "--cmd", "let g:jacin = 1"]);
     if clean {
         cmd.arg("--clean");
     }

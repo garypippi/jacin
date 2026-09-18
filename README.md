@@ -37,6 +37,7 @@ adapter = "native"        # "native" (ext_popupmenu) or "nvim-cmp"
 [behavior]
 startinsert = true        # true: start in insert mode, false: start in normal mode
 recording_blink = true    # Blink the REC indicator while recording a macro
+display = "snapshot"      # "snapshot" or "grid" (experimental, see below)
 
 [font]
 family = "Noto Sans CJK JP"   # Proportional font (preedit/candidates). Default: fontconfig auto
@@ -52,6 +53,27 @@ All fields are optional and fall back to the defaults shown above.
 - **nvim-cmp**: Hooks into nvim-cmp's Lua API directly for candidate extraction (nvim-cmp uses its own floating window, not the native popup menu).
 
 > **Note:** Since jacin sets `buftype=nofile` on its buffer, ddc.vim requires `specialBufferCompletion` enabled in your ddc config.
+
+### Display modes
+
+- **snapshot** (default): The popup shows the current line read from Neovim, and the same text is sent to the application as preedit.
+- **grid** (experimental): The popup renders Neovim's window directly from UI events (`ext_multigrid`), including your colorscheme highlights and floating windows such as the nvim-cmp menu. Neovim's UI is resized to fit the popup, so long lines wrap there. The application receives no preedit; text is only inserted on commit.
+
+### Neovim configuration for jacin
+
+jacin starts Neovim with `g:jacin = 1` set before your config is loaded, so you can adjust settings for the IME without affecting your editor. jacin does not change these options itself. In grid display mode, anything drawn inside the window is shown in the popup, so you may want to turn off columns and line decorations:
+
+```lua
+if vim.g.jacin then
+  vim.opt.number = false
+  vim.opt.relativenumber = false
+  vim.opt.signcolumn = "no"
+  vim.opt.foldcolumn = "0"
+  vim.opt.cursorline = false
+end
+```
+
+The statusline, tabline, intro screen and `~` filler lines are never shown, so they need no configuration.
 
 ## Usage
 

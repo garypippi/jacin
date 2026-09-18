@@ -133,8 +133,13 @@ impl State {
     pub(crate) fn update_preedit(&mut self) {
         let cursor_begin = self.model.ime.cursor_begin as i32;
         let cursor_end = self.model.ime.cursor_end as i32;
-        // Don't send preedit to compositor when IME is disabled or deactivated.
-        if self.wayland.active && self.model.ime.is_enabled() {
+        // Grid display shows the text only in the popup; the app gets no
+        // preedit (multiline-safe: nothing to fit into a single-line field).
+        // Committed text is unaffected.
+        if self.config.behavior.display == DisplayMode::Grid {
+            log::trace!("[PREEDIT] grid display: not sent to app");
+        } else if self.wayland.active && self.model.ime.is_enabled() {
+            // Don't send preedit to compositor when IME is disabled or deactivated.
             self.wayland
                 .set_preedit(&self.model.ime.preedit, cursor_begin, cursor_end);
             log::debug!(

@@ -806,6 +806,9 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
     // Start Neovim in embedded mode
     let mut cmd = Command::new("nvim");
     cmd.args(["--embed", "--headless"]);
+    // Lets user config detect jacin (`if vim.g.jacin then ... end`);
+    // --cmd runs before init.lua
+    cmd.args(["--cmd", "let g:jacin = 1"]);
     if config.clean {
         cmd.arg("--clean");
     }
