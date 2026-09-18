@@ -69,6 +69,10 @@ impl State {
         match &msg {
             FromNeovim::Ready => log::info!("[NVIM] Backend ready!"),
             FromNeovim::NvimExited => log::info!("[NVIM] Neovim exited, disabling IME"),
+            // Full cell dumps are too noisy even for debug
+            FromNeovim::GridFlush(events) => {
+                log::trace!("[NVIM] GridFlush ({} events)", events.len())
+            }
             _ => log::debug!("[NVIM] {:?}", msg),
         }
         let effects = self.model.reduce(msg, self.wayland.active);
