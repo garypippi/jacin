@@ -7,6 +7,7 @@ mod handler;
 #[cfg(test)]
 mod integration_tests;
 pub mod protocol;
+mod redraw_grid;
 
 use std::thread;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 use crate::config::Config;
 
-pub use protocol::{FromNeovim, PendingState, ToNeovim, VisualSelection};
+pub use protocol::{FromNeovim, GridEvent, HlAttr, PendingState, ToNeovim, VisualSelection};
 
 /// Channel capacity for Neovim communication
 /// This provides backpressure if messages accumulate

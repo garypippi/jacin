@@ -17,8 +17,10 @@ use nvim_rs::{Handler, Neovim, Value};
 use tokio::process::Command;
 
 use super::protocol::{
-    AtomicPendingState, CandidateInfo, FromNeovim, PendingState, PreeditInfo, Snapshot, ToNeovim,
+    AtomicPendingState, CandidateInfo, FromNeovim, GridEvent, PendingState, PreeditInfo, Snapshot,
+    ToNeovim,
 };
+use super::redraw_grid::parse_grid_event;
 use crate::config::Config;
 
 type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
@@ -92,6 +94,8 @@ pub struct NvimHandler {
     pending: Arc<AtomicPendingState>,
     /// Cached popupmenu items for popupmenu_select (ext_popupmenu).
     last_popupmenu_items: Arc<Mutex<Vec<String>>>,
+    /// Grid events of the current redraw batch, sent as one message at `flush`.
+    grid_batch: Arc<Mutex<Vec<GridEvent>>>,
 }
 
 #[async_trait]
@@ -234,11 +238,24 @@ impl NvimHandler {
                     "msg_show" => self.handle_msg_show(params),
                     "msg_clear" => self.handle_msg_clear(),
                     "mode_change" => self.handle_mode_change(params),
+                    "flush" => self.flush_grid_batch(),
                     _ => {
-                        log::trace!("[NVIM] Ignoring redraw event: {}", event_name);
+                        if let Some(event) = parse_grid_event(event_name, params) {
+                            self.grid_batch.lock().unwrap().push(event);
+                        } else {
+                            log::trace!("[NVIM] Ignoring redraw event: {}", event_name);
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// flush: send accumulated grid events as one message
+    fn flush_grid_batch(&self) {
+        let events = std::mem::take(&mut *self.grid_batch.lock().unwrap());
+        if !events.is_empty() {
+            send_msg(&self.tx, FromNeovim::GridFlush(events));
         }
     }
 
@@ -553,6 +570,7 @@ mod tests {
                 tx: MainTx::new(tx, None),
                 pending: Arc::new(AtomicPendingState::new()),
                 last_popupmenu_items: Arc::new(Mutex::new(Vec::new())),
+                grid_batch: Arc::new(Mutex::new(Vec::new())),
             },
             rx,
         )
@@ -798,6 +816,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
         tx: tx.clone(),
         pending: pending.clone(),
         last_popupmenu_items: Arc::new(Mutex::new(Vec::new())),
+        grid_batch: Arc::new(Mutex::new(Vec::new())),
     };
     let (nvim, io_handler, _child) = new_child_cmd(&mut cmd, handler)
         .await
@@ -918,13 +937,15 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
                     (Value::from("ext_cmdline"), Value::from(true)),
                     (Value::from("ext_popupmenu"), Value::from(true)),
                     (Value::from("ext_messages"), Value::from(true)),
+                    // Implied by ext_messages; explicit because GridFlush relies on it
+                    (Value::from("ext_linegrid"), Value::from(true)),
                 ]),
             ],
         )
         .await?
     {
         Ok(_) => log::info!(
-            "[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu, ext_messages"
+            "[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu, ext_messages, ext_linegrid"
         ),
         Err(e) => anyhow::bail!("nvim_ui_attach failed: {e:?}"),
     }

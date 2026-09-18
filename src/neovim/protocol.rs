@@ -98,6 +98,67 @@ pub enum VisualSelection {
     Charwise { begin: usize, end: usize },
 }
 
+/// One run of cells in a `grid_line` event (hl id already resolved)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridCell {
+    /// Cell text ("" for the right half of a double-width char)
+    pub text: String,
+    /// Highlight id (see `GridEvent::HlAttrDefine`)
+    pub hl: u64,
+    /// Number of times the cell is repeated
+    pub repeat: usize,
+}
+
+/// RGB highlight attributes from `hl_attr_define` (None = default color)
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HlAttr {
+    pub foreground: Option<u32>,
+    pub background: Option<u32>,
+    pub special: Option<u32>,
+    pub reverse: bool,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub undercurl: bool,
+    pub strikethrough: bool,
+}
+
+/// Line-based grid update for the global grid (ext_linegrid)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum GridEvent {
+    Resize {
+        width: usize,
+        height: usize,
+    },
+    Clear,
+    CursorGoto {
+        row: usize,
+        col: usize,
+    },
+    Line {
+        row: usize,
+        col_start: usize,
+        cells: Vec<GridCell>,
+    },
+    /// Copy cells within [top, bot) x [left, right); rows > 0 moves up
+    Scroll {
+        top: usize,
+        bot: usize,
+        left: usize,
+        right: usize,
+        rows: i64,
+    },
+    HlAttrDefine {
+        id: u64,
+        attr: HlAttr,
+    },
+    DefaultColors {
+        fg: u32,
+        bg: u32,
+        sp: u32,
+    },
+}
+
 /// Messages sent from Neovim to IME
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FromNeovim {
@@ -140,6 +201,8 @@ pub enum FromNeovim {
     PassthroughKey,
     /// Neovim process exited (e.g., :q)
     NvimExited,
+    /// Grid updates of one redraw batch, sent at `flush`
+    GridFlush(Vec<GridEvent>),
 }
 
 /// Preedit information

@@ -7,6 +7,7 @@
 //! - NvimView: Display state observed from Neovim
 
 mod animation;
+mod grid;
 mod ime;
 mod keyboard;
 mod keypress;
@@ -15,6 +16,7 @@ mod repeat;
 mod wayland;
 
 pub use animation::Animations;
+pub use grid::Grid;
 pub use ime::ImeState;
 pub use keyboard::KeyboardState;
 pub use keypress::KeypressState;

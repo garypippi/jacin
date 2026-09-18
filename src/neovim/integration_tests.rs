@@ -280,3 +280,59 @@ fn quit_exits_with_modified_buffer() {
         .is_some();
     assert!(exited, "expected NvimExited after :q, got {msgs:?}");
 }
+
+/// Phase A: the grid mirrored from redraw events must agree with the
+/// snapshot preedit (row text and cursor byte offset), including
+/// double-width chars and normal-mode cursor.
+#[test]
+#[ignore]
+fn grid_shadow_matches_snapshot() {
+    use crate::model::Model;
+
+    let handle = spawn_neovim(clean_config(), None).expect("failed to spawn neovim");
+    let mut model = Model::new();
+    model.ime.start_enabling();
+    model.ime.complete_enabling();
+    // The initial grid_resize/redraw arrives before Ready — keep it
+    loop {
+        let msg = handle
+            .recv_timeout(STARTUP_TIMEOUT)
+            .expect("Neovim did not send Ready");
+        let ready = matches!(msg, FromNeovim::Ready);
+        model.reduce(msg, true);
+        if ready {
+            break;
+        }
+    }
+
+    let mut check = |keys: &[&str], expect_preedit: &str| {
+        for key in keys {
+            for msg in send_and_collect(&handle, key) {
+                model.reduce(msg, true);
+            }
+        }
+        // Push snapshots and redraws arrive asynchronously after KeyProcessed
+        let deadline = Instant::now() + MSG_TIMEOUT;
+        while !(model.ime.preedit == expect_preedit && model.shadow_ok == Some(true)) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let msg = handle.recv_timeout(remaining).unwrap_or_else(|| {
+                panic!(
+                    "grid did not match snapshot for {expect_preedit:?}: preedit={:?} cursor={} grid={:?} grid_cursor={:?}",
+                    model.ime.preedit,
+                    model.ime.cursor_begin,
+                    model.view.grid.row_text(model.view.grid.cursor.0),
+                    model.view.grid.cursor,
+                )
+            });
+            model.reduce(msg, true);
+        }
+    };
+
+    check(&["a", "b", "c"], "abc");
+    check(&["あ", "い", "d"], "abcあいd");
+    // Normal mode: block cursor on the last char
+    check(&["<Esc>"], "abcあいd");
+    check(&["h"], "abcあいd");
+
+    shutdown_and_wait(&handle);
+}

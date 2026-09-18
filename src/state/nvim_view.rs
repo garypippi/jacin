@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use super::Grid;
 use crate::neovim::VisualSelection;
 
 /// How long a transient message stays visible before auto-clearing
@@ -43,6 +44,8 @@ pub struct NvimView {
     pub transient_message: Option<String>,
     /// When the transient message was set
     transient_message_at: Option<Instant>,
+    /// Mirror of Neovim's global grid (Phase A: shadow only, not rendered)
+    pub grid: Grid,
 }
 
 impl NvimView {

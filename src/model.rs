@@ -35,6 +35,9 @@ pub struct Model {
     pub ime: ImeState,
     pub keypress: KeypressState,
     pub view: NvimView,
+    /// Phase A shadow check: whether the grid cursor row agreed with the
+    /// snapshot preedit at the last check (None = not checked yet)
+    pub shadow_ok: Option<bool>,
 }
 
 impl Model {
@@ -62,6 +65,7 @@ impl Model {
                     .set_preedit(info.text, info.cursor_begin, info.cursor_end);
                 self.view.set_vim_mode(&info.mode);
                 self.view.recording = info.recording;
+                self.shadow_check();
                 vec![Effect::SyncPreedit]
             }
             FromNeovim::Commit(text) => {
@@ -182,6 +186,45 @@ impl Model {
                 self.ime.disable();
                 vec![Effect::NvimExited]
             }
+            FromNeovim::GridFlush(events) => {
+                for event in events {
+                    self.view.grid.apply(event);
+                }
+                self.shadow_check();
+                // Phase A: grid is not rendered yet
+                vec![]
+            }
+        }
+    }
+
+    /// Phase A shadow check: compare the grid (display) with the snapshot
+    /// (source of truth). Logs only when the agreement changes, since grid
+    /// and snapshot arrive independently and may briefly disagree.
+    fn shadow_check(&mut self) {
+        let grid = &self.view.grid;
+        if !self.ime.is_fully_enabled() || grid.is_empty() || self.view.vim_mode.starts_with('c') {
+            return;
+        }
+        let (row, col) = grid.cursor;
+        let row_text = grid.row_text(row);
+        let grid_cursor = grid.byte_offset(row, col);
+        let ok = row_text.trim_end() == self.ime.preedit.trim_end()
+            && grid_cursor == self.ime.cursor_begin;
+        if self.shadow_ok != Some(ok) {
+            if ok {
+                log::debug!("[SHADOW] grid matches snapshot");
+            } else {
+                log::debug!(
+                    "[SHADOW] mismatch: grid row {} {:?} cursor={} vs snapshot {:?} cursor={} (mode={})",
+                    row,
+                    row_text.trim_end(),
+                    grid_cursor,
+                    self.ime.preedit,
+                    self.ime.cursor_begin,
+                    self.view.vim_mode
+                );
+            }
+            self.shadow_ok = Some(ok);
         }
     }
 }
@@ -348,6 +391,60 @@ mod replay_tests {
                 Effect::Render,
             ]
         );
+    }
+
+    fn grid_flush(row_text: &str, cursor_col: usize) -> FromNeovim {
+        use crate::neovim::GridEvent;
+        use crate::neovim::protocol::GridCell;
+        FromNeovim::GridFlush(vec![
+            GridEvent::Resize {
+                width: 10,
+                height: 2,
+            },
+            GridEvent::Line {
+                row: 0,
+                col_start: 0,
+                cells: vec![GridCell {
+                    text: row_text.into(),
+                    hl: 0,
+                    repeat: 1,
+                }],
+            },
+            GridEvent::CursorGoto {
+                row: 0,
+                col: cursor_col,
+            },
+        ])
+    }
+
+    fn preedit(text: &str, cursor: usize) -> FromNeovim {
+        FromNeovim::Preedit(crate::neovim::protocol::PreeditInfo::new(
+            text.into(),
+            cursor,
+            cursor,
+            "i".into(),
+            String::new(),
+        ))
+    }
+
+    #[test]
+    fn shadow_check_detects_match_and_mismatch() {
+        let mut model = enabled_model();
+        // Each char is one cell here, so cursor col == byte offset for ASCII
+        assert!(model.reduce(grid_flush("a", 1), true).is_empty());
+        model.reduce(preedit("a", 1), true);
+        assert_eq!(model.shadow_ok, Some(true));
+
+        model.reduce(preedit("ab", 2), true);
+        assert_eq!(model.shadow_ok, Some(false));
+    }
+
+    #[test]
+    fn shadow_check_skipped_in_cmdline_mode() {
+        let mut model = enabled_model();
+        model.reduce(FromNeovim::ModeChange("c".into()), true);
+        model.reduce(grid_flush("x", 0), true);
+        assert_eq!(model.shadow_ok, None);
     }
 
     #[test]
