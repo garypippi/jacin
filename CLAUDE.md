@@ -36,15 +36,16 @@ src/
     keyboard.rs              # KeyboardState (XKB, modifiers, debouncing, repeat params)
     repeat.rs                # KeyRepeatState (key repeat timing/tracking)
     ime.rs                   # ImeState, ImeMode state machine, preedit sent to app
-    nvim_view.rs             # NvimView (observed vim mode, cmdline, candidates, messages, visual, grid)
-    grid.rs                  # Grid (mirror of Neovim's global grid from ext_linegrid events)
+    nvim_view.rs             # NvimView (observed vim mode, cmdline, candidates, messages, visual, screen)
+    screen.rs                # Screen (ext_multigrid: grids by id, windows, viewport, floats, cursor, hl)
+    grid.rs                  # Grid (cell storage for one grid)
     keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
     animation.rs             # AnimationState (blinking indicators, transient display)
   neovim/
     mod.rs                   # NeovimHandle (public API)
     protocol.rs              # ToNeovim, FromNeovim typed messages (serde), Snapshot
     handler.rs               # Tokio-side Neovim message handling (redraw events, sub-handlers)
-    redraw_grid.rs           # ext_linegrid redraw events → GridEvent (pure parsing)
+    redraw_grid.rs           # ext_linegrid/ext_multigrid redraw events → GridEvent (pure parsing)
     integration_tests.rs     # Headless nvim integration tests
     lua/
       snapshot.lua           # collect_snapshot() function

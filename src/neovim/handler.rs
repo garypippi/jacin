@@ -939,13 +939,16 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
                     (Value::from("ext_messages"), Value::from(true)),
                     // Implied by ext_messages; explicit because GridFlush relies on it
                     (Value::from("ext_linegrid"), Value::from(true)),
+                    // Per-window grids: statusline stays on grid 1, win_viewport
+                    // gives the buffer line count, floats get their own grids
+                    (Value::from("ext_multigrid"), Value::from(true)),
                 ]),
             ],
         )
         .await?
     {
         Ok(_) => log::info!(
-            "[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu, ext_messages, ext_linegrid"
+            "[NVIM] nvim_ui_attach succeeded with ext_cmdline, ext_popupmenu, ext_messages, ext_linegrid, ext_multigrid"
         ),
         Err(e) => anyhow::bail!("nvim_ui_attach failed: {e:?}"),
     }

@@ -123,25 +123,35 @@ pub struct HlAttr {
     pub strikethrough: bool,
 }
 
-/// Line-based grid update for the global grid (ext_linegrid)
+/// Line-based grid / window update (ext_linegrid + ext_multigrid)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GridEvent {
     Resize {
+        grid: u64,
         width: usize,
         height: usize,
     },
-    Clear,
+    Clear {
+        grid: u64,
+    },
+    Destroy {
+        grid: u64,
+    },
+    /// Makes `grid` the current grid with the cursor at (row, col)
     CursorGoto {
+        grid: u64,
         row: usize,
         col: usize,
     },
     Line {
+        grid: u64,
         row: usize,
         col_start: usize,
         cells: Vec<GridCell>,
     },
     /// Copy cells within [top, bot) x [left, right); rows > 0 moves up
     Scroll {
+        grid: u64,
         top: usize,
         bot: usize,
         left: usize,
@@ -156,6 +166,37 @@ pub enum GridEvent {
         fg: u32,
         bg: u32,
         sp: u32,
+    },
+    /// Normal window placed at (row, col) on the global grid
+    WinPos {
+        grid: u64,
+        row: usize,
+        col: usize,
+        width: usize,
+        height: usize,
+    },
+    /// Floating window, positioned by Neovim at (screen_row, screen_col)
+    WinFloatPos {
+        grid: u64,
+        anchor_grid: u64,
+        screen_row: usize,
+        screen_col: usize,
+        zindex: u64,
+    },
+    WinHide {
+        grid: u64,
+    },
+    WinClose {
+        grid: u64,
+    },
+    /// Buffer range shown in the window (all zero-based)
+    WinViewport {
+        grid: u64,
+        topline: usize,
+        botline: usize,
+        curline: usize,
+        curcol: usize,
+        line_count: usize,
     },
 }
 

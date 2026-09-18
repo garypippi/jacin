@@ -13,6 +13,7 @@ mod keyboard;
 mod keypress;
 mod nvim_view;
 mod repeat;
+mod screen;
 mod wayland;
 
 pub use animation::Animations;
@@ -22,4 +23,5 @@ pub use keyboard::KeyboardState;
 pub use keypress::KeypressState;
 pub use nvim_view::NvimView;
 pub use repeat::KeyRepeatState;
+pub use screen::Screen;
 pub use wayland::WaylandState;

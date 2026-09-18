@@ -1,42 +1,51 @@
-//! Parsing of ext_linegrid redraw events into `GridEvent`s
+//! Parsing of ext_linegrid / ext_multigrid redraw events into `GridEvent`s
 //!
-//! Pure functions over msgpack values; only the global grid (1) is kept
-//! since ext_multigrid is not used.
+//! Pure functions over msgpack values.
 
 use nvim_rs::Value;
 
 use super::protocol::{GridCell, GridEvent, HlAttr};
 
-/// The global grid; the only one without ext_multigrid
-const GLOBAL_GRID: u64 = 1;
-
-/// Parse one parameter tuple of a grid redraw event.
-/// Returns None for non-grid events, other grids, or malformed params.
+/// Parse one parameter tuple of a grid/window redraw event.
+/// Returns None for unrelated events or malformed params.
 pub fn parse_grid_event(name: &str, params: &Value) -> Option<GridEvent> {
     let args = params.as_array()?;
     let uint = |i: usize| args.get(i).and_then(Value::as_u64);
-    let on_global_grid = || uint(0) == Some(GLOBAL_GRID);
+    let size = |i: usize| uint(i).map(|n| n as usize);
+    // Float anchor positions may be sent as floats
+    let pos = |i: usize| {
+        let v = args.get(i)?;
+        v.as_u64()
+            .map(|n| n as usize)
+            .or_else(|| v.as_f64().map(|f| f.max(0.0).round() as usize))
+    };
+    let grid = uint(0);
 
     match name {
-        "grid_resize" if on_global_grid() => Some(GridEvent::Resize {
-            width: uint(1)? as usize,
-            height: uint(2)? as usize,
+        "grid_resize" => Some(GridEvent::Resize {
+            grid: grid?,
+            width: size(1)?,
+            height: size(2)?,
         }),
-        "grid_clear" if on_global_grid() => Some(GridEvent::Clear),
-        "grid_cursor_goto" if on_global_grid() => Some(GridEvent::CursorGoto {
-            row: uint(1)? as usize,
-            col: uint(2)? as usize,
+        "grid_clear" => Some(GridEvent::Clear { grid: grid? }),
+        "grid_destroy" => Some(GridEvent::Destroy { grid: grid? }),
+        "grid_cursor_goto" => Some(GridEvent::CursorGoto {
+            grid: grid?,
+            row: size(1)?,
+            col: size(2)?,
         }),
-        "grid_line" if on_global_grid() => Some(GridEvent::Line {
-            row: uint(1)? as usize,
-            col_start: uint(2)? as usize,
+        "grid_line" => Some(GridEvent::Line {
+            grid: grid?,
+            row: size(1)?,
+            col_start: size(2)?,
             cells: parse_cells(args.get(3)?.as_array()?)?,
         }),
-        "grid_scroll" if on_global_grid() => Some(GridEvent::Scroll {
-            top: uint(1)? as usize,
-            bot: uint(2)? as usize,
-            left: uint(3)? as usize,
-            right: uint(4)? as usize,
+        "grid_scroll" => Some(GridEvent::Scroll {
+            grid: grid?,
+            top: size(1)?,
+            bot: size(2)?,
+            left: size(3)?,
+            right: size(4)?,
             rows: args.get(5)?.as_i64()?,
         }),
         "hl_attr_define" => Some(GridEvent::HlAttrDefine {
@@ -47,6 +56,35 @@ pub fn parse_grid_event(name: &str, params: &Value) -> Option<GridEvent> {
             fg: rgb(args.first()?)?,
             bg: rgb(args.get(1)?)?,
             sp: rgb(args.get(2)?)?,
+        }),
+        // [grid, win, start_row, start_col, width, height]
+        "win_pos" => Some(GridEvent::WinPos {
+            grid: grid?,
+            row: size(2)?,
+            col: size(3)?,
+            width: size(4)?,
+            height: size(5)?,
+        }),
+        // [grid, win, anchor, anchor_grid, anchor_row, anchor_col,
+        //  mouse_enabled, zindex, compindex, screen_row, screen_col]
+        // screen_row/col (Neovim-computed placement) fall back to the anchor
+        "win_float_pos" => Some(GridEvent::WinFloatPos {
+            grid: grid?,
+            anchor_grid: uint(3)?,
+            screen_row: pos(9).or_else(|| pos(4))?,
+            screen_col: pos(10).or_else(|| pos(5))?,
+            zindex: uint(7).unwrap_or(0),
+        }),
+        "win_hide" => Some(GridEvent::WinHide { grid: grid? }),
+        "win_close" => Some(GridEvent::WinClose { grid: grid? }),
+        // [grid, win, topline, botline, curline, curcol, line_count, scroll_delta]
+        "win_viewport" => Some(GridEvent::WinViewport {
+            grid: grid?,
+            topline: size(2)?,
+            botline: size(3)?,
+            curline: size(4)?,
+            curcol: size(5)?,
+            line_count: size(6)?,
         }),
         _ => None,
     }
@@ -121,6 +159,7 @@ mod tests {
         assert_eq!(
             parse_grid_event("grid_line", &params),
             Some(GridEvent::Line {
+                grid: 1,
                 row: 2,
                 col_start: 0,
                 cells: vec![
@@ -145,9 +184,94 @@ mod tests {
     }
 
     #[test]
-    fn other_grids_are_ignored() {
-        let params = arr(vec![Value::from(2), Value::from(80), Value::from(24)]);
-        assert_eq!(parse_grid_event("grid_resize", &params), None);
+    fn window_grids_keep_their_id() {
+        let params = arr(vec![Value::from(2), Value::from(80), Value::from(23)]);
+        assert_eq!(
+            parse_grid_event("grid_resize", &params),
+            Some(GridEvent::Resize {
+                grid: 2,
+                width: 80,
+                height: 23
+            })
+        );
+    }
+
+    #[test]
+    fn win_float_pos_uses_screen_position() {
+        // Observed from nvim-cmp: [5, win, "NW", 1, 2, 0, true, 1001, 1, 2, 0]
+        let params = arr(vec![
+            Value::from(5),
+            Value::from(1000),
+            Value::from("NW"),
+            Value::from(1),
+            Value::from(2.0),
+            Value::from(0.0),
+            Value::from(true),
+            Value::from(1001),
+            Value::from(1),
+            Value::from(2),
+            Value::from(0),
+        ]);
+        assert_eq!(
+            parse_grid_event("win_float_pos", &params),
+            Some(GridEvent::WinFloatPos {
+                grid: 5,
+                anchor_grid: 1,
+                screen_row: 2,
+                screen_col: 0,
+                zindex: 1001
+            })
+        );
+    }
+
+    #[test]
+    fn win_float_pos_falls_back_to_float_anchor() {
+        let params = arr(vec![
+            Value::from(5),
+            Value::from(1000),
+            Value::from("NW"),
+            Value::from(2),
+            Value::from(1.6),
+            Value::from(3.0),
+            Value::from(true),
+            Value::from(50),
+        ]);
+        assert_eq!(
+            parse_grid_event("win_float_pos", &params),
+            Some(GridEvent::WinFloatPos {
+                grid: 5,
+                anchor_grid: 2,
+                screen_row: 2,
+                screen_col: 3,
+                zindex: 50
+            })
+        );
+    }
+
+    #[test]
+    fn win_viewport_parses_line_count() {
+        // Observed: [2, win, 0, 3, 1, 0, 2, 0]
+        let params = arr(vec![
+            Value::from(2),
+            Value::from(1000),
+            Value::from(0),
+            Value::from(3),
+            Value::from(1),
+            Value::from(0),
+            Value::from(2),
+            Value::from(0),
+        ]);
+        assert_eq!(
+            parse_grid_event("win_viewport", &params),
+            Some(GridEvent::WinViewport {
+                grid: 2,
+                topline: 0,
+                botline: 3,
+                curline: 1,
+                curcol: 0,
+                line_count: 2
+            })
+        );
     }
 
     #[test]
@@ -164,6 +288,7 @@ mod tests {
         assert_eq!(
             parse_grid_event("grid_scroll", &params),
             Some(GridEvent::Scroll {
+                grid: 1,
                 top: 0,
                 bot: 10,
                 left: 0,

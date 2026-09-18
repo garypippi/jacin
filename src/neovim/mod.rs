@@ -17,7 +17,9 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 use crate::config::Config;
 
-pub use protocol::{FromNeovim, GridEvent, HlAttr, PendingState, ToNeovim, VisualSelection};
+pub use protocol::{
+    FromNeovim, GridCell, GridEvent, HlAttr, PendingState, ToNeovim, VisualSelection,
+};
 
 /// Channel capacity for Neovim communication
 /// This provides backpressure if messages accumulate

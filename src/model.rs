@@ -188,7 +188,7 @@ impl Model {
             }
             FromNeovim::GridFlush(events) => {
                 for event in events {
-                    self.view.grid.apply(event);
+                    self.view.screen.apply(event);
                 }
                 self.shadow_check();
                 // Phase A: grid is not rendered yet
@@ -201,11 +201,14 @@ impl Model {
     /// (source of truth). Logs only when the agreement changes, since grid
     /// and snapshot arrive independently and may briefly disagree.
     fn shadow_check(&mut self) {
-        let grid = &self.view.grid;
-        if !self.ime.is_fully_enabled() || grid.is_empty() || self.view.vim_mode.starts_with('c') {
+        if !self.ime.is_fully_enabled() || self.view.vim_mode.starts_with('c') {
             return;
         }
-        let (row, col) = grid.cursor;
+        let screen = &self.view.screen;
+        let Some(grid) = screen.cursor_grid() else {
+            return;
+        };
+        let (row, col) = (screen.cursor.row, screen.cursor.col);
         let row_text = grid.row_text(row);
         let grid_cursor = grid.byte_offset(row, col);
         let ok = row_text.trim_end() == self.ime.preedit.trim_end()
@@ -214,14 +217,20 @@ impl Model {
             if ok {
                 log::debug!("[SHADOW] grid matches snapshot");
             } else {
+                let line_count = screen
+                    .window(screen.cursor.grid)
+                    .and_then(|w| w.viewport)
+                    .map(|v| v.line_count);
                 log::debug!(
-                    "[SHADOW] mismatch: grid row {} {:?} cursor={} vs snapshot {:?} cursor={} (mode={})",
+                    "[SHADOW] mismatch: grid {} row {} {:?} cursor={} vs snapshot {:?} cursor={} (mode={}, line_count={:?})",
+                    screen.cursor.grid,
                     row,
                     row_text.trim_end(),
                     grid_cursor,
                     self.ime.preedit,
                     self.ime.cursor_begin,
-                    self.view.vim_mode
+                    self.view.vim_mode,
+                    line_count
                 );
             }
             self.shadow_ok = Some(ok);
@@ -394,14 +403,16 @@ mod replay_tests {
     }
 
     fn grid_flush(row_text: &str, cursor_col: usize) -> FromNeovim {
-        use crate::neovim::GridEvent;
-        use crate::neovim::protocol::GridCell;
+        use crate::neovim::{GridCell, GridEvent};
+        // Window grid 2 holds the buffer text (ext_multigrid)
         FromNeovim::GridFlush(vec![
             GridEvent::Resize {
+                grid: 2,
                 width: 10,
                 height: 2,
             },
             GridEvent::Line {
+                grid: 2,
                 row: 0,
                 col_start: 0,
                 cells: vec![GridCell {
@@ -411,6 +422,7 @@ mod replay_tests {
                 }],
             },
             GridEvent::CursorGoto {
+                grid: 2,
                 row: 0,
                 col: cursor_col,
             },

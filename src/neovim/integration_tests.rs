@@ -320,8 +320,12 @@ fn grid_shadow_matches_snapshot() {
                     "grid did not match snapshot for {expect_preedit:?}: preedit={:?} cursor={} grid={:?} grid_cursor={:?}",
                     model.ime.preedit,
                     model.ime.cursor_begin,
-                    model.view.grid.row_text(model.view.grid.cursor.0),
-                    model.view.grid.cursor,
+                    model
+                        .view
+                        .screen
+                        .cursor_grid()
+                        .map(|g| g.row_text(model.view.screen.cursor.row)),
+                    model.view.screen.cursor,
                 )
             });
             model.reduce(msg, true);
@@ -333,6 +337,13 @@ fn grid_shadow_matches_snapshot() {
     // Normal mode: block cursor on the last char
     check(&["<Esc>"], "abcあいd");
     check(&["h"], "abcあいd");
+
+    // Multigrid: the cursor is on a window grid (not the global grid 1)
+    // whose viewport reports the single buffer line
+    let screen = &model.view.screen;
+    assert_ne!(screen.cursor.grid, 1);
+    let viewport = screen.window(screen.cursor.grid).and_then(|w| w.viewport);
+    assert_eq!(viewport.map(|v| v.line_count), Some(1));
 
     shutdown_and_wait(&handle);
 }
