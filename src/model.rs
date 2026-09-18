@@ -14,8 +14,6 @@ pub enum Effect {
     Render,
     /// Commit text to the application
     CommitString(String),
-    /// Delete text around the cursor in the application
-    DeleteSurrounding { before: u32, after: u32 },
     /// Forward the key being processed to the application
     PassthroughKey,
     /// Send keys to Neovim
@@ -61,9 +59,6 @@ impl Model {
                     Effect::NvimInput("<Esc>ggdGi"),
                     Effect::Render,
                 ]
-            }
-            FromNeovim::DeleteSurrounding { before, after } => {
-                vec![Effect::DeleteSurrounding { before, after }]
             }
             FromNeovim::Candidates(info) => {
                 if !enabled {

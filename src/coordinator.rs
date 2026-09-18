@@ -89,9 +89,6 @@ impl State {
             match effect {
                 Effect::Render => self.update_popup(),
                 Effect::CommitString(text) => self.wayland.commit_string(&text),
-                Effect::DeleteSurrounding { before, after } => {
-                    self.wayland.delete_surrounding(before, after);
-                }
                 Effect::PassthroughKey => self.passthrough_current_key(),
                 Effect::NvimInput(keys) => {
                     if let Some(ref nvim) = self.nvim {

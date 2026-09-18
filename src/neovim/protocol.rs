@@ -200,8 +200,6 @@ pub enum FromNeovim {
     Ready,
     /// Text should be committed
     Commit(String),
-    /// Delete surrounding text (before_length, after_length)
-    DeleteSurrounding { before: u32, after: u32 },
     /// Completion candidates from Neovim's popup menu
     Candidates(CandidateInfo),
     /// Macro register being recorded ("" when not recording)
@@ -319,22 +317,6 @@ mod tests {
         match rt {
             FromNeovim::Commit(text) => assert_eq!(text, "確定"),
             _ => panic!("expected Commit"),
-        }
-    }
-
-    #[test]
-    fn from_neovim_delete_surrounding_roundtrip() {
-        let msg = FromNeovim::DeleteSurrounding {
-            before: 3,
-            after: 0,
-        };
-        let rt = roundtrip_from_neovim(&msg);
-        match rt {
-            FromNeovim::DeleteSurrounding { before, after } => {
-                assert_eq!(before, 3);
-                assert_eq!(after, 0);
-            }
-            _ => panic!("expected DeleteSurrounding"),
         }
     }
 

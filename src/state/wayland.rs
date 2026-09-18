@@ -98,11 +98,6 @@ impl WaylandState {
         self.input_method.commit(self.serial);
     }
 
-    pub fn delete_surrounding(&mut self, before: u32, after: u32) {
-        self.input_method.delete_surrounding_text(before, after);
-        self.input_method.commit(self.serial);
-    }
-
     /// Send a key event via the virtual keyboard (for passthrough).
     /// Sends modifiers, key press, key release, then clears modifiers.
     pub fn send_virtual_key(
