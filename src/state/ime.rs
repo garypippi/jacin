@@ -13,20 +13,8 @@ pub enum ImeMode {
     /// IME is being enabled, waiting for keymap
     Enabling,
     /// IME is fully enabled and processing input
-    Enabled {
-        /// Current Vim editing mode
-        vim_mode: VimMode,
-    },
-}
-
-/// Vim editing mode within the IME
-#[derive(Debug, Clone, PartialEq, Default)]
-pub enum VimMode {
-    /// Insert mode - characters inserted at cursor
-    #[default]
-    Insert,
-    /// Normal mode - commands and motions
-    Normal,
+    /// (Vim mode is observed from Neovim, not tracked here)
+    Enabled,
 }
 
 /// How long a transient message stays visible before auto-clearing
@@ -98,12 +86,12 @@ impl ImeState {
 
     /// Check if IME is enabled (or enabling)
     pub fn is_enabled(&self) -> bool {
-        matches!(self.mode, ImeMode::Enabled { .. } | ImeMode::Enabling)
+        matches!(self.mode, ImeMode::Enabled | ImeMode::Enabling)
     }
 
     /// Check if IME is fully enabled (not transitioning)
     pub fn is_fully_enabled(&self) -> bool {
-        matches!(self.mode, ImeMode::Enabled { .. })
+        matches!(self.mode, ImeMode::Enabled)
     }
 
     /// Start enabling the IME
@@ -112,11 +100,9 @@ impl ImeState {
     }
 
     /// Complete enabling (keymap received). Returns true if transitioned from Enabling.
-    pub fn complete_enabling(&mut self, initial_mode: VimMode) -> bool {
+    pub fn complete_enabling(&mut self) -> bool {
         if self.mode == ImeMode::Enabling {
-            self.mode = ImeMode::Enabled {
-                vim_mode: initial_mode,
-            };
+            self.mode = ImeMode::Enabled;
             true
         } else {
             false
@@ -185,7 +171,7 @@ mod tests {
         assert!(state.is_enabled()); // Enabling counts as "enabled"
         assert!(!state.is_fully_enabled()); // But not fully
 
-        let transitioned = state.complete_enabling(VimMode::Insert);
+        let transitioned = state.complete_enabling();
         assert!(transitioned);
         assert!(state.is_enabled());
         assert!(state.is_fully_enabled());
@@ -195,47 +181,27 @@ mod tests {
     fn complete_enabling_only_from_enabling() {
         let mut state = ImeState::new();
         // complete_enabling from Disabled should not transition
-        let transitioned = state.complete_enabling(VimMode::Insert);
+        let transitioned = state.complete_enabling();
         assert!(!transitioned);
         assert!(!state.is_enabled());
     }
 
     #[test]
-    fn complete_enabling_sets_requested_vim_mode() {
+    fn complete_enabling_from_enabled_is_noop() {
         let mut state = ImeState::new();
         state.start_enabling();
+        assert!(state.complete_enabling());
 
-        let transitioned = state.complete_enabling(VimMode::Normal);
-        assert!(transitioned);
-        assert_eq!(
-            state.mode,
-            ImeMode::Enabled {
-                vim_mode: VimMode::Normal,
-            }
-        );
-    }
-
-    #[test]
-    fn complete_enabling_from_enabled_does_not_override_mode() {
-        let mut state = ImeState::new();
-        state.start_enabling();
-        assert!(state.complete_enabling(VimMode::Insert));
-
-        let transitioned = state.complete_enabling(VimMode::Normal);
+        let transitioned = state.complete_enabling();
         assert!(!transitioned);
-        assert_eq!(
-            state.mode,
-            ImeMode::Enabled {
-                vim_mode: VimMode::Insert,
-            }
-        );
+        assert_eq!(state.mode, ImeMode::Enabled);
     }
 
     #[test]
     fn disable_clears_preedit() {
         let mut state = ImeState::new();
         state.start_enabling();
-        state.complete_enabling(VimMode::Insert);
+        state.complete_enabling();
         state.set_preedit("hello".into(), 0, 5);
 
         state.disable();

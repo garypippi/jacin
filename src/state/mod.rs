@@ -13,7 +13,7 @@ mod repeat;
 mod wayland;
 
 pub use animation::Animations;
-pub use ime::{ImeState, VimMode};
+pub use ime::ImeState;
 pub use keyboard::KeyboardState;
 pub use keypress::KeypressState;
 pub use repeat::KeyRepeatState;

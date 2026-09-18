@@ -392,7 +392,7 @@ mod replay_tests {
     use serde::Deserialize;
 
     use crate::neovim::{FromNeovim, VisualSelection};
-    use crate::state::{ImeState, KeypressState, VimMode};
+    use crate::state::{ImeState, KeypressState};
 
     /// Minimal state for replaying FromNeovim messages without Wayland/popup.
     struct ReplayState {
@@ -409,7 +409,7 @@ mod replay_tests {
             let mut ime = ImeState::new();
             // Start as fully enabled (most replay scenarios assume enabled IME)
             ime.start_enabling();
-            ime.complete_enabling(VimMode::Insert);
+            ime.complete_enabling();
             Self {
                 ime,
                 keypress: KeypressState::new(),
