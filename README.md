@@ -29,41 +29,31 @@ Config file: `~/.config/jacin/config.toml`
 
 ```toml
 [keybinds]
-commit = "<C-CR>"         # Commit preedit text to application
-
-[completion]
-adapter = "native"        # "native" (ext_popupmenu) or "nvim-cmp"
+commit = "<C-CR>"         # Commit the buffer (all lines) to the application
 
 [behavior]
 startinsert = true        # true: start in insert mode, false: start in normal mode
 recording_blink = true    # Blink the REC indicator while recording a macro
-display = "snapshot"      # "snapshot" or "grid" (experimental, see below)
 
 [font]
-family = "Noto Sans CJK JP"   # Proportional font (preedit/candidates). Default: fontconfig auto
+family = "Noto Sans CJK JP"   # Proportional font (candidates/messages). Default: fontconfig auto
 mono_family = "JetBrains Mono" # Monospace font (keypress/mode display). Default: "monospace"
 size = 16.0                    # Font size in pixels
 ```
 
 All fields are optional and fall back to the defaults shown above.
 
-### Completion adapters
+### How text is shown and committed
 
-- **native** (default): Uses Neovim's `ext_popupmenu` UI extension. Works with skkeleton henkan and any plugin that calls `complete()`, including ddc.vim with `ddc-ui-native`.
-- **nvim-cmp**: Hooks into nvim-cmp's Lua API directly for candidate extraction (nvim-cmp uses its own floating window, not the native popup menu).
+- The popup renders Neovim's window directly from UI events (`ext_multigrid`), including your colorscheme highlights and floating windows such as the nvim-cmp menu. Neovim's UI is resized to fit the popup, so long lines wrap there. The application receives no preedit; text is only inserted on commit.
+- Input can span multiple lines: `<CR>` inserts a newline, and the commit key (or turning the IME off) commits the whole buffer joined with `\n`. `<CR>`/`<BS>`/commit key are passed to the application only when the buffer is completely empty. Note that in terminals a committed newline acts like Enter.
+- Whatever Neovim draws in its window (including floats) appears in the popup; externalized UI (native popup menu, command line, messages) uses jacin's own sections. The native popup menu (`ext_popupmenu`) works with skkeleton henkan and any plugin that calls `complete()`, including ddc.vim with `ddc-ui-native`; nvim-cmp's menu is shown as a floating window.
 
 > **Note:** Since jacin sets `buftype=nofile` on its buffer, ddc.vim requires `specialBufferCompletion` enabled in your ddc config.
 
-### Display modes
-
-- **snapshot** (default): The popup shows the current line read from Neovim, and the same text is sent to the application as preedit.
-- **grid** (experimental): The popup renders Neovim's window directly from UI events (`ext_multigrid`), including your colorscheme highlights and floating windows such as the nvim-cmp menu. Neovim's UI is resized to fit the popup, so long lines wrap there. The application receives no preedit; text is only inserted on commit.
-  - Input can span multiple lines: `<CR>` inserts a newline instead of committing, and the commit key (or turning the IME off) commits the whole buffer joined with `\n`. `<CR>`/`<BS>`/commit key are passed to the application only when the buffer is completely empty. Note that in terminals a committed newline acts like Enter.
-  - Whatever Neovim draws in its window (including floats) appears in the grid; externalized UI (native popup menu, command line, messages) keeps using jacin's own sections. Therefore the `nvim-cmp` completion adapter is not loaded in grid mode, since its menu is already visible as a floating window.
-
 ### Neovim configuration for jacin
 
-jacin starts Neovim with `g:jacin = 1` set before your config is loaded, so you can adjust settings for the IME without affecting your editor. jacin does not change these options itself. In grid display mode, anything drawn inside the window is shown in the popup, so you may want to turn off columns and line decorations:
+jacin starts Neovim with `g:jacin = 1` set before your config is loaded, so you can adjust settings for the IME without affecting your editor. jacin does not change these options itself. Anything drawn inside the window is shown in the popup, so you may want to turn off columns and line decorations:
 
 ```lua
 if vim.g.jacin then
@@ -98,10 +88,6 @@ pkill -SIGUSR1 jacin
 ```sh
 RUST_LOG=debug ./target/release/jacin
 ```
-
-## Limitations
-
-In snapshot display, preedit is single-line only: `<CR>` commits the current line, and multiline operations (`yy`, `dd`, `cc`, `p`, `P`) are not supported. Use grid display for multiline input.
 
 ## Security Warning
 

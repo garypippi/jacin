@@ -5,7 +5,6 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct Config {
     pub keybinds: Keybinds,
-    pub completion: Completion,
     pub behavior: Behavior,
     pub font: FontConfig,
     #[serde(skip)]
@@ -15,7 +14,7 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
-    /// Proportional font family name (for preedit/candidates).
+    /// Proportional font family name (for candidates and messages).
     /// Default: fontconfig auto-detection.
     pub family: Option<String>,
     /// Monospace font family name (for keypress/mode display).
@@ -35,9 +34,6 @@ pub struct Behavior {
     /// If true, the REC indicator dot blinks while recording a macro.
     /// Default: true.
     pub recording_blink: bool,
-    /// How the popup shows the text being edited.
-    /// Default: snapshot.
-    pub display: DisplayMode,
 }
 
 impl Default for Behavior {
@@ -45,32 +41,6 @@ impl Default for Behavior {
         Self {
             startinsert: true,
             recording_blink: true,
-            display: DisplayMode::default(),
-        }
-    }
-}
-
-/// Source of the text shown in the popup's editing area
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DisplayMode {
-    /// Current line from Lua snapshots (single line)
-    #[default]
-    Snapshot,
-    /// Neovim's window grid from UI events (experimental, Phase B)
-    Grid,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct Completion {
-    pub adapter: String,
-}
-
-impl Default for Completion {
-    fn default() -> Self {
-        Self {
-            adapter: "native".to_string(),
         }
     }
 }
@@ -142,7 +112,6 @@ mod tests {
     fn default_values() {
         let config = Config::default();
         assert_eq!(config.keybinds.commit, "<C-CR>");
-        assert_eq!(config.completion.adapter, "native");
         assert!(config.behavior.startinsert);
         assert!(config.behavior.recording_blink);
         assert!(!config.clean);
@@ -155,7 +124,6 @@ mod tests {
     fn empty_toml_uses_defaults() {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.keybinds.commit, "<C-CR>");
-        assert_eq!(config.completion.adapter, "native");
         assert!(config.behavior.startinsert);
         assert!(config.behavior.recording_blink);
         assert!(config.font.family.is_none());
@@ -172,21 +140,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.keybinds.commit, "<A-;>");
         // Other sections use defaults
-        assert_eq!(config.completion.adapter, "native");
         assert!(config.behavior.startinsert);
-    }
-
-    #[test]
-    fn partial_toml_completion_only() {
-        let config: Config = toml::from_str(
-            r#"
-            [completion]
-            adapter = "cmp"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(config.completion.adapter, "cmp");
-        assert_eq!(config.keybinds.commit, "<C-CR>");
     }
 
     #[test]
@@ -230,16 +184,21 @@ mod tests {
     }
 
     #[test]
-    fn display_mode_parses_grid() {
+    fn removed_display_and_completion_keys_are_ignored() {
+        // display (grid only now) and completion.adapter were removed;
+        // old configs must still load
         let config: Config = toml::from_str(
             r#"
             [behavior]
             display = "grid"
+            startinsert = false
+
+            [completion]
+            adapter = "nvim-cmp"
             "#,
         )
         .unwrap();
-        assert_eq!(config.behavior.display, DisplayMode::Grid);
-        assert_eq!(Config::default().behavior.display, DisplayMode::Snapshot);
+        assert!(!config.behavior.startinsert);
     }
 
     #[test]
@@ -261,9 +220,6 @@ mod tests {
             [keybinds]
             commit = "<C-;>"
 
-            [completion]
-            adapter = "cmp"
-
             [behavior]
             startinsert = true
 
@@ -275,7 +231,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.keybinds.commit, "<C-;>");
-        assert_eq!(config.completion.adapter, "cmp");
         assert!(config.behavior.startinsert);
         assert_eq!(config.font.family.as_deref(), Some("Noto Sans CJK JP"));
         assert_eq!(config.font.mono_family.as_deref(), Some("JetBrains Mono"));

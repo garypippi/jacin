@@ -1,7 +1,6 @@
 use std::sync::atomic::Ordering;
 
 use crate::State;
-use crate::config::DisplayMode;
 use crate::model::Effect;
 use crate::neovim::{self, FromNeovim};
 use crate::ui::{MAX_GRID_ROWS, PopupContent};
@@ -53,7 +52,7 @@ impl State {
                 self.model.ime.start_enabling();
             }
         } else {
-            // Disable IME - commit preedit text BEFORE releasing keyboard
+            // Disable IME - commit the buffer BEFORE releasing keyboard
             // (must match Commit handler order: commit first, then release)
             log::debug!("[IME] Releasing keyboard");
             // Whole buffer from the line-event mirror (no RPC: Neovim may be
@@ -81,7 +80,7 @@ impl State {
             }
             _ => log::debug!("[NVIM] {:?}", msg),
         }
-        let effects = self.model.reduce(msg, self.wayland.active);
+        let effects = self.model.reduce(msg);
         self.apply_effects(effects);
     }
 
@@ -89,13 +88,7 @@ impl State {
     fn apply_effects(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
-                Effect::SyncPreedit => self.update_preedit(),
                 Effect::Render => self.update_popup(),
-                Effect::GridUpdated => {
-                    if self.config.behavior.display == DisplayMode::Grid {
-                        self.update_popup();
-                    }
-                }
                 Effect::CommitString(text) => self.wayland.commit_string(&text),
                 Effect::DeleteSurrounding { before, after } => {
                     self.wayland.delete_surrounding(before, after);
@@ -108,8 +101,6 @@ impl State {
                 }
                 Effect::CancelToggle => self.toggle_flag.store(false, Ordering::SeqCst),
                 Effect::NvimExited => {
-                    // Clear compositor preedit (still active, compositor may show stale text)
-                    self.wayland.set_preedit("", 0, 0);
                     self.release_ime_resources();
                     self.nvim = None;
                 }
@@ -132,39 +123,9 @@ impl State {
         }
     }
 
-    pub(crate) fn update_preedit(&mut self) {
-        let cursor_begin = self.model.ime.cursor_begin as i32;
-        let cursor_end = self.model.ime.cursor_end as i32;
-        // Grid display shows the text only in the popup; the app gets no
-        // preedit (multiline-safe: nothing to fit into a single-line field).
-        // Committed text is unaffected.
-        if self.config.behavior.display == DisplayMode::Grid {
-            log::trace!("[PREEDIT] grid display: not sent to app");
-        } else if self.wayland.active && self.model.ime.is_enabled() {
-            // Don't send preedit to compositor when IME is disabled or deactivated.
-            self.wayland
-                .set_preedit(&self.model.ime.preedit, cursor_begin, cursor_end);
-            log::debug!(
-                "[PREEDIT] updated: {:?}, cursor: {}..{}",
-                self.model.ime.preedit,
-                cursor_begin,
-                cursor_end
-            );
-        } else {
-            log::debug!(
-                "[PREEDIT] skipped (active={}, enabled={}): {:?}",
-                self.wayland.active,
-                self.model.ime.is_enabled(),
-                self.model.ime.preedit
-            );
-        }
-        // Show preedit window with cursor visualization
-        self.update_popup();
-    }
-
     /// Request a popup redraw. Rendering is deferred to the end of the
     /// event loop iteration (`flush_popup`), so the several messages one
-    /// key produces (snapshot, grid flush, candidates) render only once.
+    /// key produces (grid flush, mode change, candidates) render only once.
     pub(crate) fn update_popup(&mut self) {
         self.popup_dirty = true;
     }
@@ -180,7 +141,7 @@ impl State {
     fn render_popup(&mut self) {
         // IME disabled: skip content generation entirely and ensure popup is hidden.
         // After toggle-off, Neovim sends a burst of push notifications (<Esc>ggdG
-        // triggers mode changes and autocmds) — without this guard, each notification
+        // triggers mode changes and redraws) — without this guard, each notification
         // would rebuild PopupContent and potentially recreate/destroy surfaces.
         if !self.model.ime.is_enabled() {
             self.hide_popup();
@@ -188,9 +149,6 @@ impl State {
         }
         let t = std::time::Instant::now();
         let content = PopupContent {
-            preedit: self.model.ime.preedit.clone(),
-            cursor_begin: self.model.ime.cursor_begin,
-            cursor_end: self.model.ime.cursor_end,
             vim_mode: self.model.view.vim_mode.clone(),
             keypress_entries: if let Some(ref cmdline) = self.model.view.cmdline {
                 vec![cmdline.text.clone()]
@@ -211,28 +169,22 @@ impl State {
             } else {
                 None
             },
-            visual_selection: self.model.view.visual.clone(),
             ime_enabled: self.model.ime.is_enabled(),
             recording: self.model.view.recording.clone(),
             rec_blink_on: self.animations.rec_blink.on,
             cmdline_cursor_pos: self.model.view.cmdline.as_ref().map(|c| c.cursor_byte),
-            window_view: match self.config.behavior.display {
-                DisplayMode::Grid => {
-                    let view = self.model.view.screen.window_view(MAX_GRID_ROWS);
-                    match &view {
-                        Some(v) => log::debug!(
-                            "[POPUP] grid display: {} rows, cursor={:?}",
-                            v.rows.len(),
-                            v.cursor
-                        ),
-                        None => log::debug!(
-                            "[POPUP] grid display: no window grid (cursor on grid {}), using snapshot",
-                            self.model.view.screen.cursor.grid
-                        ),
-                    }
-                    view
+            window_view: {
+                let view = self.model.view.screen.window_view(MAX_GRID_ROWS);
+                match &view {
+                    Some(v) => log::debug!(
+                        "[POPUP] window grid: {} rows, cursor={:?} (visible={})",
+                        v.rows.len(),
+                        v.cursor,
+                        v.cursor_visible
+                    ),
+                    None => log::debug!("[POPUP] no window grid yet"),
                 }
-                DisplayMode::Snapshot => None,
+                view
             },
         };
         if let Some(ref mut popup) = self.popup {

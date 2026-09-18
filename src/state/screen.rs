@@ -83,6 +83,9 @@ pub struct WindowView {
     pub rows: Vec<Vec<StyledCell>>,
     /// Cursor (row within `rows`, screen column)
     pub cursor: (usize, usize),
+    /// False when the cursor has left the window grid (e.g. to the global
+    /// grid): the view is the last window shown, without a cursor
+    pub cursor_visible: bool,
     /// Floating windows overlaid on the rows, lowest zindex first
     pub floats: Vec<FloatView>,
 }
@@ -126,6 +129,9 @@ pub struct Screen {
     /// Keyed by grid id (only grids that are windows)
     windows: HashMap<u64, Window>,
     pub cursor: Cursor,
+    /// Last cursor position on a window grid (the cursor may move to the
+    /// global grid, e.g. at startup)
+    window_cursor: Option<Cursor>,
     hl_attrs: HashMap<u64, HlAttr>,
     pub default_colors: DefaultColors,
 }
@@ -139,21 +145,19 @@ impl Screen {
         self.windows.get(&grid)
     }
 
-    /// Grid of the window holding the cursor
-    pub fn cursor_grid(&self) -> Option<&Grid> {
-        self.grid(self.cursor.grid)
-    }
-
     /// Screen rows of the window holding the cursor that show buffer text
     /// (filler rows past the buffer end excluded), at most `max_rows`,
     /// scrolled so that the cursor row is visible.
     pub fn window_view(&self, max_rows: usize) -> Option<WindowView> {
-        let grid = self.cursor_grid()?;
-        if self.cursor.grid == 1 || max_rows == 0 {
-            return None; // no window grid yet
+        if max_rows == 0 {
+            return None;
         }
+        // Off the window grid: keep showing the last window, no cursor
+        let cursor_visible = self.cursor.grid != 1;
+        let cursor = self.window_cursor?; // None: no window grid yet
+        let grid = self.grid(cursor.grid)?;
         let lines = self
-            .window(self.cursor.grid)
+            .window(cursor.grid)
             .and_then(|w| w.viewport)
             .map_or(1, |v| v.line_count.saturating_sub(v.topline))
             .max(1);
@@ -167,8 +171,8 @@ impl Screen {
             }
             used_rows += 1;
         }
-        let used_rows = used_rows.max(self.cursor.row + 1).min(grid.height());
-        let first = (self.cursor.row + 1).saturating_sub(max_rows);
+        let used_rows = used_rows.max(cursor.row + 1).min(grid.height());
+        let first = (cursor.row + 1).saturating_sub(max_rows);
         let last = used_rows.min(first + max_rows);
 
         let rows = (first..last)
@@ -182,15 +186,16 @@ impl Screen {
             .collect();
         Some(WindowView {
             rows,
-            cursor: (self.cursor.row - first, self.cursor.col),
-            floats: self.float_views(first),
+            cursor: (cursor.row - first, cursor.col),
+            cursor_visible,
+            floats: self.float_views(cursor.grid, first),
         })
     }
 
     /// Visible floating windows relative to the current window, whose
     /// view starts at window row `first`. Float rows above the view are cut.
-    fn float_views(&self, first: usize) -> Vec<FloatView> {
-        let (win_row, win_col) = match self.window(self.cursor.grid).and_then(|w| w.placement) {
+    fn float_views(&self, window_grid: u64, first: usize) -> Vec<FloatView> {
+        let (win_row, win_col) = match self.window(window_grid).and_then(|w| w.placement) {
             Some(Placement::Normal { row, col }) => (row, col),
             _ => (0, 0),
         };
@@ -259,6 +264,9 @@ impl Screen {
             }
             GridEvent::CursorGoto { grid, row, col } => {
                 self.cursor = Cursor { grid, row, col };
+                if grid != 1 {
+                    self.window_cursor = Some(self.cursor);
+                }
             }
             GridEvent::Line {
                 grid,
@@ -380,7 +388,7 @@ mod tests {
         });
 
         assert_eq!(screen.grid(1).unwrap().row_text(1), "S   ");
-        assert_eq!(screen.cursor_grid().unwrap().row_text(0), "a   ");
+        assert_eq!(screen.grid(screen.cursor.grid).unwrap().row_text(0), "a   ");
         assert_eq!(screen.cursor.col, 1);
     }
 

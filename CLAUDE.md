@@ -29,32 +29,27 @@ src/
   input.rs                   # Key processing, handle_key, send_to_nvim
   keysym.rs                  # keysym_to_vim (pure conversion function)
   model.rs                   # Model (ImeState + KeypressState + NvimView), reduce(FromNeovim) -> Vec<Effect>
-  coordinator.rs             # apply_effects, IME toggle, preedit/popup coordination
+  coordinator.rs             # apply_effects, IME toggle, popup coordination
   config.rs                  # Config file loading (TOML), keybind defaults
   state/
     wayland.rs               # WaylandState (protocol handles, serial, virtual keyboard)
     keyboard.rs              # KeyboardState (XKB, modifiers, debouncing, repeat params)
     repeat.rs                # KeyRepeatState (key repeat timing/tracking)
-    ime.rs                   # ImeState, ImeMode state machine, preedit sent to app
-    nvim_view.rs             # NvimView (observed vim mode, cmdline, candidates, messages, visual, screen)
+    ime.rs                   # ImeState, ImeMode state machine
+    nvim_view.rs             # NvimView (observed vim mode, recording, cmdline, candidates, messages, screen, buffer)
+    buffer.rs                # BufferMirror (buffer lines from nvim_buf_attach, committed on IME off)
     screen.rs                # Screen (ext_multigrid: grids by id, windows, viewport, floats, cursor, hl)
     grid.rs                  # Grid (cell storage for one grid)
     keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
     animation.rs             # AnimationState (blinking indicators, transient display)
   neovim/
     mod.rs                   # NeovimHandle (public API)
-    protocol.rs              # ToNeovim, FromNeovim typed messages (serde), Snapshot
+    protocol.rs              # ToNeovim, FromNeovim typed messages (serde)
     handler.rs               # Tokio-side Neovim message handling (redraw events, sub-handlers)
     redraw_grid.rs           # ext_linegrid/ext_multigrid redraw events → GridEvent (pure parsing)
     integration_tests.rs     # Headless nvim integration tests
-    lua/
-      snapshot.lua           # collect_snapshot() function
-      key_handlers.lua       # ime_handle_bs(), ime_handle_commit()
-      auto_commit.lua        # ime_context table, check_line_added()
-      autocmds.lua           # ModeChanged, TextChangedI, CursorMovedI, CmdlineLeave
-      completion_cmp.lua     # nvim-cmp completion adapter
   ui/
-    unified_window.rs        # Unified popup (preedit, keypress, candidates)
+    unified_window.rs        # Unified popup (window grid, keypress, candidates)
     layout.rs                # Popup layout calculation and sizing
     text_render.rs           # Font rendering with fontdue, SHM utilities
 ```
@@ -63,14 +58,12 @@ src/
 
 - **ImeMode state machine**: Disabled → Enabling → Enabled (explicit states, not boolean flags)
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
-- **Optimized RPC**: Insert mode uses fire-and-forget (`nvim_input` + push notification via autocmds); normal mode uses 2-RPC pull (`nvim_input` + `collect_snapshot()`)
-- **nvim_ui_attach extensions**: `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `mode_change` — Neovim's UI protocol drives command-line, completion, messages, and mode updates
-- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, completion adapter, font, startinsert, recording_blink, display (snapshot/grid)
-- **Grid display (Phase B, experimental)**: popup renders the window grid from ext_multigrid events (`Screen`/`WindowView`); app gets no preedit; Neovim is started with `g:jacin = 1` for user config
-
-## Known Limitations
-
-- Snapshot display only: multiline operations (yy, dd, cc, p, P) not supported (single-line preedit, `<CR>` auto-commits). Grid display supports multiline input (`ime_context.multiline`; commit joins all lines with `\n`)
+- **No Lua / autocmds**: jacin only calls the Neovim API (`nvim_input`, `nvim_get_mode`, `nvim_buf_get_lines`, `reg_recording()`); state comes from UI events and buffer events
+- **Optimized RPC**: Insert mode uses fire-and-forget (`nvim_input`; display follows redraw/buffer events); normal mode uses 2-RPC pull (`nvim_input` + `nvim_get_mode`)
+- **nvim_ui_attach extensions**: `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `ext_multigrid`, `mode_change` — Neovim's UI protocol drives command-line, completion, messages, mode, and the window display
+- **Display**: popup renders the window grid from ext_multigrid events (`Screen`/`WindowView`); the app gets no preedit; Neovim is started with `g:jacin = 1` for user config
+- **Multiline**: `<CR>` is a native newline; commit key joins all lines with `\n`; IME off commits the `nvim_buf_attach` mirror (`BufferMirror`); `<CR>`/`<BS>`/commit pass through only when the whole buffer is empty
+- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, font, startinsert, recording_blink (removed keys like `display`/`completion.adapter` are ignored)
 
 ## Architecture
 

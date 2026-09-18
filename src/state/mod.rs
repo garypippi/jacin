@@ -3,7 +3,7 @@
 //! Separates IME state into distinct components:
 //! - WaylandState: Protocol handles and serial tracking
 //! - KeyboardState: XKB context and modifier tracking
-//! - ImeState: IME mode state machine and preedit
+//! - ImeState: IME mode state machine
 //! - NvimView: Display state observed from Neovim
 
 mod animation;

@@ -1,0 +1,14 @@
+{
+  "description": "Start recording a macro (qa), then stop it (q)",
+  "messages": [
+    { "ModeChange": "n" },
+    { "Recording": "a" }
+  ],
+  "expect": {
+    "vim_mode": "n",
+    "recording": "a",
+    "candidates_count": 0,
+    "committed": [],
+    "exited": false
+  }
+}

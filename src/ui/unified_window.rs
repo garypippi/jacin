@@ -1,4 +1,5 @@
-//! Unified popup window combining preedit, keypress display, and candidates
+//! Unified popup window combining Neovim's window grid, keypress display,
+//! and candidates
 //!
 //! Uses zwp_input_popup_surface_v2 which is automatically positioned near
 //! the text cursor by the compositor.
@@ -17,13 +18,11 @@ use super::layout::{
     KEYPRESS_ENTRY_GAP, KEYPRESS_TEXT_COLOR, Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT,
     MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR,
     NUMBER_WIDTH, PADDING, REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB,
-    SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, SELECTED_BG, TEXT_COLOR, VISUAL_BG,
-    calculate_layout, format_recording_label, mode_label, preedit_scroll_offset, rgba,
-    scrollbar_thumb_geometry,
+    SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, SELECTED_BG, TEXT_COLOR, calculate_layout,
+    format_recording_label, mode_label, rgba, scrollbar_thumb_geometry,
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
-use crate::neovim::VisualSelection;
 use crate::state::{StyledCell, WindowView};
 
 /// Pool size: two ARGB buffers of the maximum popup size (double buffering)
@@ -113,7 +112,7 @@ impl UnifiedPopup {
         }
     }
 
-    /// Neovim UI size (columns, rows) for grid display mode: the grid
+    /// Neovim UI size (columns, rows): the window
     /// section at the maximum popup size. Rows must leave room below the
     /// cursor for floats — nvim-cmp won't open a menu of 8+ entries unless
     /// `lines - cursor_row > 10`, so sizing rows to the visible window grid
@@ -241,22 +240,20 @@ impl UnifiedPopup {
         draw_border(&mut pixmap, self.width, self.height, rgba(BORDER_COLOR));
 
         // Render sections
-        if layout.has_preedit {
-            let preedit_rows = content
+        if layout.has_window {
+            let window_rows = content
                 .window_view
                 .as_ref()
                 .map_or(1, |view| view.total_rows().max(1));
             if let Some(ref view) = content.window_view {
                 self.render_grid_section(&mut pixmap, view, &content.vim_mode, layout);
-            } else if !content.preedit.is_empty() {
-                self.render_preedit_section(&mut pixmap, content, layout, PADDING);
             }
 
-            // Draw separator below preedit if more sections follow
+            // Draw separator below the window if more sections follow
             if layout.has_keypress || layout.has_candidates || layout.has_transient_message {
                 let line_height = self.renderer.line_height();
                 // Pixel-align 1px lines (fractional positions trip tiny-skia's AA hairline path)
-                let sep_y = (layout.preedit_y + line_height * preedit_rows as f32).round();
+                let sep_y = (layout.window_y + line_height * window_rows as f32).round();
                 if let Some(rect) =
                     Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
                 {
@@ -328,7 +325,7 @@ impl UnifiedPopup {
         );
     }
 
-    /// Render Neovim's window grid (grid display mode): monospace cells with
+    /// Render Neovim's window grid: monospace cells with
     /// Neovim highlight colors over the popup theme, the cursor, and floating
     /// windows (e.g. nvim-cmp menus) on top.
     fn render_grid_section(
@@ -340,12 +337,13 @@ impl UnifiedPopup {
     ) {
         let geo = CellGeometry {
             left: PADDING,
-            top: layout.preedit_y,
+            top: layout.window_y,
             cell_width: self.mono_renderer.measure_text(" "),
             line_height: self.renderer.line_height(),
             right_edge: layout.width as f32 - PADDING,
         };
-        let block_cursor = !matches!(vim_mode.chars().next(), Some('i' | 'R' | 'c'));
+        let block_cursor =
+            view.cursor_visible && !matches!(vim_mode.chars().next(), Some('i' | 'R' | 'c'));
         let (cursor_row, cursor_col) = view.cursor;
 
         for (row, cells) in view.rows.iter().enumerate() {
@@ -365,7 +363,7 @@ impl UnifiedPopup {
         // Cursor past the end of the row (or on an empty row)
         let row_len = view.rows.get(cursor_row).map_or(0, Vec::len);
         let x0 = geo.x(cursor_col);
-        if x0 < geo.right_edge {
+        if view.cursor_visible && x0 < geo.right_edge {
             let (y_top, height) = (geo.y(cursor_row), geo.line_height.round());
             if !block_cursor {
                 fill_rect(pixmap, x0, y_top, x0 + 2.0, height, rgba(TEXT_COLOR));
@@ -436,149 +434,6 @@ impl UnifiedPopup {
             let y_baseline = y_top + geo.line_height * 0.75;
             self.mono_renderer
                 .draw_text(pixmap, &cell.text, x, y_baseline, colors[i].0);
-        }
-    }
-
-    /// Render preedit section with cursor
-    fn render_preedit_section(
-        &mut self,
-        pixmap: &mut Pixmap,
-        content: &PopupContent,
-        layout: &Layout,
-        preedit_left: f32,
-    ) {
-        let text_color = rgba(TEXT_COLOR);
-        let cursor_bg = rgba(CURSOR_BG);
-        let line_height = self.renderer.line_height();
-        let y_baseline = layout.preedit_y + line_height * 0.75;
-
-        // Convert byte offsets to character positions
-        let chars: Vec<char> = content.preedit.chars().collect();
-        let mut byte_to_char: Vec<usize> = Vec::with_capacity(content.preedit.len() + 1);
-        for (i, c) in chars.iter().enumerate() {
-            for _ in 0..c.len_utf8() {
-                byte_to_char.push(i);
-            }
-        }
-        byte_to_char.push(chars.len());
-
-        let cursor_char_begin = byte_to_char.get(content.cursor_begin).copied().unwrap_or(0);
-        let cursor_char_end = byte_to_char
-            .get(content.cursor_end)
-            .copied()
-            .unwrap_or(chars.len());
-
-        let is_normal_mode = content.vim_mode == "n"
-            || content.vim_mode == "v"
-            || content.vim_mode == "V"
-            || content.vim_mode == "\x16"
-            || content.vim_mode.starts_with('v');
-
-        // Calculate character positions (absolute, starting from preedit_left)
-        let mut char_x_positions: Vec<f32> = Vec::with_capacity(chars.len() + 1);
-        let mut x = preedit_left;
-        for c in &chars {
-            char_x_positions.push(x);
-            x += self.renderer.measure_text(&c.to_string());
-        }
-        char_x_positions.push(x);
-
-        // Calculate total text width and visible area
-        let total_text_width = x - preedit_left;
-        let visible_width = layout.width as f32 - PADDING - preedit_left;
-
-        // Calculate scroll offset to keep cursor visible
-        let cursor_x = char_x_positions
-            .get(cursor_char_begin)
-            .copied()
-            .unwrap_or(preedit_left);
-        let cursor_rel = cursor_x - preedit_left;
-        let scroll_offset = preedit_scroll_offset(total_text_width, visible_width, cursor_rel);
-
-        if is_normal_mode && cursor_char_begin <= chars.len() {
-            // Convert visual selection byte offsets to char positions
-            let visual_char_range = match &content.visual_selection {
-                Some(VisualSelection::Charwise { begin, end }) => {
-                    let vbegin = byte_to_char.get(*begin).copied().unwrap_or(0);
-                    let vend = byte_to_char.get(*end).copied().unwrap_or(chars.len());
-                    Some((vbegin, vend))
-                }
-                None => None,
-            };
-
-            // Draw visual selection background (behind cursor)
-            if let Some((vbegin, vend)) = visual_char_range {
-                let visual_bg = rgba(VISUAL_BG);
-                let vx_start = char_x_positions[vbegin] - scroll_offset;
-                let vx_end = char_x_positions[vend.min(chars.len())] - scroll_offset;
-                if let Some(rect) =
-                    Rect::from_xywh(vx_start, layout.preedit_y, vx_end - vx_start, line_height)
-                {
-                    let mut paint = Paint::default();
-                    paint.set_color(visual_bg);
-                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-                }
-            }
-
-            // Block cursor (drawn on top of visual selection)
-            let x_start = char_x_positions[cursor_char_begin] - scroll_offset;
-            let x_end = char_x_positions[cursor_char_end.min(chars.len())] - scroll_offset;
-            let cursor_width = (x_end - x_start).max(self.renderer.measure_text(" "));
-
-            if let Some(rect) =
-                Rect::from_xywh(x_start, layout.preedit_y, cursor_width, line_height)
-            {
-                let mut paint = Paint::default();
-                paint.set_color(cursor_bg);
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
-
-            // Draw text - cursor chars dark, visual chars light on VISUAL_BG, others normal
-            let cursor_text_color = Color::from_rgba8(40, 44, 52, 255);
-            for (i, c) in chars.iter().enumerate() {
-                let char_x = char_x_positions[i] - scroll_offset;
-                let char_width = self.renderer.measure_text(&c.to_string());
-
-                // Skip characters outside visible area
-                if char_x + char_width < preedit_left || char_x > layout.width as f32 - PADDING {
-                    continue;
-                }
-
-                let color = if i >= cursor_char_begin && i < cursor_char_end {
-                    cursor_text_color
-                } else {
-                    text_color
-                };
-                self.renderer
-                    .draw_text(pixmap, &c.to_string(), char_x, y_baseline, color);
-            }
-        } else {
-            // Insert mode - draw text then line cursor
-            // Draw characters individually to handle scrolling
-            for (i, c) in chars.iter().enumerate() {
-                let char_x = char_x_positions[i] - scroll_offset;
-                let char_width = self.renderer.measure_text(&c.to_string());
-
-                // Skip characters outside visible area
-                if char_x + char_width < preedit_left || char_x > layout.width as f32 - PADDING {
-                    continue;
-                }
-
-                self.renderer
-                    .draw_text(pixmap, &c.to_string(), char_x, y_baseline, text_color);
-            }
-
-            // Draw line cursor
-            let cursor_draw_x = cursor_x - scroll_offset;
-            if cursor_draw_x >= preedit_left
-                && cursor_draw_x <= layout.width as f32 - PADDING
-                && let Some(rect) =
-                    Rect::from_xywh(cursor_draw_x, layout.preedit_y, 2.0, line_height)
-            {
-                let mut paint = Paint::default();
-                paint.set_color(text_color);
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
         }
     }
 

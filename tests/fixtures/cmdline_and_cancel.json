@@ -1,16 +1,15 @@
 {
   "description": "Enter command mode, type :set, then cancel",
   "messages": [
-    { "Preedit": { "text": "hello", "cursor_begin": 5, "cursor_end": 5, "mode": "i", "recording": "" } },
+    { "ModeChange": "n" },
     { "CmdlineShow": { "content": "set", "pos": 3, "firstc": ":", "prompt": "", "level": 1 } },
+    { "ModeChange": "c" },
     { "CmdlineHide": { "level": 1 } },
-    { "CmdlineCancelled": { "cmdtype": ":", "executed": false } }
+    { "ModeChange": "n" }
   ],
   "expect": {
-    "preedit": "hello",
-    "cursor_begin": 5,
-    "cursor_end": 5,
     "vim_mode": "n",
+    "recording": "",
     "candidates_count": 0,
     "committed": [],
     "exited": false

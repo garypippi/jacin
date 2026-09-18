@@ -15,16 +15,11 @@ pub enum ImeMode {
     Enabled,
 }
 
-/// IME lifecycle and the preedit sent to the application
+/// IME lifecycle (the application gets no preedit: text is shown in the
+/// popup and only committed)
 pub struct ImeState {
     /// Current IME mode
     pub mode: ImeMode,
-    /// Current preedit text
-    pub preedit: String,
-    /// Cursor begin position (byte offset)
-    pub cursor_begin: usize,
-    /// Cursor end position (byte offset)
-    pub cursor_end: usize,
 }
 
 impl ImeState {
@@ -32,9 +27,6 @@ impl ImeState {
     pub fn new() -> Self {
         Self {
             mode: ImeMode::Disabled,
-            preedit: String::new(),
-            cursor_begin: 0,
-            cursor_end: 0,
         }
     }
 
@@ -66,21 +58,6 @@ impl ImeState {
     /// Disable immediately (for toggle off)
     pub fn disable(&mut self) {
         self.mode = ImeMode::Disabled;
-        self.clear_preedit();
-    }
-
-    /// Update preedit
-    pub fn set_preedit(&mut self, text: String, cursor_begin: usize, cursor_end: usize) {
-        self.preedit = text;
-        self.cursor_begin = cursor_begin;
-        self.cursor_end = cursor_end;
-    }
-
-    /// Clear preedit
-    pub fn clear_preedit(&mut self) {
-        self.preedit.clear();
-        self.cursor_begin = 0;
-        self.cursor_end = 0;
     }
 }
 
@@ -136,29 +113,12 @@ mod tests {
     }
 
     #[test]
-    fn disable_clears_preedit() {
+    fn disable_from_enabled() {
         let mut state = ImeState::new();
         state.start_enabling();
         state.complete_enabling();
-        state.set_preedit("hello".into(), 0, 5);
-
         state.disable();
         assert!(!state.is_enabled());
-        assert!(state.preedit.is_empty());
-        assert_eq!(state.cursor_begin, 0);
-        assert_eq!(state.cursor_end, 0);
-    }
-
-    #[test]
-    fn preedit_operations() {
-        let mut state = ImeState::new();
-        state.set_preedit("test".into(), 1, 3);
-        assert_eq!(state.preedit, "test");
-        assert_eq!(state.cursor_begin, 1);
-        assert_eq!(state.cursor_end, 3);
-
-        state.clear_preedit();
-        assert!(state.preedit.is_empty());
-        assert_eq!(state.cursor_begin, 0);
+        assert_eq!(state.mode, ImeMode::Disabled);
     }
 }

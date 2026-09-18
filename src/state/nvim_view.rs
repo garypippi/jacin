@@ -1,13 +1,12 @@
 //! Display state observed from Neovim
 //!
 //! Everything here mirrors Neovim (mode, command line, completion menu,
-//! messages, visual selection). It is only updated from `FromNeovim`
+//! messages, screen grids, buffer lines). It is only updated from `FromNeovim`
 //! messages or cleared on reset — never edited locally.
 
 use std::time::{Duration, Instant};
 
 use super::{BufferMirror, Screen};
-use crate::neovim::VisualSelection;
 
 /// How long a transient message stays visible before auto-clearing
 pub const TRANSIENT_MESSAGE_DURATION: Duration = Duration::from_millis(2000);
@@ -32,8 +31,6 @@ pub struct NvimView {
     pub vim_mode: String,
     /// Currently recording macro register ("" when not recording)
     pub recording: String,
-    /// Visual selection range (None outside visual mode)
-    pub visual: Option<VisualSelection>,
     /// Completion candidates
     pub candidates: Vec<String>,
     /// Selected candidate index
@@ -44,7 +41,7 @@ pub struct NvimView {
     pub transient_message: Option<String>,
     /// When the transient message was set
     transient_message_at: Option<Instant>,
-    /// Mirror of Neovim's UI grids (Phase A: shadow only, not rendered)
+    /// Mirror of Neovim's UI grids (rendered in the popup)
     pub screen: Screen,
     /// Mirror of the buffer lines (kept across `clear`, like `screen`)
     pub buffer: BufferMirror,
@@ -55,7 +52,6 @@ impl NvimView {
     /// (mode is re-established on enabling and by mode_change).
     pub fn clear(&mut self) {
         self.recording.clear();
-        self.visual = None;
         self.clear_candidates();
         self.cmdline = None;
         self.clear_transient_message();

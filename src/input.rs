@@ -1,7 +1,7 @@
 use wayland_client::protocol::wl_keyboard;
 
 use crate::State;
-use crate::keysym::{is_printable, keysym_to_vim};
+use crate::keysym::keysym_to_vim;
 use crate::neovim::PendingState;
 
 /// Scope guard that logs elapsed time on drop.
@@ -112,13 +112,6 @@ impl State {
             }
 
             self.model.keypress.set_pending(after);
-        } else if is_printable(&utf8) {
-            // Fallback: if no Neovim or no vim key, use local preedit
-            if self.nvim.is_none() {
-                self.model.ime.preedit.push_str(&utf8);
-                log::debug!("[PREEDIT] buffer={:?}", self.model.ime.preedit);
-                self.update_preedit();
-            }
         } else {
             log::debug!(
                 "[SKIP] no printable char, ctrl={}",

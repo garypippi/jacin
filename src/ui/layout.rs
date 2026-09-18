@@ -4,7 +4,6 @@
 //! depends on `TextRenderer` for text measurement; a future step can make it
 //! fully pure by accepting measurement results as parameters.
 
-use crate::neovim::VisualSelection;
 use crate::state::WindowView;
 
 use super::text_render::TextRenderer;
@@ -22,7 +21,6 @@ pub(crate) const TEXT_COLOR: Rgba = (220, 223, 228, 255);
 pub(crate) const BORDER_COLOR: Rgba = (80, 84, 92, 255);
 pub(crate) const SELECTED_BG: Rgba = (61, 89, 161, 255);
 pub(crate) const CURSOR_BG: Rgba = (97, 175, 239, 255);
-pub(crate) const VISUAL_BG: Rgba = (61, 89, 161, 200);
 pub(crate) const NUMBER_COLOR: Rgba = (152, 195, 121, 255);
 pub(crate) const SCROLLBAR_BG: Rgba = (60, 64, 72, 255);
 pub(crate) const SCROLLBAR_THUMB: Rgba = (100, 104, 112, 255);
@@ -32,8 +30,7 @@ pub(crate) const MAX_VISIBLE_CANDIDATES: usize = 9;
 pub(crate) const SCROLLBAR_WIDTH: f32 = 8.0;
 pub(crate) const NUMBER_WIDTH: f32 = 24.0;
 pub(crate) const SECTION_SEPARATOR_HEIGHT: f32 = 1.0;
-pub(crate) const MAX_PREEDIT_WIDTH: f32 = 400.0;
-/// Maximum window-grid rows shown in grid display mode
+/// Maximum window-grid rows shown in the popup
 pub(crate) const MAX_GRID_ROWS: usize = 8;
 /// Popup size limits (the SHM pool holds two buffers of the maximum size)
 pub(crate) const MAX_POPUP_WIDTH: u32 = 580;
@@ -56,27 +53,22 @@ pub(crate) const MODE_RECORDING_COLOR: Rgba = (224, 108, 117, 255); // Red
 /// Content to display in the unified popup
 #[derive(Default, Clone)]
 pub struct PopupContent {
-    pub preedit: String,
-    pub cursor_begin: usize,
-    pub cursor_end: usize,
     pub vim_mode: String,
     pub keypress_entries: Vec<String>,
     pub candidates: Vec<String>,
     pub selected: usize,
     pub transient_message: Option<String>,
-    pub visual_selection: Option<VisualSelection>,
     pub ime_enabled: bool,
     pub recording: String,
     pub rec_blink_on: bool,
     pub cmdline_cursor_pos: Option<usize>,
-    /// Grid display mode: rows of Neovim's window grid (replaces `preedit`)
+    /// Rows of Neovim's window grid (None until Neovim drew a window)
     pub window_view: Option<WindowView>,
 }
 
 impl PopupContent {
     pub fn is_empty(&self) -> bool {
         !self.ime_enabled
-            && self.preedit.is_empty()
             && self.keypress_entries.is_empty()
             && self.candidates.is_empty()
             && self.transient_message.is_none()
@@ -117,38 +109,17 @@ pub(crate) fn format_recording_label(reg: &str) -> String {
 pub(crate) struct Layout {
     pub width: u32,
     pub height: u32,
-    pub has_preedit: bool,
+    pub has_window: bool,
     pub has_keypress: bool,
     pub has_candidates: bool,
     pub has_transient_message: bool,
-    pub preedit_y: f32,
+    pub window_y: f32,
     pub keypress_y: f32,
     pub candidates_y: f32,
     pub visible_count: usize,
     pub has_scrollbar: bool,
     /// Width of mode+REC icons in keypress row (text starts after this)
     pub keypress_icon_width: f32,
-}
-
-/// Calculate preedit scroll offset to keep cursor visible with center-biased scrolling.
-///
-/// Returns a pixel offset to subtract from each character's x position.
-pub(crate) fn preedit_scroll_offset(
-    total_text_width: f32,
-    visible_width: f32,
-    cursor_rel: f32,
-) -> f32 {
-    if total_text_width <= visible_width {
-        return 0.0;
-    }
-    let margin = visible_width * 0.3;
-    if cursor_rel < margin {
-        0.0
-    } else if cursor_rel > total_text_width - margin {
-        (total_text_width - visible_width).max(0.0)
-    } else {
-        (cursor_rel - visible_width / 2.0).clamp(0.0, total_text_width - visible_width)
-    }
 }
 
 /// Scrollbar thumb geometry for candidate list.
@@ -188,9 +159,9 @@ pub(crate) fn calculate_layout(
     renderer: &mut TextRenderer,
     mono_renderer: &mut TextRenderer,
 ) -> Layout {
-    // Preedit row is always visible when IME is enabled to prevent
+    // Window row is always visible when IME is enabled to prevent
     // layout jumps that cause visual confusion with the keypress row
-    let has_preedit = content.ime_enabled;
+    let has_window = content.ime_enabled;
     // Hide keypress text when candidates are shown, but keypress row itself
     // is always visible when IME is enabled (shows mode/REC icons)
     let has_keypress_text = !content.keypress_entries.is_empty() && content.candidates.is_empty();
@@ -223,24 +194,20 @@ pub(crate) fn calculate_layout(
         + ICON_SEPARATOR_WIDTH
         + ICON_SEPARATOR_GAP;
 
-    // Preedit section (no icon area — preedit starts at PADDING)
-    let preedit_y = y;
-    if has_preedit && let Some(ref view) = content.window_view {
-        let cell_width = mono_renderer.measure_text(" ");
-        let cols = view.total_columns();
-        max_width = max_width.max(PADDING * 2.0 + cols as f32 * cell_width);
-        y += view.total_rows().max(1) as f32 * line_height;
-        if has_keypress || has_candidates {
-            y += SECTION_SEPARATOR_HEIGHT;
-        }
-    } else if has_preedit {
-        if !content.preedit.is_empty() {
-            let text_width = renderer.measure_text(&content.preedit);
-            let preedit_width =
-                (PADDING + text_width + PADDING + 4.0).min(MAX_PREEDIT_WIDTH + PADDING * 2.0);
-            max_width = max_width.max(preedit_width);
-        }
-        y += line_height;
+    // Window section (no icon area — starts at PADDING); one empty row
+    // until Neovim has drawn a window
+    let window_y = y;
+    if has_window {
+        let rows = match content.window_view {
+            Some(ref view) => {
+                let cell_width = mono_renderer.measure_text(" ");
+                let cols = view.total_columns();
+                max_width = max_width.max(PADDING * 2.0 + cols as f32 * cell_width);
+                view.total_rows().max(1)
+            }
+            None => 1,
+        };
+        y += rows as f32 * line_height;
         if has_keypress || has_candidates {
             y += SECTION_SEPARATOR_HEIGHT;
         }
@@ -311,11 +278,11 @@ pub(crate) fn calculate_layout(
     Layout {
         width,
         height,
-        has_preedit,
+        has_window,
         has_keypress,
         has_candidates,
         has_transient_message,
-        preedit_y,
+        window_y,
         keypress_y,
         candidates_y,
         visible_count,
@@ -327,35 +294,6 @@ pub(crate) fn calculate_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- preedit_scroll_offset ---
-
-    #[test]
-    fn scroll_offset_short_text_returns_zero() {
-        // Text fits in visible area — no scrolling
-        assert_eq!(preedit_scroll_offset(100.0, 200.0, 50.0), 0.0);
-    }
-
-    #[test]
-    fn scroll_offset_cursor_near_start() {
-        // Cursor within 30% margin from left — no scrolling
-        assert_eq!(preedit_scroll_offset(500.0, 200.0, 10.0), 0.0);
-    }
-
-    #[test]
-    fn scroll_offset_cursor_near_end() {
-        // Cursor near end — scroll to show end of text
-        let offset = preedit_scroll_offset(500.0, 200.0, 480.0);
-        assert_eq!(offset, 300.0); // total - visible
-    }
-
-    #[test]
-    fn scroll_offset_cursor_in_middle() {
-        // Cursor in middle — centers cursor in visible area
-        let offset = preedit_scroll_offset(500.0, 200.0, 250.0);
-        // cursor_rel - visible/2 = 250 - 100 = 150, clamped to [0, 300]
-        assert_eq!(offset, 150.0);
-    }
 
     // --- scrollbar_thumb_geometry ---
 

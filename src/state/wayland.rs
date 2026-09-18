@@ -96,13 +96,6 @@ impl WaylandState {
         }
     }
 
-    /// Update preedit and commit
-    pub fn set_preedit(&mut self, text: &str, cursor_begin: i32, cursor_end: i32) {
-        self.input_method
-            .set_preedit_string(text.to_string(), cursor_begin, cursor_end);
-        self.input_method.commit(self.serial);
-    }
-
     /// Commit text to the application
     pub fn commit_string(&mut self, text: &str) {
         self.input_method.commit_string(text.to_string());

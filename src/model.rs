@@ -10,12 +10,8 @@ use crate::state::{BufferMirror, ImeState, KeypressState, NvimView, Screen};
 /// Side effect requested by `Model::reduce`
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    /// Send the current preedit to the compositor and re-render the popup
-    SyncPreedit,
     /// Re-render the popup
     Render,
-    /// The mirrored grid changed (re-render when the popup shows the grid)
-    GridUpdated,
     /// Commit text to the application
     CommitString(String),
     /// Delete text around the cursor in the application
@@ -27,7 +23,7 @@ pub enum Effect {
     /// Drop a pending IME toggle request (Alt in the commit key <A-;>
     /// also triggers SIGUSR1 — don't let it re-enable after commit)
     CancelToggle,
-    /// Neovim exited: clear compositor preedit, release grab, drop backend
+    /// Neovim exited: release grab, drop backend
     NvimExited,
 }
 
@@ -37,9 +33,6 @@ pub struct Model {
     pub ime: ImeState,
     pub keypress: KeypressState,
     pub view: NvimView,
-    /// Phase A shadow check: whether the grid cursor row agreed with the
-    /// snapshot preedit at the last check (None = not checked yet)
-    pub shadow_ok: Option<bool>,
 }
 
 impl Model {
@@ -47,31 +40,18 @@ impl Model {
         Self::default()
     }
 
-    /// Clear preedit and all display state (keeps the IME mode).
+    /// Clear all display state (keeps the IME mode).
     pub fn reset(&mut self) {
-        self.ime.clear_preedit();
         self.view.clear();
         self.keypress.clear();
     }
 
-    /// Apply a Neovim message. `active` is whether a text input is focused.
-    pub fn reduce(&mut self, msg: FromNeovim, active: bool) -> Vec<Effect> {
+    /// Apply a Neovim message.
+    pub fn reduce(&mut self, msg: FromNeovim) -> Vec<Effect> {
         let enabled = self.ime.is_fully_enabled();
         match msg {
             FromNeovim::Ready | FromNeovim::KeyProcessed { .. } => vec![],
-            FromNeovim::Preedit(info) => {
-                if !enabled {
-                    return vec![];
-                }
-                self.ime
-                    .set_preedit(info.text, info.cursor_begin, info.cursor_end);
-                self.view.set_vim_mode(&info.mode);
-                self.view.recording = info.recording;
-                self.shadow_check();
-                vec![Effect::SyncPreedit]
-            }
             FromNeovim::Commit(text) => {
-                self.ime.clear_preedit();
                 self.view.clear_candidates();
                 self.keypress.clear();
                 vec![
@@ -96,11 +76,11 @@ impl Model {
                 }
                 vec![Effect::Render]
             }
-            FromNeovim::VisualRange(selection) => {
+            FromNeovim::Recording(reg) => {
                 if !enabled {
                     return vec![];
                 }
-                self.view.visual = selection;
+                self.view.recording = reg;
                 vec![Effect::Render]
             }
             FromNeovim::PassthroughKey => vec![Effect::PassthroughKey],
@@ -136,15 +116,6 @@ impl Model {
                     vec![]
                 }
             }
-            FromNeovim::CmdlineCancelled { cmdtype, .. } => {
-                self.keypress.clear();
-                self.view.cmdline = None;
-                // ':' commands usually return to normal mode; '@' input() prompts return
-                // to insert mode. ModeChanged snapshot will still correct this if needed.
-                self.view
-                    .set_vim_mode(if cmdtype == "@" { "i" } else { "n" });
-                vec![Effect::Render]
-            }
             FromNeovim::CmdlineMessage { text, .. } => {
                 if !enabled {
                     return vec![];
@@ -163,26 +134,6 @@ impl Model {
                 self.view.set_vim_mode(&mode);
                 vec![Effect::Render]
             }
-            FromNeovim::AutoCommit(text) => {
-                if text.is_empty() {
-                    return vec![];
-                }
-                if !enabled {
-                    // Still commit if the text input is focused: the line was
-                    // already removed from the Neovim buffer (e.g. IME toggled
-                    // off or Neovim exited while the notification was in flight).
-                    return if active {
-                        vec![Effect::CommitString(text)]
-                    } else {
-                        vec![]
-                    };
-                }
-                self.ime.clear_preedit();
-                self.view.clear_candidates();
-                self.view.visual = None;
-                self.keypress.clear();
-                vec![Effect::CommitString(text), Effect::Render]
-            }
             FromNeovim::NvimExited => {
                 self.reset();
                 self.ime.disable();
@@ -190,7 +141,6 @@ impl Model {
                 // Neovim starts from scratch (otherwise it flashes on re-enable)
                 self.view.screen = Screen::default();
                 self.view.buffer = BufferMirror::default();
-                self.shadow_ok = None;
                 vec![Effect::NvimExited]
             }
             FromNeovim::BufLines { first, last, lines } => {
@@ -203,49 +153,8 @@ impl Model {
                 for event in events {
                     self.view.screen.apply(event);
                 }
-                self.shadow_check();
-                vec![Effect::GridUpdated]
+                vec![Effect::Render]
             }
-        }
-    }
-
-    /// Phase A shadow check: compare the grid (display) with the snapshot
-    /// (source of truth). Logs only when the agreement changes, since grid
-    /// and snapshot arrive independently and may briefly disagree.
-    fn shadow_check(&mut self) {
-        if !self.ime.is_fully_enabled() || self.view.vim_mode.starts_with('c') {
-            return;
-        }
-        let screen = &self.view.screen;
-        let Some(grid) = screen.cursor_grid() else {
-            return;
-        };
-        let (row, col) = (screen.cursor.row, screen.cursor.col);
-        let row_text = grid.row_text(row);
-        let grid_cursor = grid.byte_offset(row, col);
-        let ok = row_text.trim_end() == self.ime.preedit.trim_end()
-            && grid_cursor == self.ime.cursor_begin;
-        if self.shadow_ok != Some(ok) {
-            if ok {
-                log::debug!("[SHADOW] grid matches snapshot");
-            } else {
-                let line_count = screen
-                    .window(screen.cursor.grid)
-                    .and_then(|w| w.viewport)
-                    .map(|v| v.line_count);
-                log::debug!(
-                    "[SHADOW] mismatch: grid {} row {} {:?} cursor={} vs snapshot {:?} cursor={} (mode={}, line_count={:?})",
-                    screen.cursor.grid,
-                    row,
-                    row_text.trim_end(),
-                    grid_cursor,
-                    self.ime.preedit,
-                    self.ime.cursor_begin,
-                    self.view.vim_mode,
-                    line_count
-                );
-            }
-            self.shadow_ok = Some(ok);
         }
     }
 }
@@ -281,7 +190,7 @@ mod replay_tests {
         }
 
         fn apply(&mut self, msg: FromNeovim) {
-            for effect in self.model.reduce(msg, true) {
+            for effect in self.model.reduce(msg) {
                 match effect {
                     Effect::CommitString(text) => self.committed.push(text),
                     Effect::NvimExited => self.exited = true,
@@ -301,10 +210,8 @@ mod replay_tests {
 
     #[derive(Deserialize)]
     struct Expected {
-        preedit: String,
-        cursor_begin: usize,
-        cursor_end: usize,
         vim_mode: String,
+        recording: String,
         candidates_count: usize,
         committed: Vec<String>,
         exited: bool,
@@ -326,20 +233,12 @@ mod replay_tests {
         let model = &replay.model;
         let expect = &fixture.expect;
         assert_eq!(
-            model.ime.preedit, expect.preedit,
-            "preedit mismatch in {path}"
-        );
-        assert_eq!(
-            model.ime.cursor_begin, expect.cursor_begin,
-            "cursor_begin mismatch in {path}"
-        );
-        assert_eq!(
-            model.ime.cursor_end, expect.cursor_end,
-            "cursor_end mismatch in {path}"
-        );
-        assert_eq!(
             model.view.vim_mode, expect.vim_mode,
             "vim_mode mismatch in {path}"
+        );
+        assert_eq!(
+            model.view.recording, expect.recording,
+            "recording mismatch in {path}"
         );
         assert_eq!(
             model.view.candidates.len(),
@@ -374,35 +273,14 @@ mod replay_tests {
     }
 
     #[test]
-    fn auto_commit_after_nvim_exit_still_commits_when_active() {
-        let mut model = enabled_model();
-        model.reduce(FromNeovim::NvimExited, true);
-        let effects = model.reduce(FromNeovim::AutoCommit("hel lo".into()), true);
-        assert_eq!(effects, vec![Effect::CommitString("hel lo".into())]);
-    }
-
-    #[test]
-    fn auto_commit_after_nvim_exit_skipped_when_inactive() {
-        let mut model = enabled_model();
-        model.reduce(FromNeovim::NvimExited, true);
-        let effects = model.reduce(FromNeovim::AutoCommit("x".into()), false);
-        assert!(effects.is_empty());
-    }
-
-    #[test]
-    fn auto_commit_ignores_empty_text() {
-        let mut model = enabled_model();
-        assert!(
-            model
-                .reduce(FromNeovim::AutoCommit(String::new()), true)
-                .is_empty()
-        );
+    fn replay_macro_recording() {
+        run_fixture("tests/fixtures/macro_recording.json");
     }
 
     #[test]
     fn commit_clears_buffer_and_cancels_toggle() {
         let mut model = enabled_model();
-        let effects = model.reduce(FromNeovim::Commit("確定".into()), true);
+        let effects = model.reduce(FromNeovim::Commit("確定".into()));
         assert_eq!(
             effects,
             vec![
@@ -442,65 +320,28 @@ mod replay_tests {
         ])
     }
 
-    fn preedit(text: &str, cursor: usize) -> FromNeovim {
-        FromNeovim::Preedit(crate::neovim::protocol::PreeditInfo::new(
-            text.into(),
-            cursor,
-            cursor,
-            "i".into(),
-            String::new(),
-        ))
-    }
-
-    #[test]
-    fn shadow_check_detects_match_and_mismatch() {
-        let mut model = enabled_model();
-        // Each char is one cell here, so cursor col == byte offset for ASCII
-        assert_eq!(
-            model.reduce(grid_flush("a", 1), true),
-            vec![Effect::GridUpdated]
-        );
-        model.reduce(preedit("a", 1), true);
-        assert_eq!(model.shadow_ok, Some(true));
-
-        model.reduce(preedit("ab", 2), true);
-        assert_eq!(model.shadow_ok, Some(false));
-    }
-
     #[test]
     fn nvim_exit_discards_mirrored_screen() {
         let mut model = enabled_model();
-        model.reduce(grid_flush("old", 3), true);
+        model.reduce(grid_flush("old", 3));
         assert!(model.view.screen.window_view(8).is_some());
 
-        model.reduce(FromNeovim::NvimExited, true);
+        model.reduce(FromNeovim::NvimExited);
         assert!(model.view.screen.window_view(8).is_none());
-        assert_eq!(model.shadow_ok, None);
     }
 
     #[test]
-    fn shadow_check_skipped_in_cmdline_mode() {
+    fn grid_flush_renders() {
         let mut model = enabled_model();
-        model.reduce(FromNeovim::ModeChange("c".into()), true);
-        model.reduce(grid_flush("x", 0), true);
-        assert_eq!(model.shadow_ok, None);
+        assert_eq!(model.reduce(grid_flush("a", 1)), vec![Effect::Render]);
     }
 
     #[test]
-    fn preedit_ignored_while_enabling() {
+    fn recording_ignored_while_enabling() {
         let mut model = Model::new();
         model.ime.start_enabling();
-        let effects = model.reduce(
-            FromNeovim::Preedit(crate::neovim::protocol::PreeditInfo::new(
-                "stale".into(),
-                0,
-                0,
-                "i".into(),
-                String::new(),
-            )),
-            true,
-        );
+        let effects = model.reduce(FromNeovim::Recording("q".into()));
         assert!(effects.is_empty());
-        assert!(model.ime.preedit.is_empty());
+        assert!(model.view.recording.is_empty());
     }
 }

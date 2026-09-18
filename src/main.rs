@@ -26,7 +26,6 @@ mod neovim;
 mod state;
 mod ui;
 
-use config::DisplayMode;
 use model::Model;
 use neovim::NeovimHandle;
 use state::{Animations, KeyRepeatState, KeyboardState, WaylandState};
@@ -40,7 +39,6 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().any(|a| a == "--clean") {
         config.clean = true;
     }
-    log::info!("[CONFIG] Display mode: {:?}", config.behavior.display);
 
     // Connect to Wayland display
     let conn = Connection::connect_to_env()?;
@@ -135,14 +133,11 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Grid display: size Neovim's UI to what the popup can show, so long
-    // lines wrap at the popup width and Neovim scrolls the window itself
-    let ui_grid_size = match (&mut popup, config.behavior.display) {
-        (Some(popup), DisplayMode::Grid) => Some(popup.grid_ui_size()),
-        _ => None,
-    };
+    // Size Neovim's UI to what the popup can show, so long lines wrap at
+    // the popup width and Neovim scrolls the window itself
+    let ui_grid_size = popup.as_mut().map(|popup| popup.grid_ui_size());
     if let (Some(nvim), Some((cols, rows))) = (&nvim, ui_grid_size) {
-        log::info!("[IME] Grid display UI size: {}x{}", cols, rows);
+        log::info!("[IME] UI grid size: {}x{}", cols, rows);
         nvim.resize_ui(cols, rows);
     }
 
@@ -350,7 +345,7 @@ pub struct State {
     pub(crate) wayland: WaylandState,
     pub(crate) keyboard: KeyboardState,
     pub(crate) repeat: KeyRepeatState,
-    // IME model driven by Neovim messages (preedit, keypress display, NvimView)
+    // IME model driven by Neovim messages (keypress display, NvimView)
     pub(crate) model: Model,
     pub(crate) animations: Animations,
     // Exit and toggle flags
@@ -362,9 +357,9 @@ pub struct State {
     pub(crate) nvim: Option<NeovimHandle>,
     // Wakes the event loop when the Neovim thread sends a message (reused on respawn)
     pub(crate) nvim_wake: Ping,
-    // Neovim UI size for grid display mode (re-applied on respawn)
+    // Neovim UI size fitted to the popup (re-applied on respawn)
     pub(crate) ui_grid_size: Option<(usize, usize)>,
-    // Unified popup window (preedit, keypress, candidates)
+    // Unified popup window (Neovim window grid, keypress, candidates)
     pub(crate) popup: Option<UnifiedPopup>,
     // On-demand timer tokens (None = timer not running)
     pub(crate) repeat_timer_token: Option<RegistrationToken>,

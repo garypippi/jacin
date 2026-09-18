@@ -137,6 +137,7 @@ impl Grid {
     }
 
     /// Text of a row (double-width chars appear once)
+    #[cfg(test)]
     pub fn row_text(&self, row: usize) -> String {
         if row >= self.height {
             return String::new();
@@ -146,18 +147,6 @@ impl Grid {
             .iter()
             .map(|c| c.text.as_str())
             .collect()
-    }
-
-    /// Byte offset of screen column `col` within `row_text(row)`
-    pub fn byte_offset(&self, row: usize, col: usize) -> usize {
-        if row >= self.height {
-            return 0;
-        }
-        let start = row * self.width;
-        self.cells[start..start + col.min(self.width)]
-            .iter()
-            .map(|c| c.text.len())
-            .sum()
     }
 }
 
@@ -192,12 +181,10 @@ mod tests {
     }
 
     #[test]
-    fn double_width_chars_and_byte_offset() {
+    fn double_width_chars() {
         let mut g = Grid::new(6, 1);
         g.put_line(0, 0, cells(&[("あ", 0, 1), ("", 0, 1), ("b", 0, 1)]), false);
         assert_eq!(g.row_text(0), "あb   ");
-        assert_eq!(g.byte_offset(0, 2), 3); // after "あ"
-        assert_eq!(g.byte_offset(0, 3), 4); // after "あb"
     }
 
     #[test]

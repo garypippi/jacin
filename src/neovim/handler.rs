@@ -12,16 +12,14 @@ use crossbeam_channel::{Receiver, Sender};
 use tokio::runtime::Runtime;
 
 use nvim_rs::create::tokio::new_child_cmd;
-use nvim_rs::error::CallError;
 use nvim_rs::{Handler, Neovim, Value};
 use tokio::process::Command;
 
 use super::protocol::{
-    AtomicPendingState, CandidateInfo, FromNeovim, GridEvent, PendingState, PreeditInfo, Snapshot,
-    ToNeovim,
+    AtomicPendingState, CandidateInfo, FromNeovim, GridEvent, PendingState, ToNeovim,
 };
 use super::redraw_grid::parse_grid_event;
-use crate::config::{Config, DisplayMode};
+use crate::config::Config;
 
 type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
 type NvimResult<T> = Result<T, NvimError>;
@@ -30,7 +28,6 @@ type NvimResult<T> = Result<T, NvimError>;
 enum NvimError {
     RuntimeInit(std::io::Error),
     Backend(anyhow::Error),
-    SnapshotParse(&'static str),
 }
 
 impl fmt::Display for NvimError {
@@ -38,7 +35,6 @@ impl fmt::Display for NvimError {
         match self {
             NvimError::RuntimeInit(e) => write!(f, "runtime init failed: {e}"),
             NvimError::Backend(e) => write!(f, "backend error: {e}"),
-            NvimError::SnapshotParse(msg) => write!(f, "snapshot parse failed: {msg}"),
         }
     }
 }
@@ -48,7 +44,6 @@ impl Error for NvimError {
         match self {
             NvimError::RuntimeInit(e) => Some(e),
             NvimError::Backend(e) => Some(e.root_cause()),
-            NvimError::SnapshotParse(_) => None,
         }
     }
 }
@@ -60,7 +55,7 @@ impl From<anyhow::Error> for NvimError {
 }
 
 /// Sender to the main thread that also wakes its calloop event loop,
-/// so push notifications (redraw, autocmd rpcnotify) are handled promptly
+/// so push notifications (redraw, buffer line events) are handled promptly
 /// even when no Wayland event is pending.
 #[derive(Clone)]
 pub struct MainTx {
@@ -85,7 +80,7 @@ fn send_msg(tx: &MainTx, msg: FromNeovim) {
 }
 
 /// Handler for Neovim RPC notifications.
-/// Receives push notifications (e.g., ime_snapshot from autocmds) and
+/// Receives UI (redraw) and buffer (nvim_buf_*_event) notifications and
 /// forwards them to the main thread via the tx channel.
 #[derive(Clone)]
 pub struct NvimHandler {
@@ -108,95 +103,7 @@ impl Handler for NvimHandler {
         args: Vec<nvim_rs::Value>,
         neovim: Neovim<NvimWriter>,
     ) {
-        if name == "ime_snapshot"
-            && let Some(value) = args.first()
-        {
-            match parse_snapshot(value) {
-                Ok(snapshot) => {
-                    log::debug!(
-                        "[NVIM] Push snapshot: mode={}, preedit={:?}",
-                        snapshot.mode,
-                        snapshot.preedit
-                    );
-
-                    send_msg(&self.tx, FromNeovim::Preedit(snapshot.to_preedit_info()));
-                    send_msg(
-                        &self.tx,
-                        FromNeovim::VisualRange(snapshot.to_visual_selection()),
-                    );
-                }
-                Err(e) => {
-                    log::error!("[NVIM] Failed to parse push snapshot: {}", e);
-                }
-            }
-        } else if name == "ime_candidates"
-            && let Some(value) = args.first()
-            && let Some(map) = value.as_map()
-        {
-            let get_arr = |field: &str| -> Option<&Vec<nvim_rs::Value>> {
-                map.iter()
-                    .find(|(k, _)| k.as_str() == Some(field))
-                    .and_then(|(_, v)| v.as_array())
-            };
-            let get_i64 = |field: &str| -> Option<i64> {
-                map.iter()
-                    .find(|(k, _)| k.as_str() == Some(field))
-                    .and_then(|(_, v)| v.as_i64())
-            };
-
-            let words: Vec<String> = get_arr("candidates")
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|item| item.as_str().map(std::string::ToString::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let selected = get_i64("selected").unwrap_or(-1);
-
-            if words.is_empty() {
-                send_msg(&self.tx, FromNeovim::Candidates(CandidateInfo::empty()));
-            } else {
-                let sel = selected.max(0) as usize;
-                let mut info = CandidateInfo::new(words, sel);
-                info.selected = info.selected.min(info.candidates.len().saturating_sub(1));
-                send_msg(&self.tx, FromNeovim::Candidates(info));
-            }
-        } else if name == "ime_auto_commit" {
-            if let Some(text) = args.first().and_then(|v| v.as_str()) {
-                log::debug!("[NVIM] Auto-commit: {:?}", text);
-                send_msg(&self.tx, FromNeovim::AutoCommit(text.to_string()));
-            }
-        } else if name == "ime_cmdline"
-            && let Some(value) = args.first()
-            && let Some(map) = value.as_map()
-        {
-            if let Some((executed, cmdtype)) = self.handle_ime_cmdline(map) {
-                self.pending.clear();
-                // After a ':' command executes, the buffer may have changed
-                // (e.g. :tabnew, :bnext). Query snapshot to update preedit.
-                if executed && cmdtype == ":" {
-                    // Don't await an RPC inside the notification handler: it
-                    // would block processing of further notifications.
-                    let tx = self.tx.clone();
-                    let nvim = neovim.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = query_snapshot(&nvim, &tx).await {
-                            // :q exits Neovim; channel closed errors are expected
-                            let is_channel_closed = e
-                                .downcast_ref::<Box<CallError>>()
-                                .is_some_and(|ce| ce.is_channel_closed());
-                            if is_channel_closed {
-                                log::debug!(
-                                    "[NVIM] Snapshot after command skipped (Neovim exiting)"
-                                );
-                            } else {
-                                log::warn!("[NVIM] Failed to query snapshot after command: {}", e);
-                            }
-                        }
-                    });
-                }
-            }
-        } else if name == "redraw" {
+        if name == "redraw" {
             self.handle_redraw(&args);
         } else if name == "nvim_buf_lines_event" {
             self.handle_buf_lines(&args);
@@ -330,7 +237,7 @@ impl NvimHandler {
         // Set CommandLine pending from the redraw notification side so that
         // plugin-triggered command-line mode (e.g., input() from
         // skkeleton dictionary registration) also suppresses the
-        // c-mode recovery in handle_snapshot_response.
+        // c-mode recovery in handle_mode_response.
         self.pending.store(PendingState::CommandLine);
         log::debug!(
             "[NVIM] cmdline_show: firstc={:?}, prompt={:?}, content={:?}, pos={}, level={}",
@@ -558,39 +465,12 @@ impl NvimHandler {
         };
         let level = arr.first().and_then(|v| v.as_u64()).unwrap_or(1);
         log::debug!("[NVIM] cmdline_hide: level={}", level);
-        send_msg(&self.tx, FromNeovim::CmdlineHide { level });
-    }
-
-    /// Handle ime_cmdline notification (CmdlineLeave autocmd).
-    /// Returns Some((executed, cmdtype)) if the event was processed, None otherwise.
-    /// Note: caller is responsible for clearing the pending state.
-    fn handle_ime_cmdline(&self, map: &[(Value, Value)]) -> Option<(bool, String)> {
-        let get_str = |field: &str| -> Option<String> {
-            map.iter()
-                .find(|(k, _)| k.as_str() == Some(field))
-                .and_then(|(_, v)| v.as_str().map(std::string::ToString::to_string))
-        };
-
-        match get_str("type").as_deref() {
-            Some("cancelled" | "executed") => {
-                let event = get_str("type").unwrap_or_default();
-                let cmdtype = get_str("cmdtype").unwrap_or_else(|| ":".to_string());
-                let executed = event == "executed";
-                log::debug!("[NVIM] Cmdline left ({}, cmdtype={})", event, cmdtype);
-                send_msg(
-                    &self.tx,
-                    FromNeovim::CmdlineCancelled {
-                        cmdtype: cmdtype.clone(),
-                        executed,
-                    },
-                );
-                Some((executed, cmdtype))
-            }
-            other => {
-                log::warn!("[NVIM] Unknown cmdline type: {:?}", other);
-                None
-            }
+        // The outermost command line ended (executed or cancelled); nested
+        // levels (e.g. <C-r>= inside ':') return to the enclosing one
+        if level == 1 {
+            self.pending.clear();
         }
+        send_msg(&self.tx, FromNeovim::CmdlineHide { level });
     }
 }
 
@@ -686,7 +566,16 @@ mod tests {
             other => panic!("expected CmdlineShow, got {other:?}"),
         }
 
+        // A nested level ending keeps the command line pending
+        handler.handle_cmdline_hide(&Value::Array(vec![Value::from(2)]));
+        assert_eq!(handler.pending.load(), PendingState::CommandLine);
+        match rx.try_recv().unwrap() {
+            FromNeovim::CmdlineHide { level } => assert_eq!(level, 2),
+            other => panic!("expected CmdlineHide, got {other:?}"),
+        }
+
         handler.handle_cmdline_hide(&Value::Array(vec![Value::from(1)]));
+        assert_eq!(handler.pending.load(), PendingState::None);
         match rx.try_recv().unwrap() {
             FromNeovim::CmdlineHide { level } => assert_eq!(level, 1),
             other => panic!("expected CmdlineHide, got {other:?}"),
@@ -770,51 +659,6 @@ mod tests {
                 assert!(cmdtype.is_empty());
             }
             other => panic!("expected CmdlineMessage, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ime_cmdline_executed_sends_cmdline_cancelled_and_signals_snapshot_needed() {
-        let (handler, rx) = make_handler();
-
-        let map = vec![
-            (Value::from("type"), Value::from("executed")),
-            (Value::from("cmdtype"), Value::from(":")),
-        ];
-        let result = handler.handle_ime_cmdline(&map);
-
-        // Should return (executed=true, cmdtype=":") to signal snapshot is needed
-        assert_eq!(result, Some((true, ":".to_string())));
-
-        // CmdlineCancelled message should be sent
-        match rx.try_recv().unwrap() {
-            FromNeovim::CmdlineCancelled { cmdtype, executed } => {
-                assert_eq!(cmdtype, ":");
-                assert!(executed);
-            }
-            other => panic!("expected CmdlineCancelled, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ime_cmdline_cancelled_does_not_signal_snapshot() {
-        let (handler, rx) = make_handler();
-
-        let map = vec![
-            (Value::from("type"), Value::from("cancelled")),
-            (Value::from("cmdtype"), Value::from(":")),
-        ];
-        let result = handler.handle_ime_cmdline(&map);
-
-        // Should return (executed=false, cmdtype=":") — no snapshot needed
-        assert_eq!(result, Some((false, ":".to_string())));
-
-        match rx.try_recv().unwrap() {
-            FromNeovim::CmdlineCancelled { cmdtype, executed } => {
-                assert_eq!(cmdtype, ":");
-                assert!(!executed);
-            }
-            other => panic!("expected CmdlineCancelled, got {other:?}"),
         }
     }
 }
@@ -950,46 +794,6 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     // buftype=nofile prevents E37 "No write since last change" on :q.
     nvim.command("set buftype=nofile bufhidden=wipe").await?;
 
-    // Store jacin's channel ID so Lua rpcnotify targets only this client
-    // (channel 0 broadcasts to ALL clients, including denops etc.)
-    let api_info = nvim.get_api_info().await?;
-    let chan_id = api_info
-        .first()
-        .and_then(|v| v.as_i64())
-        .filter(|&id| id > 0)
-        .ok_or_else(|| anyhow::anyhow!("failed to get valid channel ID from nvim_get_api_info"))?;
-    nvim.exec_lua(&format!("vim.g.ime_channel = {chan_id}"), vec![])
-        .await?;
-    log::info!("[NVIM] Channel ID: {}", chan_id);
-
-    // Load Lua modules from embedded files
-    nvim.exec_lua(include_str!("lua/snapshot.lua"), vec![])
-        .await?;
-    nvim.exec_lua(include_str!("lua/key_handlers.lua"), vec![])
-        .await?;
-
-    nvim.exec_lua(include_str!("lua/auto_commit.lua"), vec![])
-        .await?;
-    if config.behavior.display == DisplayMode::Grid {
-        // Multiline input: <CR> is a native newline, not an auto-commit
-        nvim.exec_lua("ime_context.multiline = true", vec![])
-            .await?;
-    }
-    nvim.exec_lua(include_str!("lua/autocmds.lua"), vec![])
-        .await?;
-
-    // Completion adapter — nvim-cmp requires Lua hooks; native uses ext_popupmenu
-    if config.completion.adapter == "nvim-cmp" {
-        if config.behavior.display == DisplayMode::Grid {
-            // nvim-cmp draws its menu as a floating window, which grid display
-            // already shows; listing it again would duplicate the candidates
-            log::info!("[NVIM] Grid display: nvim-cmp adapter not loaded (menu shown in grid)");
-        } else {
-            nvim.exec_lua(include_str!("lua/completion_cmp.lua"), vec![])
-                .await?;
-        }
-    }
-
     // Attach as UI client to receive redraw events (ext_cmdline, ext_popupmenu)
     match nvim
         .call(
@@ -1034,7 +838,7 @@ struct KeySession {
     nvim: Neovim<NvimWriter>,
     tx: MainTx,
     /// Pending state for multi-key sequences, shared with `NvimHandler`
-    /// (redraw events may set CommandLine, CmdlineLeave clears it).
+    /// (cmdline_show sets CommandLine, cmdline_hide at level 1 clears it).
     pending: Arc<AtomicPendingState>,
     commit_key: String,
     /// Last known vim mode for insert-mode fire-and-forget optimization.
@@ -1080,15 +884,15 @@ impl KeySession {
             if !self.handle_motion_pending(key, current).await? {
                 return Ok(());
             }
-            // Motion completed — fall through to query snapshot
+            // Motion completed — fall through to query the mode
         } else {
             let _ = self.nvim.input(key).await;
         }
 
-        // Insert mode fire-and-forget: autocmd will push snapshot via rpcnotify.
-        // Exception: Escape changes mode but no insert-mode autocmd fires after it.
+        // Insert mode fire-and-forget: the display follows from redraw and
+        // buffer events. Exception: Escape leaves insert mode.
         if self.last_mode == "i" && key != "<Esc>" && key != "<C-c>" {
-            if matches!(key, "<C-k>" | "<C-v>" | "<C-q>") && is_blocked(&self.nvim).await? {
+            if matches!(key, "<C-k>" | "<C-v>" | "<C-q>") && get_mode(&self.nvim).await?.1 {
                 self.pending.store(PendingState::Getchar);
                 log::debug!("[NVIM] Insert-mode key {} triggered blocking state", key);
             }
@@ -1097,7 +901,7 @@ impl KeySession {
 
         // ":", "/", "?" in normal mode enter command-line mode.
         // Display update comes via cmdline_show (ext_cmdline).
-        // Must set pending synchronously to prevent handle_snapshot_response
+        // Must set pending synchronously to prevent handle_mode_response
         // from escaping command-line mode before cmdline_show arrives.
         if matches!(key, ":" | "/" | "?") && self.last_mode == "n" {
             self.pending.store(PendingState::CommandLine);
@@ -1105,14 +909,7 @@ impl KeySession {
             return Ok(());
         }
 
-        // Check blocking before querying snapshot.
-        if is_blocked(&self.nvim).await? {
-            self.pending.store(PendingState::Getchar);
-            log::debug!("[NVIM] Blocked in getchar, waiting for next key");
-            return Ok(());
-        }
-
-        self.handle_snapshot_response().await
+        self.handle_mode_response(key).await
     }
 
     // --- Sub-handlers: each returns Ok(true) when it fully handled the key ---
@@ -1135,60 +932,59 @@ impl KeySession {
         log::debug!("[NVIM] Completing getchar with key: {}", key);
         let _ = self.nvim.input(key).await;
         self.pending.clear();
-        if is_blocked(&self.nvim).await? {
+        let (mode, blocking) = get_mode(&self.nvim).await?;
+        if blocking {
             self.pending.store(PendingState::Getchar);
             log::debug!("[NVIM] Still blocked in getchar after key: {}", key);
             return Ok(true);
         }
-        let snapshot = query_snapshot(&self.nvim, &self.tx).await?;
-        self.last_mode = snapshot.mode.clone();
-        if snapshot.mode.starts_with("no") {
+        if mode.starts_with("no") {
             self.pending.store(PendingState::Motion);
             log::debug!(
                 "[NVIM] Getchar completed into operator-pending mode ({})",
-                snapshot.mode
+                mode
             );
         }
+        self.last_mode = mode;
+        // q{reg} starts a macro recording
+        self.query_recording().await?;
         Ok(true)
     }
 
-    /// Handle commit key (default: Ctrl+Enter). Skip if motion-pending (exec_lua would deadlock).
+    /// Handle commit key (default: Ctrl+Enter): commit all buffer lines joined
+    /// with "\n", or pass the key through when the buffer is empty. Skipped
+    /// while motion/register-pending (a non-fast RPC would block).
     async fn handle_commit_key(&mut self, key: &str) -> anyhow::Result<bool> {
         let pending = self.pending.load();
         if key != self.commit_key || pending.is_motion() || pending.is_register() {
             return Ok(false);
         }
-        let result = self
-            .nvim
-            .exec_lua("return ime_handle_commit()", vec![])
-            .await?;
-        if get_map_str(&result, "type") == Some("commit") {
-            if let Some(text) = get_map_str(&result, "text") {
-                send_msg(&self.tx, FromNeovim::Commit(text.to_string()));
-            }
-            send_msg(&self.tx, FromNeovim::Preedit(PreeditInfo::empty()));
-        } else {
-            // Empty buffer — passthrough so the app receives the key (e.g., Ctrl+Enter to send)
+        let lines = buffer_lines(&self.nvim).await?;
+        if is_empty_buffer(&lines) {
+            // Passthrough so the app receives the key (e.g., Ctrl+Enter to send)
             send_msg(&self.tx, FromNeovim::PassthroughKey);
+        } else {
+            // The buffer is cleared by the main thread (<Esc>ggdGi), which
+            // also returns to insert mode
+            send_msg(&self.tx, FromNeovim::Commit(lines.join("\n")));
+            self.last_mode = String::from("i");
         }
-        self.last_mode = String::from("i");
         Ok(true)
     }
 
-    /// Handle Backspace — in empty preedit, passthrough to app; otherwise process in Neovim.
+    /// Handle Backspace — passthrough to the app when the buffer is empty,
+    /// otherwise process in Neovim.
     async fn handle_backspace(&self, key: &str) -> anyhow::Result<bool> {
         let pending = self.pending.load();
         if key != "<BS>" || pending.is_motion() || pending.is_register() {
             return Ok(false);
         }
-        let result = self.nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
-        if get_map_str(&result, "type") == Some("passthrough") {
-            send_msg(&self.tx, FromNeovim::PassthroughKey);
-        }
+        self.input_or_passthrough("<BS>").await?;
         Ok(true)
     }
 
-    /// Handle Enter — detect empty buffer for passthrough. Skip if motion/register pending.
+    /// Handle Enter — passthrough to the app when the buffer is empty,
+    /// otherwise a newline in Neovim. Skip if motion/register pending.
     async fn handle_enter(&self, key: &str) -> anyhow::Result<bool> {
         let pending = self.pending.load();
         if !matches!(key, "<CR>" | "<C-CR>" | "<A-CR>")
@@ -1197,14 +993,19 @@ impl KeySession {
         {
             return Ok(false);
         }
-        let result = self
-            .nvim
-            .exec_lua("return ime_handle_enter()", vec![])
-            .await?;
-        if get_map_str(&result, "type") == Some("passthrough") {
-            send_msg(&self.tx, FromNeovim::PassthroughKey);
-        }
+        self.input_or_passthrough("<CR>").await?;
         Ok(true)
+    }
+
+    /// Passthrough is decided on the whole buffer, not the current line, so
+    /// an empty 2nd line doesn't leak the key to the app.
+    async fn input_or_passthrough(&self, key: &str) -> anyhow::Result<()> {
+        if is_empty_buffer(&buffer_lines(&self.nvim).await?) {
+            send_msg(&self.tx, FromNeovim::PassthroughKey);
+        } else {
+            let _ = self.nvim.input(key).await;
+        }
+        Ok(())
     }
 
     /// Handle <C-r> in insert mode — enter register-paste pending state.
@@ -1260,7 +1061,7 @@ impl KeySession {
                 return Ok(false);
             }
             self.pending.clear();
-            Ok(true) // Paste done, fall through to query preedit
+            Ok(true) // Paste done, fall through to query the mode
         } else {
             // Normal mode " — register selected, waiting for operator
             self.pending.clear();
@@ -1270,7 +1071,7 @@ impl KeySession {
     }
 
     /// Handle motion-pending: advance operator-pending state machine.
-    /// Returns `true` if motion completed (fall through to snapshot query),
+    /// Returns `true` if motion completed (fall through to the mode query),
     /// `false` if still pending (caller should return).
     ///
     /// Queries Neovim's actual mode after sending the key to determine completion.
@@ -1289,15 +1090,7 @@ impl KeySession {
         let _ = self.nvim.input(key).await;
 
         // Query Neovim's actual mode to determine if the motion completed.
-        let mode_info = self.nvim.get_mode().await?;
-        let blocking = mode_info
-            .iter()
-            .any(|(k, v)| k.as_str() == Some("blocking") && v.as_bool() == Some(true));
-        let mode = mode_info
-            .iter()
-            .find(|(k, _)| k.as_str() == Some("mode"))
-            .and_then(|(_, v)| v.as_str())
-            .unwrap_or("n");
+        let (mode, blocking) = get_mode(&self.nvim).await?;
 
         if blocking || mode.starts_with("no") {
             // Still pending: either blocked in getchar (e.g., f/t waiting for char)
@@ -1311,29 +1104,48 @@ impl KeySession {
         Ok(true)
     }
 
-    /// Query snapshot and handle post-key mode transitions (operator-pending, command-line recovery).
-    async fn handle_snapshot_response(&mut self) -> anyhow::Result<()> {
-        let snapshot = query_snapshot(&self.nvim, &self.tx).await?;
-        self.last_mode = snapshot.mode.clone();
+    /// Query the mode after a key and handle transitions (getchar,
+    /// operator-pending, unexpected command-line).
+    async fn handle_mode_response(&mut self, key: &str) -> anyhow::Result<()> {
+        let (mode, blocking) = get_mode(&self.nvim).await?;
+        if blocking {
+            self.pending.store(PendingState::Getchar);
+            log::debug!("[NVIM] Blocked in getchar, waiting for next key");
+            return Ok(());
+        }
+        self.last_mode = mode;
 
-        if snapshot.mode.starts_with("no") {
+        if self.last_mode.starts_with("no") {
             self.pending.store(PendingState::Motion);
-            log::debug!("[NVIM] Entered operator-pending mode ({})", snapshot.mode);
+            log::debug!("[NVIM] Entered operator-pending mode ({})", self.last_mode);
             return Ok(());
         }
 
         // Unexpected command-line mode (plugin triggered). Escape and restore insert mode.
-        if snapshot.mode.starts_with('c') && self.pending.load() != PendingState::CommandLine {
+        if self.last_mode.starts_with('c') && self.pending.load() != PendingState::CommandLine {
             log::warn!(
                 "[NVIM] Unexpected command-line mode ({}), escaping",
-                snapshot.mode
+                self.last_mode
             );
             let _ = self.nvim.input("<C-c>").await;
             self.nvim.command("startinsert").await?;
-            let snapshot = query_snapshot(&self.nvim, &self.tx).await?;
-            self.last_mode = snapshot.mode.clone();
+            self.last_mode = get_mode(&self.nvim).await?.0;
         }
 
+        // q while recording stops the recording
+        if key == "q" {
+            self.query_recording().await?;
+        }
+        Ok(())
+    }
+
+    /// Send the register being recorded ("" when not recording). Recording
+    /// only starts/stops via q, so this is queried only after q sequences.
+    async fn query_recording(&self) -> anyhow::Result<()> {
+        let reg = self.nvim.call_function("reg_recording", vec![]).await?;
+        let reg = reg.as_str().unwrap_or("").to_string();
+        log::debug!("[NVIM] recording: {:?}", reg);
+        send_msg(&self.tx, FromNeovim::Recording(reg));
         Ok(())
     }
 }
@@ -1354,100 +1166,48 @@ async fn attach_buffer(nvim: &Neovim<NvimWriter>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Check if Neovim is blocked in getchar() via nvim_get_mode().
-/// This is a "fast" API call that works even when Neovim is blocked — unlike
-/// exec_lua which would deadlock.
-async fn is_blocked(nvim: &Neovim<NvimWriter>) -> anyhow::Result<bool> {
+/// All lines of the current buffer (one RPC).
+async fn buffer_lines(nvim: &Neovim<NvimWriter>) -> anyhow::Result<Vec<String>> {
+    let value = nvim
+        .call(
+            "nvim_buf_get_lines",
+            vec![
+                Value::from(0i64),
+                Value::from(0i64),
+                Value::from(-1i64),
+                Value::from(false),
+            ],
+        )
+        .await?
+        .map_err(|e| anyhow::anyhow!("nvim_buf_get_lines: {e:?}"))?;
+    Ok(value
+        .as_array()
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// The buffer is a single empty line
+fn is_empty_buffer(lines: &[String]) -> bool {
+    lines.len() <= 1 && lines.iter().all(String::is_empty)
+}
+
+/// Current mode and whether Neovim is blocked in getchar(). nvim_get_mode is
+/// a "fast" API call that answers even while blocked (unlike other RPCs).
+async fn get_mode(nvim: &Neovim<NvimWriter>) -> anyhow::Result<(String, bool)> {
     let mode_info = nvim.get_mode().await?;
-    Ok(mode_info
+    let blocking = mode_info
         .iter()
-        .any(|(k, v)| k.as_str() == Some("blocking") && v.as_bool() == Some(true)))
-}
-
-/// Query full state snapshot from Neovim via collect_snapshot() Lua function.
-/// Replaces separate getline/col/strlen queries with a single RPC call.
-async fn query_snapshot(nvim: &Neovim<NvimWriter>, tx: &MainTx) -> anyhow::Result<Snapshot> {
-    let result = nvim.exec_lua("return collect_snapshot()", vec![]).await?;
-    let snapshot = parse_snapshot(&result).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-    let preedit = snapshot.to_preedit_info();
-    log::debug!(
-        "[NVIM] snapshot: preedit={:?}, cursor={}..{}, mode={}, blocking={}, visual={:?}..{:?}",
-        snapshot.preedit,
-        preedit.cursor_begin,
-        preedit.cursor_end,
-        snapshot.mode,
-        snapshot.blocking,
-        snapshot.visual_begin,
-        snapshot.visual_end
-    );
-
-    send_msg(tx, FromNeovim::Preedit(preedit));
-    send_msg(tx, FromNeovim::VisualRange(snapshot.to_visual_selection()));
-
-    Ok(snapshot)
-}
-
-/// Parse a msgpack Value (Lua table) into a Snapshot struct.
-fn parse_snapshot(value: &nvim_rs::Value) -> NvimResult<Snapshot> {
-    let map = value
-        .as_map()
-        .ok_or(NvimError::SnapshotParse("expected map"))?;
-
-    let mut snapshot = Snapshot {
-        preedit: String::new(),
-        cursor_byte: 1,
-        mode: "n".to_string(),
-        blocking: false,
-        char_width: 0,
-        visual_begin: None,
-        visual_end: None,
-        recording: String::new(),
-    };
-
-    for (k, v) in map {
-        let Some(key) = k.as_str() else { continue };
-        match key {
-            "preedit" => {
-                snapshot.preedit = v.as_str().unwrap_or("").to_string();
-            }
-            "cursor_byte" => {
-                snapshot.cursor_byte = v.as_u64().unwrap_or(1) as usize;
-            }
-            "mode" => {
-                snapshot.mode = v.as_str().unwrap_or("n").to_string();
-            }
-            "blocking" => {
-                snapshot.blocking = v.as_bool().unwrap_or(false);
-            }
-            "char_width" => {
-                snapshot.char_width = v.as_u64().unwrap_or(0) as usize;
-            }
-            "visual_begin" => {
-                if let Some(n) = v.as_u64() {
-                    snapshot.visual_begin = Some(n as usize);
-                }
-            }
-            "visual_end" => {
-                if let Some(n) = v.as_u64() {
-                    snapshot.visual_end = Some(n as usize);
-                }
-            }
-            "recording" => {
-                snapshot.recording = v.as_str().unwrap_or("").to_string();
-            }
-            _ => {}
-        }
-    }
-
-    Ok(snapshot)
-}
-
-/// Extract a string field from a msgpack map (Lua table return value).
-fn get_map_str<'a>(value: &'a nvim_rs::Value, field: &str) -> Option<&'a str> {
-    value
-        .as_map()?
+        .any(|(k, v)| k.as_str() == Some("blocking") && v.as_bool() == Some(true));
+    let mode = mode_info
         .iter()
-        .find(|(k, _)| k.as_str() == Some(field))
+        .find(|(k, _)| k.as_str() == Some("mode"))
         .and_then(|(_, v)| v.as_str())
+        .unwrap_or("n")
+        .to_string();
+    Ok((mode, blocking))
 }
