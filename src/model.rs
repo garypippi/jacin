@@ -162,8 +162,9 @@ impl Model {
                     return vec![];
                 }
                 if !enabled {
-                    // Still commit if the text input is focused (e.g. :wq makes
-                    // Neovim exit before we process the commit notification).
+                    // Still commit if the text input is focused: the line was
+                    // already removed from the Neovim buffer (e.g. IME toggled
+                    // off or Neovim exited while the notification was in flight).
                     return if active {
                         vec![Effect::CommitString(text)]
                     } else {

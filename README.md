@@ -37,7 +37,6 @@ adapter = "native"        # "native" (ext_popupmenu) or "nvim-cmp"
 [behavior]
 startinsert = true        # true: start in insert mode, false: start in normal mode
 recording_blink = true    # Blink the REC indicator while recording a macro
-write_to_commit = false   # :w commits preedit text to the application (:wq, :x also work)
 
 [font]
 family = "Noto Sans CJK JP"   # Proportional font (preedit/candidates). Default: fontconfig auto

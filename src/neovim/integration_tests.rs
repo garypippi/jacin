@@ -261,15 +261,13 @@ fn getchar_completion_acknowledges_key_with_pending_state() {
 
 #[test]
 #[ignore]
-fn force_quit_exits_with_write_to_commit() {
-    let mut config = clean_config();
-    config.behavior.write_to_commit = true;
-    let handle = spawn_neovim(config, None).expect("failed to spawn neovim");
+fn quit_exits_with_modified_buffer() {
+    let handle = spawn_neovim(clean_config(), None).expect("failed to spawn neovim");
     recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
         .expect("Neovim did not send Ready");
-    // Modified acwrite buffer: :q! must still exit (no E37)
+    // buftype=nofile: plain :q must exit even with a modified buffer (no E37)
     let mut msgs = Vec::new();
-    for key in ["a", "b", "<Esc>", ":", "q", "!", "<CR>"] {
+    for key in ["a", "b", "<Esc>", ":", "q", "<CR>"] {
         msgs.extend(send_and_collect(&handle, key));
     }
     // NvimExited may arrive before or after the <CR> acknowledgment
@@ -280,5 +278,5 @@ fn force_quit_exits_with_write_to_commit() {
             MSG_TIMEOUT,
         )
         .is_some();
-    assert!(exited, "expected NvimExited after :q!, got {msgs:?}");
+    assert!(exited, "expected NvimExited after :q, got {msgs:?}");
 }

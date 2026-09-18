@@ -50,7 +50,6 @@ src/
       auto_commit.lua        # ime_context table, check_line_added()
       autocmds.lua           # ModeChanged, TextChangedI, CursorMovedI, CmdlineLeave
       completion_cmp.lua     # nvim-cmp completion adapter
-      write_commit.lua       # :w handler for write_to_commit option
   ui/
     unified_window.rs        # Unified popup (preedit, keypress, candidates)
     layout.rs                # Popup layout calculation and sizing
@@ -63,7 +62,7 @@ src/
 - **Typed Neovim protocol**: Serde-based `ToNeovim`/`FromNeovim` messages with bounded channels
 - **Optimized RPC**: Insert mode uses fire-and-forget (`nvim_input` + push notification via autocmds); normal mode uses 2-RPC pull (`nvim_input` + `collect_snapshot()`)
 - **nvim_ui_attach extensions**: `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `mode_change` — Neovim's UI protocol drives command-line, completion, messages, and mode updates
-- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, completion adapter, font, startinsert, write_to_commit
+- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, completion adapter, font, startinsert, recording_blink
 
 ## Known Limitations
 
