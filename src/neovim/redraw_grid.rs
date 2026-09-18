@@ -39,6 +39,7 @@ pub fn parse_grid_event(name: &str, params: &Value) -> Option<GridEvent> {
             row: size(1)?,
             col_start: size(2)?,
             cells: parse_cells(args.get(3)?.as_array()?)?,
+            wrap: args.get(4).and_then(Value::as_bool).unwrap_or(false),
         }),
         "grid_scroll" => Some(GridEvent::Scroll {
             grid: grid?,
@@ -179,6 +180,7 @@ mod tests {
                         repeat: 3
                     },
                 ],
+                wrap: false,
             })
         );
     }

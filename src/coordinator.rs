@@ -1,9 +1,10 @@
 use std::sync::atomic::Ordering;
 
 use crate::State;
+use crate::config::DisplayMode;
 use crate::model::Effect;
 use crate::neovim::{self, FromNeovim};
-use crate::ui::PopupContent;
+use crate::ui::{MAX_GRID_ROWS, PopupContent};
 
 impl State {
     /// Common cleanup shared by toggle-off and deactivate:
@@ -85,6 +86,11 @@ impl State {
             match effect {
                 Effect::SyncPreedit => self.update_preedit(),
                 Effect::Render => self.update_popup(),
+                Effect::GridUpdated => {
+                    if self.config.behavior.display == DisplayMode::Grid {
+                        self.update_popup();
+                    }
+                }
                 Effect::CommitString(text) => self.wayland.commit_string(&text),
                 Effect::DeleteSurrounding { before, after } => {
                     self.wayland.delete_surrounding(before, after);
@@ -186,6 +192,10 @@ impl State {
             recording: self.model.view.recording.clone(),
             rec_blink_on: self.animations.rec_blink.on,
             cmdline_cursor_pos: self.model.view.cmdline.as_ref().map(|c| c.cursor_byte),
+            window_view: match self.config.behavior.display {
+                DisplayMode::Grid => self.model.view.screen.window_view(MAX_GRID_ROWS),
+                DisplayMode::Snapshot => None,
+            },
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();

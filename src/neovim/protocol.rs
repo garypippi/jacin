@@ -148,6 +148,9 @@ pub enum GridEvent {
         row: usize,
         col_start: usize,
         cells: Vec<GridCell>,
+        /// The row continues on the next row (set on the event covering
+        /// the last column)
+        wrap: bool,
     },
     /// Copy cells within [top, bot) x [left, right); rows > 0 moves up
     Scroll {

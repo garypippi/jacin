@@ -23,5 +23,7 @@ pub use keyboard::KeyboardState;
 pub use keypress::KeypressState;
 pub use nvim_view::NvimView;
 pub use repeat::KeyRepeatState;
-pub use screen::Screen;
+#[cfg(test)]
+pub use screen::StyledCell;
+pub use screen::{Screen, WindowView};
 pub use wayland::WaylandState;

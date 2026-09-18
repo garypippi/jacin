@@ -23,6 +23,7 @@ use super::layout::{
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
 use crate::neovim::VisualSelection;
+use crate::state::WindowView;
 
 /// Pool size: 600×450×4×2 bytes for double buffering (~2MB)
 const POOL_SIZE: usize = 600 * 450 * 4 * 2;
@@ -223,7 +224,13 @@ impl UnifiedPopup {
 
         // Render sections
         if layout.has_preedit {
-            if !content.preedit.is_empty() {
+            let preedit_rows = content
+                .window_view
+                .as_ref()
+                .map_or(1, |view| view.rows.len().max(1));
+            if let Some(ref view) = content.window_view {
+                self.render_grid_section(&mut pixmap, view, &content.vim_mode, layout);
+            } else if !content.preedit.is_empty() {
                 self.render_preedit_section(&mut pixmap, content, layout, PADDING);
             }
 
@@ -231,7 +238,7 @@ impl UnifiedPopup {
             if layout.has_keypress || layout.has_candidates || layout.has_transient_message {
                 let line_height = self.renderer.line_height();
                 // Pixel-align 1px lines (fractional positions trip tiny-skia's AA hairline path)
-                let sep_y = (layout.preedit_y + line_height).round();
+                let sep_y = (layout.preedit_y + line_height * preedit_rows as f32).round();
                 if let Some(rect) =
                     Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
                 {
@@ -301,6 +308,81 @@ impl UnifiedPopup {
             self.width,
             self.height
         );
+    }
+
+    /// Render Neovim's window grid (grid display mode): monospace cells with
+    /// Neovim highlight colors over the popup theme, plus the cursor.
+    fn render_grid_section(
+        &mut self,
+        pixmap: &mut Pixmap,
+        view: &WindowView,
+        vim_mode: &str,
+        layout: &Layout,
+    ) {
+        let line_height = self.renderer.line_height();
+        let cell_width = self.mono_renderer.measure_text(" ");
+        let right_edge = layout.width as f32 - PADDING;
+        // Integer cell edges keep fills crisp and off tiny-skia's AA hairline path
+        let cell_x = |col: usize| (PADDING + col as f32 * cell_width).round();
+        let fill = |pixmap: &mut Pixmap, x0: f32, y: f32, x1: f32, h: f32, color: Color| {
+            if let Some(rect) = Rect::from_xywh(x0, y, x1 - x0, h) {
+                let mut paint = Paint::default();
+                paint.set_color(color);
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            }
+        };
+        let theme_fg = rgba(TEXT_COLOR);
+        let theme_bg = rgba(BG_COLOR);
+        let block_cursor = !matches!(vim_mode.chars().next(), Some('i' | 'R' | 'c'));
+        let (cursor_row, cursor_col) = view.cursor;
+
+        for (row, cells) in view.rows.iter().enumerate() {
+            let y_top = (layout.preedit_y + row as f32 * line_height).round();
+            let y_baseline = y_top + line_height * 0.75;
+            for (col, cell) in cells.iter().enumerate() {
+                let (x0, x1) = (cell_x(col), cell_x(col + 1));
+                if x1 > right_edge {
+                    break;
+                }
+                let mut fg = cell.fg.map_or(theme_fg, rgb_color);
+                let mut bg = cell.bg.map(rgb_color);
+                if cell.reverse {
+                    (fg, bg) = (bg.unwrap_or(theme_bg), Some(fg));
+                }
+                let on_cursor = block_cursor
+                    && row == cursor_row
+                    && (col == cursor_col || (col == cursor_col + 1 && cell.text.is_empty()));
+                if on_cursor {
+                    bg = Some(rgba(CURSOR_BG));
+                    fg = Color::from_rgba8(40, 44, 52, 255);
+                }
+                if let Some(bg) = bg {
+                    fill(pixmap, x0, y_top, x1, line_height.round(), bg);
+                }
+                if cell.underline {
+                    let y = (y_top + line_height * 0.85).round();
+                    fill(pixmap, x0, y, x1, 1.0, fg);
+                }
+                if !cell.text.is_empty() && cell.text != " " {
+                    self.mono_renderer
+                        .draw_text(pixmap, &cell.text, x0, y_baseline, fg);
+                }
+            }
+        }
+
+        // Cursor past the end of the row (or on an empty row)
+        let row_len = view.rows.get(cursor_row).map_or(0, Vec::len);
+        let x0 = cell_x(cursor_col);
+        if x0 >= right_edge {
+            return;
+        }
+        let y_top = (layout.preedit_y + cursor_row as f32 * line_height).round();
+        if !block_cursor {
+            fill(pixmap, x0, y_top, x0 + 2.0, line_height.round(), theme_fg);
+        } else if cursor_col >= row_len {
+            let x1 = cell_x(cursor_col + 1).min(right_edge);
+            fill(pixmap, x0, y_top, x1, line_height.round(), rgba(CURSOR_BG));
+        }
     }
 
     /// Render preedit section with cursor
@@ -742,4 +824,9 @@ fn draw_filled_circle(pixmap: &mut Pixmap, cx: f32, cy: f32, radius: f32, color:
             pixmap.fill_rect(rect, &paint, Transform::identity(), None);
         }
     }
+}
+
+/// 0xRRGGBB → opaque color
+fn rgb_color(rgb: u32) -> Color {
+    Color::from_rgba8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
 }

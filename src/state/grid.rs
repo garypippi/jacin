@@ -30,6 +30,8 @@ pub struct Grid {
     height: usize,
     /// Row-major cells (width * height)
     cells: Vec<Cell>,
+    /// Per row: the screen line continues on the next row (soft wrap)
+    wraps: Vec<bool>,
 }
 
 impl Grid {
@@ -40,20 +42,40 @@ impl Grid {
         grid
     }
 
-    pub fn clear(&mut self) {
-        self.cells.fill(Cell::default());
+    pub fn width(&self) -> usize {
+        self.width
     }
 
-    /// Write cells starting at (row, col_start), clipped to the grid
-    pub fn put_line(&mut self, row: usize, col_start: usize, cells: Vec<GridCell>) {
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Cell at (row, col); None if out of range
+    pub fn cell(&self, row: usize, col: usize) -> Option<&Cell> {
+        (row < self.height && col < self.width).then(|| &self.cells[row * self.width + col])
+    }
+
+    /// Whether `row` wraps onto the next row
+    pub fn wraps(&self, row: usize) -> bool {
+        self.wraps.get(row).copied().unwrap_or(false)
+    }
+
+    pub fn clear(&mut self) {
+        self.cells.fill(Cell::default());
+        self.wraps.fill(false);
+    }
+
+    /// Write cells starting at (row, col_start), clipped to the grid.
+    /// `wrap` is only meaningful when the cells reach the last column.
+    pub fn put_line(&mut self, row: usize, col_start: usize, cells: Vec<GridCell>, wrap: bool) {
         if row >= self.height {
             return;
         }
         let mut col = col_start;
-        for cell in cells {
+        'cells: for cell in cells {
             for _ in 0..cell.repeat {
                 if col >= self.width {
-                    return;
+                    break 'cells;
                 }
                 self.cells[row * self.width + col] = Cell {
                     text: cell.text.clone(),
@@ -61,6 +83,9 @@ impl Grid {
                 };
                 col += 1;
             }
+        }
+        if col >= self.width {
+            self.wraps[row] = wrap;
         }
     }
 
@@ -73,6 +98,7 @@ impl Grid {
             }
         }
         self.cells = cells;
+        self.wraps.resize(height, false);
         self.width = width;
         self.height = height;
     }
@@ -86,20 +112,26 @@ impl Grid {
         if shift == 0 || top + shift >= bot {
             return;
         }
-        let copy_row = |cells: &mut Vec<Cell>, dst: usize, src: usize| {
+        // Wrap flags describe whole rows; move them only for full-width scrolls
+        let full_width = left == 0 && right == self.width;
+        let width = self.width;
+        let mut copy_row = |dst: usize, src: usize| {
             for col in left..right {
-                cells[dst * self.width + col] = cells[src * self.width + col].clone();
+                self.cells[dst * width + col] = self.cells[src * width + col].clone();
+            }
+            if full_width {
+                self.wraps[dst] = self.wraps[src];
             }
         };
         if rows > 0 {
             // Move up: dst = src - shift
             for dst in top..bot - shift {
-                copy_row(&mut self.cells, dst, dst + shift);
+                copy_row(dst, dst + shift);
             }
         } else {
             // Move down: dst = src + shift
             for dst in (top + shift..bot).rev() {
-                copy_row(&mut self.cells, dst, dst - shift);
+                copy_row(dst, dst - shift);
             }
         }
     }
@@ -147,7 +179,7 @@ mod tests {
     #[test]
     fn line_writes_cells_with_repeat() {
         let mut g = Grid::new(6, 2);
-        g.put_line(1, 1, cells(&[("a", 1, 1), ("-", 2, 3)]));
+        g.put_line(1, 1, cells(&[("a", 1, 1), ("-", 2, 3)]), false);
         assert_eq!(g.row_text(1), " a--- ");
         assert_eq!(g.row_text(0), "      ");
     }
@@ -155,14 +187,14 @@ mod tests {
     #[test]
     fn line_is_clipped_to_width() {
         let mut g = Grid::new(3, 1);
-        g.put_line(0, 1, cells(&[("x", 0, 10)]));
+        g.put_line(0, 1, cells(&[("x", 0, 10)]), false);
         assert_eq!(g.row_text(0), " xx");
     }
 
     #[test]
     fn double_width_chars_and_byte_offset() {
         let mut g = Grid::new(6, 1);
-        g.put_line(0, 0, cells(&[("あ", 0, 1), ("", 0, 1), ("b", 0, 1)]));
+        g.put_line(0, 0, cells(&[("あ", 0, 1), ("", 0, 1), ("b", 0, 1)]), false);
         assert_eq!(g.row_text(0), "あb   ");
         assert_eq!(g.byte_offset(0, 2), 3); // after "あ"
         assert_eq!(g.byte_offset(0, 3), 4); // after "あb"
@@ -172,7 +204,7 @@ mod tests {
     fn scroll_up_and_down() {
         let mut g = Grid::new(1, 4);
         for (row, t) in ["a", "b", "c", "d"].iter().enumerate() {
-            g.put_line(row, 0, cells(&[(t, 0, 1)]));
+            g.put_line(row, 0, cells(&[(t, 0, 1)]), false);
         }
         g.scroll(0, 4, 0, 1, 1);
         let rows: Vec<_> = (0..4).map(|r| g.row_text(r)).collect();
@@ -186,7 +218,7 @@ mod tests {
     #[test]
     fn resize_keeps_overlap_and_clear_blanks() {
         let mut g = Grid::new(3, 1);
-        g.put_line(0, 0, cells(&[("abc", 0, 1)]));
+        g.put_line(0, 0, cells(&[("abc", 0, 1)]), false);
         g.resize(2, 2);
         assert_eq!(g.row_text(0), "abc "); // first cell kept, second blank
         g.clear();
@@ -194,9 +226,23 @@ mod tests {
     }
 
     #[test]
+    fn wrap_flag_set_only_when_reaching_last_column_and_scrolled() {
+        let mut g = Grid::new(3, 3);
+        g.put_line(0, 0, cells(&[("a", 0, 1)]), true); // does not reach col 2
+        assert!(!g.wraps(0));
+        g.put_line(0, 0, cells(&[("a", 0, 3)]), true);
+        assert!(g.wraps(0));
+
+        g.scroll(0, 3, 0, 3, -1); // full-width scroll moves the flag down
+        assert!(g.wraps(1));
+        g.clear();
+        assert!(!g.wraps(1));
+    }
+
+    #[test]
     fn out_of_range_writes_are_ignored() {
         let mut g = Grid::new(2, 1);
-        g.put_line(5, 0, cells(&[("x", 0, 1)]));
+        g.put_line(5, 0, cells(&[("x", 0, 1)]), false);
         g.scroll(0, 9, 0, 9, 3);
         assert_eq!(g.row_text(0), "  ");
         assert_eq!(g.row_text(5), "");

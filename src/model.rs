@@ -14,6 +14,8 @@ pub enum Effect {
     SyncPreedit,
     /// Re-render the popup
     Render,
+    /// The mirrored grid changed (re-render when the popup shows the grid)
+    GridUpdated,
     /// Commit text to the application
     CommitString(String),
     /// Delete text around the cursor in the application
@@ -191,8 +193,7 @@ impl Model {
                     self.view.screen.apply(event);
                 }
                 self.shadow_check();
-                // Phase A: grid is not rendered yet
-                vec![]
+                vec![Effect::GridUpdated]
             }
         }
     }
@@ -420,6 +421,7 @@ mod replay_tests {
                     hl: 0,
                     repeat: 1,
                 }],
+                wrap: false,
             },
             GridEvent::CursorGoto {
                 grid: 2,
@@ -443,7 +445,10 @@ mod replay_tests {
     fn shadow_check_detects_match_and_mismatch() {
         let mut model = enabled_model();
         // Each char is one cell here, so cursor col == byte offset for ASCII
-        assert!(model.reduce(grid_flush("a", 1), true).is_empty());
+        assert_eq!(
+            model.reduce(grid_flush("a", 1), true),
+            vec![Effect::GridUpdated]
+        );
         model.reduce(preedit("a", 1), true);
         assert_eq!(model.shadow_ok, Some(true));
 

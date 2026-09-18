@@ -35,6 +35,9 @@ pub struct Behavior {
     /// If true, the REC indicator dot blinks while recording a macro.
     /// Default: true.
     pub recording_blink: bool,
+    /// How the popup shows the text being edited.
+    /// Default: snapshot.
+    pub display: DisplayMode,
 }
 
 impl Default for Behavior {
@@ -42,8 +45,20 @@ impl Default for Behavior {
         Self {
             startinsert: true,
             recording_blink: true,
+            display: DisplayMode::default(),
         }
     }
+}
+
+/// Source of the text shown in the popup's editing area
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayMode {
+    /// Current line from Lua snapshots (single line)
+    #[default]
+    Snapshot,
+    /// Neovim's window grid from UI events (experimental, Phase B)
+    Grid,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -212,6 +227,19 @@ mod tests {
         .unwrap();
         assert!(config.behavior.startinsert); // default preserved
         assert!(config.behavior.recording_blink); // default preserved
+    }
+
+    #[test]
+    fn display_mode_parses_grid() {
+        let config: Config = toml::from_str(
+            r#"
+            [behavior]
+            display = "grid"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.behavior.display, DisplayMode::Grid);
+        assert_eq!(Config::default().behavior.display, DisplayMode::Snapshot);
     }
 
     #[test]

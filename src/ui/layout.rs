@@ -5,6 +5,7 @@
 //! fully pure by accepting measurement results as parameters.
 
 use crate::neovim::VisualSelection;
+use crate::state::WindowView;
 
 use super::text_render::TextRenderer;
 
@@ -32,6 +33,11 @@ pub(crate) const SCROLLBAR_WIDTH: f32 = 8.0;
 pub(crate) const NUMBER_WIDTH: f32 = 24.0;
 pub(crate) const SECTION_SEPARATOR_HEIGHT: f32 = 1.0;
 pub(crate) const MAX_PREEDIT_WIDTH: f32 = 400.0;
+/// Maximum window-grid rows shown in grid display mode
+pub(crate) const MAX_GRID_ROWS: usize = 8;
+/// Popup size limits (the SHM pool holds two buffers of the maximum size)
+pub(crate) const MAX_POPUP_WIDTH: u32 = 580;
+pub(crate) const MAX_POPUP_HEIGHT: u32 = 450;
 
 pub(crate) const ICON_SEPARATOR_WIDTH: f32 = 1.0;
 pub(crate) const ICON_SEPARATOR_GAP: f32 = 6.0;
@@ -63,6 +69,8 @@ pub struct PopupContent {
     pub recording: String,
     pub rec_blink_on: bool,
     pub cmdline_cursor_pos: Option<usize>,
+    /// Grid display mode: rows of Neovim's window grid (replaces `preedit`)
+    pub window_view: Option<WindowView>,
 }
 
 impl PopupContent {
@@ -172,6 +180,13 @@ pub(crate) fn scrollbar_thumb_geometry(
     }
 }
 
+/// Screen columns needed to show a window view: the widest row, and the
+/// cursor cell (+1 so a bar/block after the last char stays visible)
+pub(crate) fn grid_view_columns(view: &WindowView) -> usize {
+    let widest = view.rows.iter().map(Vec::len).max().unwrap_or(0);
+    widest.max(view.cursor.1 + 1)
+}
+
 /// Calculate layout dimensions and section positions.
 ///
 /// `mono_renderer` is used for measuring mode/REC icon text in the keypress row.
@@ -217,7 +232,17 @@ pub(crate) fn calculate_layout(
 
     // Preedit section (no icon area — preedit starts at PADDING)
     let preedit_y = y;
-    if has_preedit {
+    if has_preedit && let Some(ref view) = content.window_view {
+        let cell_width = mono_renderer.measure_text(" ");
+        let cols = grid_view_columns(view);
+        if cols > 0 {
+            max_width = max_width.max(PADDING * 2.0 + cols as f32 * cell_width);
+        }
+        y += view.rows.len().max(1) as f32 * line_height;
+        if has_keypress || has_candidates {
+            y += SECTION_SEPARATOR_HEIGHT;
+        }
+    } else if has_preedit {
         if !content.preedit.is_empty() {
             let text_width = renderer.measure_text(&content.preedit);
             let preedit_width =
@@ -289,8 +314,8 @@ pub(crate) fn calculate_layout(
 
     // Align width to 4 bytes for wl_shm
     let width = ((max_width.ceil() as u32) + 3) & !3;
-    let width = width.clamp(100, 580);
-    let height = (y.ceil() as u32).clamp(30, 450);
+    let width = width.clamp(100, MAX_POPUP_WIDTH);
+    let height = (y.ceil() as u32).clamp(30, MAX_POPUP_HEIGHT);
 
     Layout {
         width,
@@ -311,6 +336,35 @@ pub(crate) fn calculate_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- grid_view_columns ---
+
+    fn view(row_lens: &[usize], cursor: (usize, usize)) -> WindowView {
+        use crate::state::StyledCell;
+        let cell = StyledCell {
+            text: "a".into(),
+            fg: None,
+            bg: None,
+            reverse: false,
+            underline: false,
+        };
+        WindowView {
+            rows: row_lens.iter().map(|&n| vec![cell.clone(); n]).collect(),
+            cursor,
+        }
+    }
+
+    #[test]
+    fn grid_columns_follow_widest_row() {
+        assert_eq!(grid_view_columns(&view(&[3, 7, 2], (0, 0))), 7);
+    }
+
+    #[test]
+    fn grid_columns_include_cursor_past_end() {
+        // Insert cursor after the last char needs one more cell
+        assert_eq!(grid_view_columns(&view(&[3], (0, 3))), 4);
+        assert_eq!(grid_view_columns(&view(&[], (0, 0))), 1);
+    }
 
     // --- preedit_scroll_offset ---
 

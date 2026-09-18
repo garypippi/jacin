@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use super::Grid;
+use super::grid::Cell;
 use crate::neovim::{GridEvent, HlAttr};
 
 /// Default colors from `default_colors_set` (0xRRGGBB)
@@ -57,6 +58,33 @@ pub struct Window {
     pub viewport: Option<Viewport>,
 }
 
+/// A cell resolved for rendering (None colors = theme default)
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyledCell {
+    /// Cell text ("" for the right half of a double-width char)
+    pub text: String,
+    pub fg: Option<u32>,
+    pub bg: Option<u32>,
+    pub reverse: bool,
+    pub underline: bool,
+}
+
+impl StyledCell {
+    /// Blank cell with default colors (trimmed at the end of rows)
+    fn is_plain_blank(&self) -> bool {
+        self.text == " " && self.bg.is_none() && !self.reverse && !self.underline
+    }
+}
+
+/// Visible buffer rows of the current window, ready for rendering
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WindowView {
+    /// Screen rows (trailing plain blanks trimmed)
+    pub rows: Vec<Vec<StyledCell>>,
+    /// Cursor (row within `rows`, screen column)
+    pub cursor: (usize, usize),
+}
+
 #[derive(Debug, Default)]
 pub struct Screen {
     grids: HashMap<u64, Grid>,
@@ -79,6 +107,62 @@ impl Screen {
     /// Grid of the window holding the cursor
     pub fn cursor_grid(&self) -> Option<&Grid> {
         self.grid(self.cursor.grid)
+    }
+
+    /// Screen rows of the window holding the cursor that show buffer text
+    /// (filler rows past the buffer end excluded), at most `max_rows`,
+    /// scrolled so that the cursor row is visible.
+    pub fn window_view(&self, max_rows: usize) -> Option<WindowView> {
+        let grid = self.cursor_grid()?;
+        if self.cursor.grid == 1 || max_rows == 0 {
+            return None; // no window grid yet
+        }
+        let lines = self
+            .window(self.cursor.grid)
+            .and_then(|w| w.viewport)
+            .map_or(1, |v| v.line_count.saturating_sub(v.topline))
+            .max(1);
+
+        // Each buffer line spans rows until one that does not wrap
+        let mut used_rows = 0;
+        let mut consumed = 0;
+        while used_rows < grid.height() && consumed < lines {
+            if !grid.wraps(used_rows) {
+                consumed += 1;
+            }
+            used_rows += 1;
+        }
+        let used_rows = used_rows.max(self.cursor.row + 1).min(grid.height());
+        let first = (self.cursor.row + 1).saturating_sub(max_rows);
+        let last = used_rows.min(first + max_rows);
+
+        let rows = (first..last)
+            .map(|row| {
+                let mut cells: Vec<StyledCell> = (0..grid.width())
+                    .filter_map(|col| grid.cell(row, col))
+                    .map(|cell| self.style(cell))
+                    .collect();
+                while cells.last().is_some_and(StyledCell::is_plain_blank) {
+                    cells.pop();
+                }
+                cells
+            })
+            .collect();
+        Some(WindowView {
+            rows,
+            cursor: (self.cursor.row - first, self.cursor.col),
+        })
+    }
+
+    fn style(&self, cell: &Cell) -> StyledCell {
+        let attr = self.hl_attrs.get(&cell.hl);
+        StyledCell {
+            text: cell.text.clone(),
+            fg: attr.and_then(|a| a.foreground),
+            bg: attr.and_then(|a| a.background),
+            reverse: attr.is_some_and(|a| a.reverse),
+            underline: attr.is_some_and(|a| a.underline || a.undercurl),
+        }
     }
 
     pub fn apply(&mut self, event: GridEvent) {
@@ -105,9 +189,10 @@ impl Screen {
                 row,
                 col_start,
                 cells,
+                wrap,
             } => {
                 if let Some(g) = self.grids.get_mut(&grid) {
-                    g.put_line(row, col_start, cells);
+                    g.put_line(row, col_start, cells, wrap);
                 }
             }
             GridEvent::Scroll {
@@ -192,6 +277,7 @@ mod tests {
                 hl: 0,
                 repeat: 1,
             }],
+            wrap: false,
         }
     }
 
@@ -250,6 +336,114 @@ mod tests {
         screen.apply(GridEvent::Destroy { grid: 5 });
         assert!(screen.window(5).is_none());
         assert!(screen.grid(5).is_none());
+    }
+
+    fn window(lines: &[(&str, bool)], line_count: usize, cursor: (usize, usize)) -> Screen {
+        let mut screen = Screen::default();
+        screen.apply(resize(1, 6, 5));
+        screen.apply(resize(2, 6, 4));
+        for (row, (text, wrap)) in lines.iter().enumerate() {
+            screen.apply(GridEvent::Line {
+                grid: 2,
+                row,
+                col_start: 0,
+                cells: text
+                    .chars()
+                    .map(|c| GridCell {
+                        text: c.to_string(),
+                        hl: 0,
+                        repeat: 1,
+                    })
+                    .collect(),
+                wrap: *wrap,
+            });
+        }
+        screen.apply(GridEvent::WinViewport {
+            grid: 2,
+            topline: 0,
+            botline: line_count + 1,
+            curline: 0,
+            curcol: 0,
+            line_count,
+        });
+        screen.apply(GridEvent::CursorGoto {
+            grid: 2,
+            row: cursor.0,
+            col: cursor.1,
+        });
+        screen
+    }
+
+    fn texts(view: &WindowView) -> Vec<String> {
+        view.rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn window_view_excludes_filler_rows() {
+        let screen = window(&[("ab", false), ("~", false), ("~", false)], 1, (0, 2));
+        let view = screen.window_view(8).unwrap();
+        assert_eq!(texts(&view), ["ab"]);
+        assert_eq!(view.cursor, (0, 2));
+    }
+
+    #[test]
+    fn window_view_counts_wrapped_rows() {
+        // One buffer line wrapped over two rows (line_count = 1)
+        let screen = window(&[("abcdef", true), ("gh", false), ("~", false)], 1, (1, 2));
+        let view = screen.window_view(8).unwrap();
+        assert_eq!(texts(&view), ["abcdef", "gh"]);
+    }
+
+    #[test]
+    fn window_view_scrolls_to_cursor_row() {
+        let screen = window(&[("a", false), ("b", false), ("c", false)], 3, (2, 0));
+        let view = screen.window_view(2).unwrap();
+        assert_eq!(texts(&view), ["b", "c"]);
+        assert_eq!(view.cursor, (1, 0));
+    }
+
+    #[test]
+    fn window_view_resolves_highlights() {
+        let mut screen = window(&[("a", false)], 1, (0, 0));
+        screen.apply(GridEvent::HlAttrDefine {
+            id: 7,
+            attr: HlAttr {
+                background: Some(0x123456),
+                reverse: true,
+                ..HlAttr::default()
+            },
+        });
+        screen.apply(GridEvent::Line {
+            grid: 2,
+            row: 0,
+            col_start: 1,
+            cells: vec![GridCell {
+                text: " ".into(),
+                hl: 7,
+                repeat: 1,
+            }],
+            wrap: false,
+        });
+        let view = screen.window_view(8).unwrap();
+        // Highlighted blank is kept, plain trailing blanks are trimmed
+        assert_eq!(view.rows[0].len(), 2);
+        assert_eq!(view.rows[0][1].bg, Some(0x123456));
+        assert!(view.rows[0][1].reverse);
+    }
+
+    #[test]
+    fn window_view_none_before_window_grid() {
+        let mut screen = Screen::default();
+        screen.apply(resize(1, 4, 2));
+        screen.apply(GridEvent::CursorGoto {
+            grid: 1,
+            row: 0,
+            col: 0,
+        });
+        assert!(screen.window_view(8).is_none());
     }
 
     #[test]
