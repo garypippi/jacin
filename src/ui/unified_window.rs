@@ -17,8 +17,9 @@ use super::layout::{
     KEYPRESS_ENTRY_GAP, KEYPRESS_TEXT_COLOR, Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT,
     MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR,
     NUMBER_WIDTH, PADDING, REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB,
-    SCROLLBAR_WIDTH, SELECTED_BG, TEXT_COLOR, VISUAL_BG, calculate_layout, format_recording_label,
-    mode_label, preedit_scroll_offset, rgba, scrollbar_thumb_geometry,
+    SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, SELECTED_BG, TEXT_COLOR, VISUAL_BG,
+    calculate_layout, format_recording_label, mode_label, preedit_scroll_offset, rgba,
+    scrollbar_thumb_geometry,
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
@@ -112,13 +113,21 @@ impl UnifiedPopup {
         }
     }
 
-    /// Neovim UI size (columns, rows) for grid display mode: columns fill
-    /// the maximum popup width, rows are the visible grid rows plus one for
-    /// the statusline (which stays on the global grid)
+    /// Neovim UI size (columns, rows) for grid display mode: the grid
+    /// section at the maximum popup size. Rows must leave room below the
+    /// cursor for floats — nvim-cmp won't open a menu of 8+ entries unless
+    /// `lines - cursor_row > 10`, so sizing rows to the visible window grid
+    /// alone (9) hides such menus. Floats are clamped to `lines` by their
+    /// owners, so they still fit the popup.
     pub fn grid_ui_size(&mut self) -> (usize, usize) {
         let cell_width = self.mono_renderer.measure_text(" ").max(1.0);
         let cols = ((MAX_POPUP_WIDTH as f32 - PADDING * 2.0) / cell_width).floor() as usize;
-        (cols.max(20), MAX_GRID_ROWS + 1)
+        let line_height = self.renderer.line_height().max(1.0);
+        // Minus padding, the keypress row and its separator
+        let grid_height =
+            MAX_POPUP_HEIGHT as f32 - PADDING * 2.0 - line_height - SECTION_SEPARATOR_HEIGHT;
+        let rows = (grid_height / line_height).floor() as usize;
+        (cols.max(20), rows.max(MAX_GRID_ROWS + 1))
     }
 
     /// Update the popup with new content
