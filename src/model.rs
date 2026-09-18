@@ -5,7 +5,7 @@
 //! can be replayed in tests; `State::apply_effects` executes the effects.
 
 use crate::neovim::FromNeovim;
-use crate::state::{ImeState, KeypressState, NvimView};
+use crate::state::{ImeState, KeypressState, NvimView, Screen};
 
 /// Side effect requested by `Model::reduce`
 #[derive(Debug, Clone, PartialEq)]
@@ -186,6 +186,10 @@ impl Model {
             FromNeovim::NvimExited => {
                 self.reset();
                 self.ime.disable();
+                // The mirrored screen belonged to the dead process; a respawned
+                // Neovim starts from scratch (otherwise it flashes on re-enable)
+                self.view.screen = Screen::default();
+                self.shadow_ok = None;
                 vec![Effect::NvimExited]
             }
             FromNeovim::GridFlush(events) => {
@@ -454,6 +458,17 @@ mod replay_tests {
 
         model.reduce(preedit("ab", 2), true);
         assert_eq!(model.shadow_ok, Some(false));
+    }
+
+    #[test]
+    fn nvim_exit_discards_mirrored_screen() {
+        let mut model = enabled_model();
+        model.reduce(grid_flush("old", 3), true);
+        assert!(model.view.screen.window_view(8).is_some());
+
+        model.reduce(FromNeovim::NvimExited, true);
+        assert!(model.view.screen.window_view(8).is_none());
+        assert_eq!(model.shadow_ok, None);
     }
 
     #[test]
