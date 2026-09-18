@@ -23,7 +23,7 @@ use super::layout::{
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
 use crate::neovim::VisualSelection;
-use crate::state::WindowView;
+use crate::state::{StyledCell, WindowView};
 
 /// Pool size: two ARGB buffers of the maximum popup size (double buffering)
 const POOL_SIZE: usize = (MAX_POPUP_WIDTH * MAX_POPUP_HEIGHT * 4 * 2) as usize;
@@ -236,7 +236,7 @@ impl UnifiedPopup {
             let preedit_rows = content
                 .window_view
                 .as_ref()
-                .map_or(1, |view| view.rows.len().max(1));
+                .map_or(1, |view| view.total_rows().max(1));
             if let Some(ref view) = content.window_view {
                 self.render_grid_section(&mut pixmap, view, &content.vim_mode, layout);
             } else if !content.preedit.is_empty() {
@@ -320,7 +320,8 @@ impl UnifiedPopup {
     }
 
     /// Render Neovim's window grid (grid display mode): monospace cells with
-    /// Neovim highlight colors over the popup theme, plus the cursor.
+    /// Neovim highlight colors over the popup theme, the cursor, and floating
+    /// windows (e.g. nvim-cmp menus) on top.
     fn render_grid_section(
         &mut self,
         pixmap: &mut Pixmap,
@@ -333,64 +334,109 @@ impl UnifiedPopup {
         let right_edge = layout.width as f32 - PADDING;
         // Integer cell edges keep fills crisp and off tiny-skia's AA hairline path
         let cell_x = |col: usize| (PADDING + col as f32 * cell_width).round();
-        let fill = |pixmap: &mut Pixmap, x0: f32, y: f32, x1: f32, h: f32, color: Color| {
-            if let Some(rect) = Rect::from_xywh(x0, y, x1 - x0, h) {
-                let mut paint = Paint::default();
-                paint.set_color(color);
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
-        };
-        let theme_fg = rgba(TEXT_COLOR);
-        let theme_bg = rgba(BG_COLOR);
+        let row_y = |row: usize| (layout.preedit_y + row as f32 * line_height).round();
         let block_cursor = !matches!(vim_mode.chars().next(), Some('i' | 'R' | 'c'));
         let (cursor_row, cursor_col) = view.cursor;
 
         for (row, cells) in view.rows.iter().enumerate() {
-            let y_top = (layout.preedit_y + row as f32 * line_height).round();
-            let y_baseline = y_top + line_height * 0.75;
             for (col, cell) in cells.iter().enumerate() {
                 let (x0, x1) = (cell_x(col), cell_x(col + 1));
                 if x1 > right_edge {
                     break;
                 }
-                let mut fg = cell.fg.map_or(theme_fg, rgb_color);
-                let mut bg = cell.bg.map(rgb_color);
-                if cell.reverse {
-                    (fg, bg) = (bg.unwrap_or(theme_bg), Some(fg));
-                }
                 let on_cursor = block_cursor
                     && row == cursor_row
                     && (col == cursor_col || (col == cursor_col + 1 && cell.text.is_empty()));
-                if on_cursor {
-                    bg = Some(rgba(CURSOR_BG));
-                    fg = Color::from_rgba8(40, 44, 52, 255);
-                }
-                if let Some(bg) = bg {
-                    fill(pixmap, x0, y_top, x1, line_height.round(), bg);
-                }
-                if cell.underline {
-                    let y = (y_top + line_height * 0.85).round();
-                    fill(pixmap, x0, y, x1, 1.0, fg);
-                }
-                if !cell.text.is_empty() && cell.text != " " {
-                    self.mono_renderer
-                        .draw_text(pixmap, &cell.text, x0, y_baseline, fg);
-                }
+                let style = if on_cursor {
+                    CellStyle::Cursor
+                } else {
+                    CellStyle::Normal
+                };
+                self.draw_grid_cell(pixmap, cell, x0, x1, row_y(row), line_height, style);
             }
         }
 
         // Cursor past the end of the row (or on an empty row)
         let row_len = view.rows.get(cursor_row).map_or(0, Vec::len);
         let x0 = cell_x(cursor_col);
-        if x0 >= right_edge {
-            return;
+        if x0 < right_edge {
+            let y_top = row_y(cursor_row);
+            if !block_cursor {
+                fill_rect(
+                    pixmap,
+                    x0,
+                    y_top,
+                    x0 + 2.0,
+                    line_height.round(),
+                    rgba(TEXT_COLOR),
+                );
+            } else if cursor_col >= row_len {
+                let x1 = cell_x(cursor_col + 1).min(right_edge);
+                fill_rect(pixmap, x0, y_top, x1, line_height.round(), rgba(CURSOR_BG));
+            }
         }
-        let y_top = (layout.preedit_y + cursor_row as f32 * line_height).round();
-        if !block_cursor {
-            fill(pixmap, x0, y_top, x0 + 2.0, line_height.round(), theme_fg);
-        } else if cursor_col >= row_len {
-            let x1 = cell_x(cursor_col + 1).min(right_edge);
-            fill(pixmap, x0, y_top, x1, line_height.round(), rgba(CURSOR_BG));
+
+        // Floating windows on top, lowest zindex first
+        for float in &view.floats {
+            for (r, cells) in float.rows.iter().enumerate() {
+                let y_top = row_y(float.row + r);
+                for (c, cell) in cells.iter().enumerate() {
+                    let (x0, x1) = (cell_x(float.col + c), cell_x(float.col + c + 1));
+                    if x1 > right_edge {
+                        break;
+                    }
+                    self.draw_grid_cell(
+                        pixmap,
+                        cell,
+                        x0,
+                        x1,
+                        y_top,
+                        line_height,
+                        CellStyle::Opaque,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Draw one grid cell spanning [x0, x1) at row top `y_top`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_grid_cell(
+        &mut self,
+        pixmap: &mut Pixmap,
+        cell: &StyledCell,
+        x0: f32,
+        x1: f32,
+        y_top: f32,
+        line_height: f32,
+        style: CellStyle,
+    ) {
+        let theme_fg = rgba(TEXT_COLOR);
+        let theme_bg = rgba(BG_COLOR);
+        let mut fg = cell.fg.map_or(theme_fg, rgb_color);
+        let mut bg = cell.bg.map(rgb_color);
+        if cell.reverse {
+            (fg, bg) = (bg.unwrap_or(theme_bg), Some(fg));
+        }
+        match style {
+            CellStyle::Normal => {}
+            CellStyle::Cursor => {
+                bg = Some(rgba(CURSOR_BG));
+                fg = Color::from_rgba8(40, 44, 52, 255);
+            }
+            // Floats hide what is below them even where they have no highlight
+            CellStyle::Opaque => bg = Some(bg.unwrap_or(theme_bg)),
+        }
+        if let Some(bg) = bg {
+            fill_rect(pixmap, x0, y_top, x1, line_height.round(), bg);
+        }
+        if cell.underline {
+            let y = (y_top + line_height * 0.85).round();
+            fill_rect(pixmap, x0, y, x1, 1.0, fg);
+        }
+        if !cell.text.is_empty() && cell.text != " " {
+            self.mono_renderer
+                .draw_text(pixmap, &cell.text, x0, y_top + line_height * 0.75, fg);
         }
     }
 
@@ -838,4 +884,23 @@ fn draw_filled_circle(pixmap: &mut Pixmap, cx: f32, cy: f32, radius: f32, color:
 /// 0xRRGGBB → opaque color
 fn rgb_color(rgb: u32) -> Color {
     Color::from_rgba8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
+}
+
+/// How a grid cell is painted
+#[derive(Clone, Copy)]
+enum CellStyle {
+    Normal,
+    /// Under the block cursor
+    Cursor,
+    /// Part of a floating window: always paints its background
+    Opaque,
+}
+
+/// Fill [x0, x1) x [y, y + h) with a solid color
+fn fill_rect(pixmap: &mut Pixmap, x0: f32, y: f32, x1: f32, h: f32, color: Color) {
+    if let Some(rect) = Rect::from_xywh(x0, y, x1 - x0, h) {
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
 }

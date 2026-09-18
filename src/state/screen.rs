@@ -83,6 +83,41 @@ pub struct WindowView {
     pub rows: Vec<Vec<StyledCell>>,
     /// Cursor (row within `rows`, screen column)
     pub cursor: (usize, usize),
+    /// Floating windows overlaid on the rows, lowest zindex first
+    pub floats: Vec<FloatView>,
+}
+
+/// A floating window (e.g. nvim-cmp menu) positioned relative to
+/// `WindowView::rows`
+#[derive(Debug, Clone, PartialEq)]
+pub struct FloatView {
+    /// Top row relative to the first view row (may extend below the rows)
+    pub row: usize,
+    /// Left column relative to the window
+    pub col: usize,
+    /// All cells of the float grid (not trimmed: its background matters)
+    pub rows: Vec<Vec<StyledCell>>,
+    pub zindex: u64,
+}
+
+impl WindowView {
+    /// Rows the view occupies including floats extending below the rows
+    pub fn total_rows(&self) -> usize {
+        self.floats
+            .iter()
+            .map(|f| f.row + f.rows.len())
+            .fold(self.rows.len(), usize::max)
+    }
+
+    /// Columns the view occupies: widest row or float, and the cursor cell
+    /// (+1 so a bar/block after the last char stays visible)
+    pub fn total_columns(&self) -> usize {
+        let widest_row = self.rows.iter().map(Vec::len).max().unwrap_or(0);
+        self.floats
+            .iter()
+            .map(|f| f.col + f.rows.first().map_or(0, Vec::len))
+            .fold(widest_row.max(self.cursor.1 + 1), usize::max)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -138,10 +173,7 @@ impl Screen {
 
         let rows = (first..last)
             .map(|row| {
-                let mut cells: Vec<StyledCell> = (0..grid.width())
-                    .filter_map(|col| grid.cell(row, col))
-                    .map(|cell| self.style(cell))
-                    .collect();
+                let mut cells = self.styled_row(grid, row);
                 while cells.last().is_some_and(StyledCell::is_plain_blank) {
                     cells.pop();
                 }
@@ -151,7 +183,51 @@ impl Screen {
         Some(WindowView {
             rows,
             cursor: (self.cursor.row - first, self.cursor.col),
+            floats: self.float_views(first),
         })
+    }
+
+    /// Visible floating windows relative to the current window, whose
+    /// view starts at window row `first`. Float rows above the view are cut.
+    fn float_views(&self, first: usize) -> Vec<FloatView> {
+        let (win_row, win_col) = match self.window(self.cursor.grid).and_then(|w| w.placement) {
+            Some(Placement::Normal { row, col }) => (row, col),
+            _ => (0, 0),
+        };
+        let origin_row = win_row + first;
+        let mut floats: Vec<FloatView> = self
+            .windows
+            .iter()
+            .filter(|(_, win)| !win.hidden)
+            .filter_map(|(&id, win)| match win.placement {
+                Some(Placement::Float {
+                    row, col, zindex, ..
+                }) => Some((id, row, col, zindex)),
+                _ => None,
+            })
+            .filter_map(|(id, row, col, zindex)| {
+                let grid = self.grid(id)?;
+                let skip = origin_row.saturating_sub(row);
+                let rows: Vec<_> = (skip..grid.height())
+                    .map(|r| self.styled_row(grid, r))
+                    .collect();
+                (!rows.is_empty()).then(|| FloatView {
+                    row: (row + skip) - origin_row,
+                    col: col.saturating_sub(win_col),
+                    rows,
+                    zindex,
+                })
+            })
+            .collect();
+        floats.sort_by_key(|f| f.zindex);
+        floats
+    }
+
+    fn styled_row(&self, grid: &Grid, row: usize) -> Vec<StyledCell> {
+        (0..grid.width())
+            .filter_map(|col| grid.cell(row, col))
+            .map(|cell| self.style(cell))
+            .collect()
     }
 
     fn style(&self, cell: &Cell) -> StyledCell {
@@ -432,6 +508,83 @@ mod tests {
         assert_eq!(view.rows[0].len(), 2);
         assert_eq!(view.rows[0][1].bg, Some(0x123456));
         assert!(view.rows[0][1].reverse);
+    }
+
+    fn add_float(screen: &mut Screen, grid: u64, row: usize, col: usize, text: &str, z: u64) {
+        screen.apply(resize(grid, text.chars().count(), 1));
+        screen.apply(GridEvent::Line {
+            grid,
+            row: 0,
+            col_start: 0,
+            cells: text
+                .chars()
+                .map(|c| GridCell {
+                    text: c.to_string(),
+                    hl: 0,
+                    repeat: 1,
+                })
+                .collect(),
+            wrap: false,
+        });
+        screen.apply(GridEvent::WinFloatPos {
+            grid,
+            anchor_grid: 1,
+            screen_row: row,
+            screen_col: col,
+            zindex: z,
+        });
+    }
+
+    #[test]
+    fn window_view_includes_floats_below_rows() {
+        let mut screen = window(&[("ab", false)], 1, (0, 2));
+        screen.apply(GridEvent::WinPos {
+            grid: 2,
+            row: 0,
+            col: 0,
+            width: 6,
+            height: 4,
+        });
+        // nvim-cmp style menu one row below the cursor line
+        add_float(&mut screen, 5, 1, 0, " abc ", 1001);
+        let view = screen.window_view(8).unwrap();
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.floats.len(), 1);
+        let float = &view.floats[0];
+        assert_eq!((float.row, float.col, float.zindex), (1, 0, 1001));
+        // Float cells are not trimmed
+        assert_eq!(float.rows[0].len(), 5);
+        assert_eq!(view.total_rows(), 2);
+        assert_eq!(view.total_columns(), 5);
+    }
+
+    #[test]
+    fn floats_sorted_by_zindex_and_hidden_ones_skipped() {
+        let mut screen = window(&[("ab", false)], 1, (0, 0));
+        add_float(&mut screen, 5, 1, 0, "hi", 50);
+        add_float(&mut screen, 6, 1, 1, "lo", 10);
+        add_float(&mut screen, 7, 2, 0, "no", 99);
+        screen.apply(GridEvent::WinHide { grid: 7 });
+        let view = screen.window_view(8).unwrap();
+        let z: Vec<u64> = view.floats.iter().map(|f| f.zindex).collect();
+        assert_eq!(z, [10, 50]);
+    }
+
+    #[test]
+    fn float_rows_follow_view_scroll() {
+        // Cursor on row 2 with max 2 rows: view starts at window row 1
+        let mut screen = window(&[("a", false), ("b", false), ("c", false)], 3, (2, 0));
+        add_float(&mut screen, 5, 3, 0, "menu", 1);
+        add_float(&mut screen, 6, 0, 0, "gone", 1); // above the view
+        let view = screen.window_view(2).unwrap();
+        assert_eq!(view.floats.len(), 1);
+        assert_eq!(view.floats[0].row, 2); // window row 3 - first row 1
+    }
+
+    #[test]
+    fn total_columns_include_cursor_past_end() {
+        let screen = window(&[("abc", false)], 1, (0, 3));
+        assert_eq!(screen.window_view(8).unwrap().total_columns(), 4);
     }
 
     #[test]
