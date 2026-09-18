@@ -28,7 +28,8 @@
 │    WaylandState  protocol handles, serial, virtual keyboard    │
 │                                                                │
 │  Calloop sources:                                              │
-│    WaylandSource, SIGUSR1 ping, repeat timer, display timer    │
+│    WaylandSource, SIGINT/SIGTERM, SIGUSR1 ping (toggle),       │
+│    Neovim wake ping, repeat timer, keypress/animation timer    │
 └──────────┬──────────────────────────────────────┬──────────────┘
            │ ToNeovim (crossbeam ch)              │ PopupContent
            ▼                                      ▼
@@ -119,10 +120,11 @@ commits all lines joined with `\n`.
               SIGUSR1             keymap event
  Disabled ──────────> Enabling ──────────────> Enabled         
      ^                                             │
-     │              disable() (toggle-off/commit)  │
+     │        disable() (toggle-off, Neovim exit)  │
      └─────────────────────────────────────────────┘
 ```
 
+- Commit keeps the IME enabled (the buffer is cleared and insert mode restored)
 - Deactivate/Activate cycle: Enabled → release grab → re-grab → Enabling → keymap → Enabled (state restored)
 - Activate/Deactivate are deferred to the `Done` event and processed together (deactivate first), so a window switch becomes a single release + re-grab
 
@@ -184,3 +186,21 @@ Neovim buffer = N lines → app preedit = none → popup = window grid (up to MA
 ```
 
 `<CR>` is a native newline. `<CR>`/`<BS>`/commit key pass through only when the whole buffer is empty. The commit key and IME off commit all lines joined with `\n` (IME off uses `BufferMirror`). Trailing empty lines are kept.
+
+## 6. Design Decisions
+
+### Commit only via an explicit keybind (no `:w` commit)
+
+Committing on `:w` would need a side channel to notice the write: watching a
+file (inotify), parsing `msg_show`, a FIFO, or an autocmd calling back over
+RPC. A file leaves IME input on disk, the others race with the key flow or
+depend on fragile heuristics. The commit key (and IME off) are the only commit
+paths, and the buffer keeps `buftype=nofile` so `:q` never hits E37.
+
+### One unified popup
+
+The protocol allows several `zwp_input_popup_surface_v2` surfaces, but the
+compositor places each one near the text cursor on its own, so a second
+surface (e.g. for candidates) cannot be positioned relative to the first. The
+window grid, keypress/mode row and candidates share one popup laid out by
+`layout.rs`.
