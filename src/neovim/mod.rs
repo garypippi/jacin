@@ -16,9 +16,7 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 use crate::config::Config;
 
-pub use protocol::{
-    CandidateInfo, FromNeovim, PendingState, PreeditInfo, ToNeovim, VisualSelection,
-};
+pub use protocol::{FromNeovim, PendingState, ToNeovim, VisualSelection};
 
 /// Channel capacity for Neovim communication
 /// This provides backpressure if messages accumulate

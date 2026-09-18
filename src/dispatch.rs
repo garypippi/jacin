@@ -221,7 +221,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 // Process deactivate first (like fcitx5)
                 if pending_deactivate {
                     state.wayland.active = false;
-                    if state.ime.is_enabled() {
+                    if state.model.ime.is_enabled() {
                         // Clear local state (don't send Wayland protocol requests
                         // while deactivated — compositor clears preedit automatically)
                         state.reset_ime_state();
@@ -235,12 +235,12 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 // Then process activate
                 if pending_activate {
                     state.wayland.active = true;
-                    if state.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
+                    if state.model.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
                         log::debug!("[IME] Re-grabbing keyboard after activation");
                         state.wayland.grab_keyboard();
                         state.keyboard.pending_keymap = true;
                         state.keyboard.is_reactivation = true;
-                        state.ime.start_enabling();
+                        state.model.ime.start_enabling();
                     }
                 }
             }
@@ -286,12 +286,14 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             state.wayland.clear_modifiers();
 
                             // Complete enabling if transitioning
-                            if state.ime.complete_enabling() || state.ime.is_fully_enabled() {
+                            if state.model.ime.complete_enabling()
+                                || state.model.ime.is_fully_enabled()
+                            {
                                 // Set vim_mode for popup display to match initial mode
                                 if state.config.behavior.startinsert {
-                                    state.view.set_vim_mode("i");
+                                    state.model.view.set_vim_mode("i");
                                 } else {
-                                    state.view.set_vim_mode("n");
+                                    state.model.view.set_vim_mode("n");
                                 }
                                 state.keyboard.mark_ready();
                                 if let Some(ref nvim) = state.nvim {

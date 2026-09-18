@@ -16,7 +16,8 @@
 │                                                                │
 │  dispatch.rs     Wayland event dispatch (key, activate, etc.)  │
 │  input.rs        handle_key → keysym→Vim notation → ToNeovim  │
-│  coordinator.rs  handle_nvim_message → update preedit/popup    │
+│  model.rs        Model::reduce(FromNeovim) → Vec<Effect>       │
+│  coordinator.rs  apply_effects → preedit/commit/popup          │
 │                                                                │
 │  State:                                                        │
 │    ImeState      mode (Disabled/Enabling/Enabled), preedit     │
@@ -142,6 +143,12 @@ Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and
 - IME only reads Neovim's buffer via `collect_snapshot()`, never writes directly
 - `ImeState.preedit` is a cache of Neovim's response — never edited locally
 - All text manipulation goes through `nvim.input()` to preserve undo/redo/macros/plugins
+
+### Reducer + Effects
+
+- `Model::reduce(msg, active) -> Vec<Effect>` (model.rs) is the only place that updates IME state from Neovim messages; it performs no I/O
+- `State::apply_effects` (coordinator.rs) executes effects: compositor preedit/commit, popup render, passthrough, Neovim input
+- Replay tests feed `FromNeovim` sequences (tests/fixtures) through the real reducer
 
 ### Dual Display
 

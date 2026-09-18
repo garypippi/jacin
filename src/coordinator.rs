@@ -1,18 +1,22 @@
 use std::sync::atomic::Ordering;
 
 use crate::State;
+use crate::model::Effect;
 use crate::neovim::{self, FromNeovim};
 use crate::ui::PopupContent;
 
 impl State {
-    /// Common cleanup shared by toggle-off, deactivate, and NvimExited:
-    /// cancel timers, clear all display state, release keyboard grab.
+    /// Common cleanup shared by toggle-off and deactivate:
+    /// clear all model display state and release IME resources.
     pub(crate) fn reset_ime_state(&mut self) {
+        self.model.reset();
+        self.release_ime_resources();
+    }
+
+    /// Cancel timers, hide popup, release keyboard grab (non-model cleanup).
+    fn release_ime_resources(&mut self) {
         self.repeat.cancel();
         self.repeat_timer_token = None;
-        self.ime.clear_preedit();
-        self.view.clear();
-        self.keypress.clear();
         self.keypress_timer_token = None;
         self.hide_popup();
         self.wayland.release_keyboard();
@@ -20,7 +24,7 @@ impl State {
     }
 
     pub(crate) fn handle_ime_toggle(&mut self) {
-        let was_enabled = self.ime.is_enabled();
+        let was_enabled = self.model.ime.is_enabled();
         log::info!("[IME] Toggle: was_enabled = {}", was_enabled);
 
         if !was_enabled {
@@ -42,14 +46,14 @@ impl State {
                 log::debug!("[IME] Grabbing keyboard");
                 self.wayland.grab_keyboard();
                 self.keyboard.pending_keymap = true;
-                self.ime.start_enabling();
+                self.model.ime.start_enabling();
             }
         } else {
             // Disable IME - commit preedit text BEFORE releasing keyboard
             // (must match Commit handler order: commit first, then release)
             log::debug!("[IME] Releasing keyboard");
-            if !self.ime.preedit.is_empty() {
-                self.wayland.commit_string(&self.ime.preedit);
+            if !self.model.ime.preedit.is_empty() {
+                self.wayland.commit_string(&self.model.ime.preedit);
             }
             self.reset_ime_state();
             // Clear Neovim buffer (must clear here, not rely on Deactivate —
@@ -57,119 +61,49 @@ impl State {
             if let Some(ref nvim) = self.nvim {
                 nvim.send_key("<Esc>ggdG");
             }
-            self.ime.disable();
+            self.model.ime.disable();
         }
     }
 
     pub(crate) fn handle_nvim_message(&mut self, msg: FromNeovim) {
-        match msg {
-            FromNeovim::Ready => {
-                log::info!("[NVIM] Backend ready!");
+        match &msg {
+            FromNeovim::Ready => log::info!("[NVIM] Backend ready!"),
+            FromNeovim::NvimExited => log::info!("[NVIM] Neovim exited, disabling IME"),
+            _ => log::debug!("[NVIM] {:?}", msg),
+        }
+        let effects = self.model.reduce(msg, self.wayland.active);
+        self.apply_effects(effects);
+    }
+
+    /// Execute side effects requested by `Model::reduce`.
+    fn apply_effects(&mut self, effects: Vec<Effect>) {
+        for effect in effects {
+            match effect {
+                Effect::SyncPreedit => self.update_preedit(),
+                Effect::Render => self.update_popup(),
+                Effect::CommitString(text) => self.wayland.commit_string(&text),
+                Effect::DeleteSurrounding { before, after } => {
+                    self.wayland.delete_surrounding(before, after);
+                }
+                Effect::PassthroughKey => self.passthrough_current_key(),
+                Effect::NvimInput(keys) => {
+                    if let Some(ref nvim) = self.nvim {
+                        nvim.send_key(keys);
+                    }
+                }
+                Effect::CancelToggle => self.toggle_flag.store(false, Ordering::SeqCst),
+                Effect::NvimExited => {
+                    // Clear compositor preedit (still active, compositor may show stale text)
+                    self.wayland.set_preedit("", 0, 0);
+                    self.release_ime_resources();
+                    self.nvim = None;
+                }
             }
-            FromNeovim::Preedit(info) => self.on_preedit(info),
-            FromNeovim::Commit(text) => self.on_commit(text),
-            FromNeovim::DeleteSurrounding { before, after } => {
-                self.on_delete_surrounding(before, after);
-            }
-            FromNeovim::Candidates(info) => self.on_candidates(info),
-            FromNeovim::VisualRange(selection) => self.on_visual_range(selection),
-            FromNeovim::PassthroughKey => self.on_passthrough_key(),
-            FromNeovim::KeyProcessed { .. } => {
-                // Acknowledgment only — consumed by wait_for_nvim_response
-            }
-            FromNeovim::CmdlineShow {
-                content,
-                pos,
-                firstc,
-                prompt,
-                level,
-            } => self.on_cmdline_show(content, pos, firstc, prompt, level),
-            FromNeovim::CmdlinePos { pos, level } => self.on_cmdline_pos(pos, level),
-            FromNeovim::CmdlineHide { level } => self.on_cmdline_hide(level),
-            FromNeovim::CmdlineCancelled { cmdtype, executed } => {
-                self.on_cmdline_cancelled(cmdtype, executed)
-            }
-            FromNeovim::CmdlineMessage { text, cmdtype } => self.on_cmdline_message(text, cmdtype),
-            FromNeovim::ModeChange(mode) => self.on_mode_change(mode),
-            FromNeovim::AutoCommit(text) => self.on_auto_commit(text),
-            FromNeovim::NvimExited => self.on_nvim_exited(),
         }
     }
 
-    fn on_preedit(&mut self, info: neovim::PreeditInfo) {
-        log::debug!(
-            "[NVIM] Preedit: {:?}, cursor: {}..{}, mode: {}",
-            info.text,
-            info.cursor_begin,
-            info.cursor_end,
-            info.mode
-        );
-        if !self.ime.is_fully_enabled() {
-            log::debug!("[NVIM] Ignoring Preedit (IME not fully enabled)");
-            return;
-        }
-        self.ime
-            .set_preedit(info.text, info.cursor_begin, info.cursor_end);
-        self.view.set_vim_mode(&info.mode);
-        self.view.recording = info.recording;
-        self.update_preedit();
-    }
-
-    fn on_commit(&mut self, text: String) {
-        log::debug!("[NVIM] Commit: {:?}", text);
-        self.ime.clear_preedit();
-        self.view.clear_candidates();
-        self.wayland.commit_string(&text);
-        self.keypress.clear();
-        self.keypress_timer_token = None;
-        // Consume any pending toggle (e.g., Alt in commit key <A-;> also
-        // triggers SIGUSR1 toggle — don't let it re-enable after commit)
-        self.toggle_flag.store(false, Ordering::SeqCst);
-        // Clear Neovim buffer and stay in insert mode for next input
-        if let Some(ref nvim) = self.nvim {
-            nvim.send_key("<Esc>ggdGi");
-        }
-        // Keep IME enabled — show icon-only popup
-        self.update_popup();
-    }
-
-    fn on_delete_surrounding(&mut self, before: u32, after: u32) {
-        log::debug!(
-            "[NVIM] DeleteSurrounding: before={}, after={}",
-            before,
-            after
-        );
-        self.wayland.delete_surrounding(before, after);
-    }
-
-    fn on_candidates(&mut self, info: neovim::CandidateInfo) {
-        log::debug!(
-            "[NVIM] Candidates: {:?}, selected={}",
-            info.candidates,
-            info.selected
-        );
-        if !self.ime.is_fully_enabled() {
-            return;
-        }
-        if info.candidates.is_empty() {
-            self.hide_candidates();
-        } else {
-            self.view.set_candidates(info.candidates, info.selected);
-            self.update_popup();
-        }
-    }
-
-    fn on_visual_range(&mut self, selection: Option<neovim::VisualSelection>) {
-        log::debug!("[NVIM] VisualRange: {:?}", selection);
-        if !self.ime.is_fully_enabled() {
-            return;
-        }
-        self.view.visual = selection;
-        self.update_popup();
-    }
-
-    fn on_passthrough_key(&mut self) {
-        // Send the current key through the virtual keyboard to the focused app
+    /// Send the key being processed through the virtual keyboard to the focused app
+    fn passthrough_current_key(&mut self) {
         if let Some(keycode) = self.current_keycode {
             self.wayland.send_virtual_key(
                 keycode,
@@ -183,130 +117,16 @@ impl State {
         }
     }
 
-    fn on_cmdline_show(
-        &mut self,
-        content: String,
-        pos: usize,
-        firstc: String,
-        prompt: String,
-        level: u64,
-    ) {
-        log::debug!(
-            "[NVIM] CmdlineShow: firstc={:?}, prompt={:?}, content={:?}, pos={}, level={}",
-            firstc,
-            prompt,
-            content,
-            pos,
-            level
-        );
-        if !self.ime.is_fully_enabled() {
-            return;
-        }
-        // Display prompt + content for @-mode, firstc + content for :/?
-        let prefix = if !prompt.is_empty() { &prompt } else { &firstc };
-        self.view.show_cmdline(prefix, &content, pos, level);
-        self.keypress.clear();
-        self.update_popup();
-    }
-
-    fn on_cmdline_pos(&mut self, pos: usize, level: u64) {
-        if !self.ime.is_fully_enabled() {
-            return;
-        }
-        if self.view.update_cmdline_cursor(pos, level) {
-            self.update_popup();
-        }
-    }
-
-    fn on_cmdline_hide(&mut self, level: u64) {
-        log::debug!("[NVIM] CmdlineHide (level={})", level);
-        // Only clear if the level matches the active cmdline
-        if self.view.hide_cmdline(level) {
-            self.keypress.clear();
-            self.update_popup();
-        }
-    }
-
-    fn on_cmdline_cancelled(&mut self, cmdtype: String, executed: bool) {
-        log::debug!(
-            "[NVIM] CmdlineCancelled ({}, executed={})",
-            cmdtype,
-            executed
-        );
-        self.keypress.clear();
-        self.view.cmdline = None;
-        // ':' commands usually return to normal mode; '@' input() prompts return
-        // to insert mode. ModeChanged snapshot will still correct this if needed.
-        self.view
-            .set_vim_mode(if cmdtype == "@" { "i" } else { "n" });
-        self.keypress_timer_token = None;
-        self.update_popup();
-    }
-
-    fn on_cmdline_message(&mut self, text: String, cmdtype: String) {
-        log::debug!("[NVIM] CmdlineMessage ({}): {:?}", cmdtype, text);
-        if !self.ime.is_fully_enabled() {
-            return;
-        }
-        if text.is_empty() {
-            self.view.clear_transient_message();
-        } else {
-            self.view.set_transient_message(text);
-        }
-        self.update_popup();
-    }
-
-    fn on_mode_change(&mut self, mode: String) {
-        if !self.ime.is_fully_enabled() {
-            return;
-        }
-        log::debug!("[NVIM] ModeChange -> {:?}", mode);
-        self.view.set_vim_mode(&mode);
-        self.update_popup();
-    }
-
-    fn on_auto_commit(&mut self, text: String) {
-        log::debug!("[NVIM] AutoCommit: {:?}", text);
-        if text.is_empty() {
-            return;
-        }
-        // Allow auto-commit even if IME isn't fully enabled (e.g. :wq triggers
-        // Neovim exit before we process the commit notification).
-        if !self.ime.is_fully_enabled() {
-            if !self.wayland.active {
-                return;
-            }
-            self.wayland.commit_string(&text);
-            return;
-        }
-        self.wayland.commit_string(&text);
-        self.ime.clear_preedit();
-        self.view.clear_candidates();
-        self.view.visual = None;
-        self.keypress.clear();
-        self.keypress_timer_token = None;
-        self.update_popup();
-    }
-
-    fn on_nvim_exited(&mut self) {
-        log::info!("[NVIM] Neovim exited, disabling IME");
-        // Clear compositor preedit (still active, compositor may show stale text)
-        self.wayland.set_preedit("", 0, 0);
-        self.reset_ime_state();
-        self.ime.disable();
-        self.nvim = None;
-    }
-
     pub(crate) fn update_preedit(&mut self) {
-        let cursor_begin = self.ime.cursor_begin as i32;
-        let cursor_end = self.ime.cursor_end as i32;
+        let cursor_begin = self.model.ime.cursor_begin as i32;
+        let cursor_end = self.model.ime.cursor_end as i32;
         // Don't send preedit to compositor when IME is disabled or deactivated.
-        if self.wayland.active && self.ime.is_enabled() {
+        if self.wayland.active && self.model.ime.is_enabled() {
             self.wayland
-                .set_preedit(&self.ime.preedit, cursor_begin, cursor_end);
+                .set_preedit(&self.model.ime.preedit, cursor_begin, cursor_end);
             log::debug!(
                 "[PREEDIT] updated: {:?}, cursor: {}..{}",
-                self.ime.preedit,
+                self.model.ime.preedit,
                 cursor_begin,
                 cursor_end
             );
@@ -314,8 +134,8 @@ impl State {
             log::debug!(
                 "[PREEDIT] skipped (active={}, enabled={}): {:?}",
                 self.wayland.active,
-                self.ime.is_enabled(),
-                self.ime.preedit
+                self.model.ime.is_enabled(),
+                self.model.ime.preedit
             );
         }
         // Show preedit window with cursor visualization
@@ -328,20 +148,21 @@ impl State {
         // After toggle-off, Neovim sends a burst of push notifications (<Esc>ggdG
         // triggers mode changes and autocmds) — without this guard, each notification
         // would rebuild PopupContent and potentially recreate/destroy surfaces.
-        if !self.ime.is_enabled() {
+        if !self.model.ime.is_enabled() {
             self.hide_popup();
             return;
         }
         let t = std::time::Instant::now();
         let content = PopupContent {
-            preedit: self.ime.preedit.clone(),
-            cursor_begin: self.ime.cursor_begin,
-            cursor_end: self.ime.cursor_end,
-            vim_mode: self.view.vim_mode.clone(),
-            keypress_entries: if let Some(ref cmdline) = self.view.cmdline {
+            preedit: self.model.ime.preedit.clone(),
+            cursor_begin: self.model.ime.cursor_begin,
+            cursor_end: self.model.ime.cursor_end,
+            vim_mode: self.model.view.vim_mode.clone(),
+            keypress_entries: if let Some(ref cmdline) = self.model.view.cmdline {
                 vec![cmdline.text.clone()]
-            } else if self.keypress.should_show() {
-                self.keypress
+            } else if self.model.keypress.should_show() {
+                self.model
+                    .keypress
                     .entries()
                     .iter()
                     .map(|e| e.text.clone())
@@ -349,18 +170,18 @@ impl State {
             } else {
                 Vec::new()
             },
-            candidates: self.view.candidates.clone(),
-            selected: self.view.selected_candidate,
-            transient_message: if self.view.candidates.is_empty() {
-                self.view.transient_message.clone()
+            candidates: self.model.view.candidates.clone(),
+            selected: self.model.view.selected_candidate,
+            transient_message: if self.model.view.candidates.is_empty() {
+                self.model.view.transient_message.clone()
             } else {
                 None
             },
-            visual_selection: self.view.visual.clone(),
-            ime_enabled: self.ime.is_enabled(),
-            recording: self.view.recording.clone(),
+            visual_selection: self.model.view.visual.clone(),
+            ime_enabled: self.model.ime.is_enabled(),
+            recording: self.model.view.recording.clone(),
             rec_blink_on: self.animations.rec_blink.on,
-            cmdline_cursor_pos: self.view.cmdline.as_ref().map(|c| c.cursor_byte),
+            cmdline_cursor_pos: self.model.view.cmdline.as_ref().map(|c| c.cursor_byte),
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();
@@ -377,242 +198,5 @@ impl State {
         if let Some(ref mut popup) = self.popup {
             popup.hide();
         }
-    }
-
-    pub(crate) fn hide_candidates(&mut self) {
-        self.view.clear_candidates();
-        self.update_popup();
-    }
-}
-
-#[cfg(test)]
-mod replay_tests {
-    use serde::Deserialize;
-
-    use crate::neovim::FromNeovim;
-    use crate::state::{ImeState, KeypressState, NvimView};
-
-    /// Minimal state for replaying FromNeovim messages without Wayland/popup.
-    struct ReplayState {
-        ime: ImeState,
-        keypress: KeypressState,
-        view: NvimView,
-        committed: Vec<String>,
-        exited: bool,
-        wayland_active: bool,
-    }
-
-    impl ReplayState {
-        fn new() -> Self {
-            let mut ime = ImeState::new();
-            // Start as fully enabled (most replay scenarios assume enabled IME)
-            ime.start_enabling();
-            ime.complete_enabling();
-            Self {
-                ime,
-                keypress: KeypressState::new(),
-                view: NvimView::new(),
-                committed: Vec::new(),
-                exited: false,
-                wayland_active: true,
-            }
-        }
-
-        fn apply(&mut self, msg: FromNeovim) {
-            match msg {
-                FromNeovim::Ready
-                | FromNeovim::KeyProcessed { .. }
-                | FromNeovim::PassthroughKey => {}
-                FromNeovim::DeleteSurrounding { .. } => {}
-                FromNeovim::Preedit(info) => {
-                    if self.ime.is_fully_enabled() {
-                        self.ime
-                            .set_preedit(info.text, info.cursor_begin, info.cursor_end);
-                        self.view.set_vim_mode(&info.mode);
-                        self.view.recording = info.recording;
-                    }
-                }
-                FromNeovim::Commit(text) => {
-                    self.committed.push(text);
-                    self.ime.clear_preedit();
-                    self.view.clear_candidates();
-                    self.keypress.clear();
-                }
-                FromNeovim::Candidates(info) => {
-                    if self.ime.is_fully_enabled() {
-                        if info.candidates.is_empty() {
-                            self.view.clear_candidates();
-                        } else {
-                            self.view.set_candidates(info.candidates, info.selected);
-                        }
-                    }
-                }
-                FromNeovim::VisualRange(selection) => {
-                    if self.ime.is_fully_enabled() {
-                        self.view.visual = selection;
-                    }
-                }
-                FromNeovim::CmdlineShow {
-                    content,
-                    pos,
-                    firstc,
-                    prompt,
-                    level,
-                } => {
-                    if self.ime.is_fully_enabled() {
-                        let prefix = if !prompt.is_empty() { &prompt } else { &firstc };
-                        self.view.show_cmdline(prefix, &content, pos, level);
-                        self.keypress.clear();
-                    }
-                }
-                FromNeovim::CmdlinePos { pos, level } => {
-                    if self.ime.is_fully_enabled() {
-                        self.view.update_cmdline_cursor(pos, level);
-                    }
-                }
-                FromNeovim::CmdlineHide { level } => {
-                    if self.view.hide_cmdline(level) {
-                        self.keypress.clear();
-                    }
-                }
-                FromNeovim::CmdlineCancelled { cmdtype, .. } => {
-                    self.keypress.clear();
-                    self.view.cmdline = None;
-                    self.view
-                        .set_vim_mode(if cmdtype == "@" { "i" } else { "n" });
-                }
-                FromNeovim::CmdlineMessage { text, .. } => {
-                    if self.ime.is_fully_enabled() {
-                        self.view.set_transient_message(text);
-                    }
-                }
-                FromNeovim::ModeChange(mode) => {
-                    if self.ime.is_fully_enabled() {
-                        self.view.set_vim_mode(&mode);
-                    }
-                }
-                FromNeovim::AutoCommit(text) => {
-                    if text.is_empty() {
-                        return;
-                    }
-                    if !self.ime.is_fully_enabled() {
-                        if self.wayland_active {
-                            self.committed.push(text);
-                        }
-                    } else {
-                        self.committed.push(text);
-                        self.ime.clear_preedit();
-                        self.view.clear_candidates();
-                        self.view.visual = None;
-                        self.keypress.clear();
-                    }
-                }
-                FromNeovim::NvimExited => {
-                    self.ime.clear_preedit();
-                    self.view.clear();
-                    self.keypress.clear();
-                    self.ime.disable();
-                    self.exited = true;
-                }
-            }
-        }
-    }
-
-    #[derive(Deserialize)]
-    struct Fixture {
-        #[allow(dead_code)]
-        description: String,
-        messages: Vec<serde_json::Value>,
-        expect: Expected,
-    }
-
-    #[derive(Deserialize)]
-    struct Expected {
-        preedit: String,
-        cursor_begin: usize,
-        cursor_end: usize,
-        vim_mode: String,
-        candidates_count: usize,
-        committed: Vec<String>,
-        exited: bool,
-    }
-
-    fn run_fixture(path: &str) {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("failed to read fixture {path}: {e}"));
-        let fixture: Fixture = serde_json::from_str(&content)
-            .unwrap_or_else(|e| panic!("failed to parse fixture {path}: {e}"));
-
-        let mut state = ReplayState::new();
-        for (i, value) in fixture.messages.iter().enumerate() {
-            let msg: FromNeovim = serde_json::from_value(value.clone())
-                .unwrap_or_else(|e| panic!("failed to parse message {i} in {path}: {e}"));
-            state.apply(msg);
-        }
-
-        let expect = &fixture.expect;
-        assert_eq!(
-            state.ime.preedit, expect.preedit,
-            "preedit mismatch in {path}"
-        );
-        assert_eq!(
-            state.ime.cursor_begin, expect.cursor_begin,
-            "cursor_begin mismatch in {path}"
-        );
-        assert_eq!(
-            state.ime.cursor_end, expect.cursor_end,
-            "cursor_end mismatch in {path}"
-        );
-        assert_eq!(
-            state.view.vim_mode, expect.vim_mode,
-            "vim_mode mismatch in {path}"
-        );
-        assert_eq!(
-            state.view.candidates.len(),
-            expect.candidates_count,
-            "candidates_count mismatch in {path}"
-        );
-        assert_eq!(
-            state.committed, expect.committed,
-            "committed mismatch in {path}"
-        );
-        assert_eq!(state.exited, expect.exited, "exited mismatch in {path}");
-    }
-
-    #[test]
-    fn replay_insert_and_commit() {
-        run_fixture("tests/fixtures/insert_and_commit.json");
-    }
-
-    #[test]
-    fn replay_candidates_and_select() {
-        run_fixture("tests/fixtures/candidates_and_select.json");
-    }
-
-    #[test]
-    fn replay_cmdline_and_cancel() {
-        run_fixture("tests/fixtures/cmdline_and_cancel.json");
-    }
-
-    #[test]
-    fn replay_nvim_exit() {
-        run_fixture("tests/fixtures/nvim_exit.json");
-    }
-
-    #[test]
-    fn replay_auto_commit_after_nvim_exit_still_commits() {
-        let mut state = ReplayState::new();
-        state.apply(FromNeovim::NvimExited);
-        state.apply(FromNeovim::AutoCommit("hel lo".to_string()));
-
-        assert_eq!(state.committed, vec!["hel lo".to_string()]);
-    }
-
-    #[test]
-    fn replay_auto_commit_ignores_empty_text() {
-        let mut state = ReplayState::new();
-        state.apply(FromNeovim::AutoCommit(String::new()));
-
-        assert!(state.committed.is_empty());
     }
 }

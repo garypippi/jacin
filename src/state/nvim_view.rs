@@ -46,10 +46,6 @@ pub struct NvimView {
 }
 
 impl NvimView {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Clear all observed display state except the vim mode
     /// (mode is re-established on enabling and by mode_change).
     pub fn clear(&mut self) {
@@ -146,7 +142,7 @@ mod tests {
 
     #[test]
     fn candidate_operations() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.set_candidates(vec!["a".into(), "b".into()], 1);
         assert_eq!(view.candidates.len(), 2);
         assert_eq!(view.selected_candidate, 1);
@@ -158,7 +154,7 @@ mod tests {
 
     #[test]
     fn candidates_clear_transient_message() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.set_transient_message("msg".into());
         view.set_candidates(vec!["a".into()], 0);
         assert!(!view.has_transient_message());
@@ -166,7 +162,7 @@ mod tests {
 
     #[test]
     fn transient_message_expires() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.set_transient_message("msg".into());
         assert!(!view.expire_transient_message());
 
@@ -178,7 +174,7 @@ mod tests {
 
     #[test]
     fn clear_keeps_vim_mode() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.set_vim_mode("n");
         view.recording = "q".into();
         view.set_candidates(vec!["a".into()], 0);
@@ -194,7 +190,7 @@ mod tests {
 
     #[test]
     fn show_cmdline_sets_text_cursor_and_mode() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.show_cmdline(":", "hello", 2, 1);
         let c = view.cmdline.as_ref().unwrap();
         assert_eq!(c.text, ":hello");
@@ -204,14 +200,14 @@ mod tests {
 
     #[test]
     fn show_cmdline_clamps_cursor_to_text_len() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.show_cmdline(":", "ab", 100, 1);
         assert_eq!(view.cmdline.unwrap().cursor_byte, 3); // clamped to ":ab".len()
     }
 
     #[test]
     fn cmdline_cursor_with_multibyte_prompt() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         // Prompt "辞書登録: " is 14 bytes in UTF-8 (4×3 + 1 + 1)
         view.show_cmdline("辞書登録: ", "test", 2, 1);
         assert_eq!(view.cmdline.unwrap().cursor_byte, 16); // 14 + 2
@@ -219,7 +215,7 @@ mod tests {
 
     #[test]
     fn update_cmdline_cursor_with_matching_level() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.show_cmdline(":", "hello", 0, 1);
         assert!(view.update_cmdline_cursor(3, 1));
         assert_eq!(view.cmdline.unwrap().cursor_byte, 4); // prefix(1) + 3
@@ -227,7 +223,7 @@ mod tests {
 
     #[test]
     fn update_cmdline_cursor_ignores_level_mismatch() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.show_cmdline(":", "hello", 0, 1);
         assert!(!view.update_cmdline_cursor(3, 2));
         assert_eq!(view.cmdline.unwrap().cursor_byte, 1);
@@ -235,7 +231,7 @@ mod tests {
 
     #[test]
     fn update_cmdline_cursor_clamps_to_text_len() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.show_cmdline(":", "ab", 0, 1);
         assert!(view.update_cmdline_cursor(100, 1));
         assert_eq!(view.cmdline.unwrap().cursor_byte, 3);
@@ -243,7 +239,7 @@ mod tests {
 
     #[test]
     fn hide_cmdline_respects_level() {
-        let mut view = NvimView::new();
+        let mut view = NvimView::default();
         view.show_cmdline(":", "x", 1, 1);
         assert!(!view.hide_cmdline(2));
         assert!(view.cmdline.is_some());

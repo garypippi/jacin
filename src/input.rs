@@ -88,7 +88,7 @@ impl State {
             // previous pending state
             let after = self
                 .wait_for_nvim_response()
-                .unwrap_or(self.keypress.pending_type);
+                .unwrap_or(self.model.keypress.pending_type);
 
             // Clear keycode after processing
             self.current_keycode = None;
@@ -101,22 +101,22 @@ impl State {
             // Keypress display: in insert mode, only show Ctrl/Alt modified keys
             // (e.g., <C-r>a, <C-w>) and pending register names (key after <C-r>);
             // suppress normal typing, <BS>, <CR>, etc.
-            let should_show_keypress = !self.view.vim_mode.starts_with('i')
+            let should_show_keypress = !self.model.view.vim_mode.starts_with('i')
                 || self.keyboard.ctrl_pressed
                 || self.keyboard.alt_pressed
-                || self.keypress.pending_type == PendingState::InsertRegister;
+                || self.model.keypress.pending_type == PendingState::InsertRegister;
 
             if should_show_keypress {
-                self.keypress.push_key(vim_key);
+                self.model.keypress.push_key(vim_key);
                 self.update_popup();
             }
 
-            self.keypress.set_pending(after);
+            self.model.keypress.set_pending(after);
         } else if is_printable(&utf8) {
             // Fallback: if no Neovim or no vim key, use local preedit
             if self.nvim.is_none() {
-                self.ime.preedit.push_str(&utf8);
-                log::debug!("[PREEDIT] buffer={:?}", self.ime.preedit);
+                self.model.ime.preedit.push_str(&utf8);
+                log::debug!("[PREEDIT] buffer={:?}", self.model.ime.preedit);
                 self.update_preedit();
             }
         } else {
@@ -125,7 +125,7 @@ impl State {
                 self.keyboard.ctrl_pressed
             );
         }
-        _perf.mode = self.view.vim_mode.clone();
+        _perf.mode = self.model.view.vim_mode.clone();
     }
 
     pub(crate) fn send_to_nvim(&self, key: &str) {

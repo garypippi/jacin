@@ -28,7 +28,8 @@ src/
   dispatch.rs                # Wayland Dispatch impls, memmap_keymap
   input.rs                   # Key processing, handle_key, send_to_nvim
   keysym.rs                  # keysym_to_vim (pure conversion function)
-  coordinator.rs             # Neovim response handling, IME toggle, preedit/popup coordination
+  model.rs                   # Model (ImeState + KeypressState + NvimView), reduce(FromNeovim) -> Vec<Effect>
+  coordinator.rs             # apply_effects, IME toggle, preedit/popup coordination
   config.rs                  # Config file loading (TOML), keybind defaults
   state/
     wayland.rs               # WaylandState (protocol handles, serial, virtual keyboard)
