@@ -76,8 +76,8 @@ impl State {
             FromNeovim::Candidates(info) => self.on_candidates(info),
             FromNeovim::VisualRange(selection) => self.on_visual_range(selection),
             FromNeovim::PassthroughKey => self.on_passthrough_key(),
-            FromNeovim::KeyProcessed => {
-                // Acknowledgment only — unblocks wait_for_nvim_response
+            FromNeovim::KeyProcessed { .. } => {
+                // Acknowledgment only — consumed by wait_for_nvim_response
             }
             FromNeovim::CmdlineShow {
                 content,
@@ -422,7 +422,9 @@ mod replay_tests {
 
         fn apply(&mut self, msg: FromNeovim) {
             match msg {
-                FromNeovim::Ready | FromNeovim::KeyProcessed | FromNeovim::PassthroughKey => {}
+                FromNeovim::Ready
+                | FromNeovim::KeyProcessed { .. }
+                | FromNeovim::PassthroughKey => {}
                 FromNeovim::DeleteSurrounding { .. } => {}
                 FromNeovim::Preedit(info) => {
                     if self.ime.is_fully_enabled() {

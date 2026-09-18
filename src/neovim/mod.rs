@@ -16,7 +16,6 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 use crate::config::Config;
 
-pub use handler::pending_state;
 pub use protocol::{
     CandidateInfo, FromNeovim, PendingState, PreeditInfo, ToNeovim, VisualSelection,
 };

@@ -2,7 +2,7 @@ use wayland_client::protocol::wl_keyboard;
 
 use crate::State;
 use crate::keysym::{is_printable, keysym_to_vim};
-use crate::neovim::{PendingState, pending_state};
+use crate::neovim::PendingState;
 
 /// Scope guard that logs elapsed time on drop.
 struct PerfGuard {
@@ -84,14 +84,14 @@ impl State {
             self.current_keycode = Some(key);
 
             self.send_to_nvim(vim_key);
-            // Wait for Neovim response with timeout
-            self.wait_for_nvim_response();
+            // Wait for Neovim response with timeout; on timeout keep the
+            // previous pending state
+            let after = self
+                .wait_for_nvim_response()
+                .unwrap_or(self.keypress.pending_type);
 
             // Clear keycode after processing
             self.current_keycode = None;
-
-            // Check state after Neovim response
-            let after = pending_state().load();
 
             // Command-line mode: display updates come via ext_cmdline (cmdline_show)
             if after == PendingState::CommandLine {
@@ -147,7 +147,9 @@ impl State {
         }
     }
 
-    pub(crate) fn wait_for_nvim_response(&mut self) {
+    /// Handle Neovim messages until `KeyProcessed` arrives (or 200ms deadline).
+    /// Returns the pending state reported by `KeyProcessed`, None on timeout.
+    pub(crate) fn wait_for_nvim_response(&mut self) -> Option<PendingState> {
         use crate::neovim::FromNeovim;
 
         let _perf = PerfGuard::new("nvim_rpc");
@@ -158,18 +160,13 @@ impl State {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 log::debug!("[NVIM] wait_for_nvim_response: deadline reached");
-                break;
+                return None;
             }
             let msg = self.nvim.as_ref().and_then(|n| n.recv_timeout(remaining));
             match msg {
-                Some(msg) => {
-                    let is_key_processed = matches!(msg, FromNeovim::KeyProcessed);
-                    self.handle_nvim_message(msg);
-                    if is_key_processed {
-                        break;
-                    }
-                }
-                None => break,
+                Some(FromNeovim::KeyProcessed { pending }) => return Some(pending),
+                Some(msg) => self.handle_nvim_message(msg),
+                None => return None,
             }
         }
     }

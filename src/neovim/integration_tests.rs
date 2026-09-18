@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{FromNeovim, spawn_neovim};
+use super::{FromNeovim, PendingState, spawn_neovim};
 use crate::config::Config;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -201,6 +201,59 @@ fn startinsert_false_starts_in_normal_mode() {
     assert!(
         msg.is_some(),
         "expected Preedit with text 'h' after explicit 'i' (startinsert=false)"
+    );
+
+    shutdown_and_wait(&handle);
+}
+
+/// Send a key and collect messages up to and including its `KeyProcessed`.
+fn send_and_collect(handle: &super::NeovimHandle, key: &str) -> Vec<FromNeovim> {
+    handle.send_key(key);
+    let deadline = Instant::now() + MSG_TIMEOUT;
+    let mut msgs = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let msg = handle
+            .recv_timeout(remaining)
+            .unwrap_or_else(|| panic!("no KeyProcessed for key {key:?}"));
+        let done = matches!(msg, FromNeovim::KeyProcessed { .. });
+        msgs.push(msg);
+        if done {
+            return msgs;
+        }
+    }
+}
+
+fn ack_pending(msgs: &[FromNeovim]) -> PendingState {
+    match msgs.last() {
+        Some(FromNeovim::KeyProcessed { pending }) => *pending,
+        other => panic!("expected KeyProcessed last, got {other:?}"),
+    }
+}
+
+#[test]
+#[ignore]
+fn getchar_completion_acknowledges_key_with_pending_state() {
+    let handle =
+        spawn_neovim(clean_config_with_startinsert(false), None).expect("failed to spawn neovim");
+    recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
+        .expect("Neovim did not send Ready");
+
+    for key in ["i", "a", "b", "c", "<Esc>"] {
+        send_and_collect(&handle, key);
+    }
+
+    // "r" blocks in getchar → acknowledged with Getchar pending
+    let msgs = send_and_collect(&handle, "r");
+    assert_eq!(ack_pending(&msgs), PendingState::Getchar);
+
+    // Completing getchar must still be acknowledged, after the snapshot
+    let msgs = send_and_collect(&handle, "x");
+    assert_eq!(ack_pending(&msgs), PendingState::None);
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, FromNeovim::Preedit(info) if info.text == "abx")),
+        "expected Preedit 'abx' before KeyProcessed, got {msgs:?}"
     );
 
     shutdown_and_wait(&handle);

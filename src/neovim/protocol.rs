@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Pending state for multi-key sequences in the Neovim handler.
 ///
 /// These states are mutually exclusive — only one can be active at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum PendingState {
     /// No pending operation
@@ -113,8 +113,9 @@ pub enum FromNeovim {
     Candidates(CandidateInfo),
     /// Visual selection range (None = no visual selection)
     VisualRange(Option<VisualSelection>),
-    /// Key was processed (acknowledgment for paths that send no data)
-    KeyProcessed,
+    /// Key was processed. Sent exactly once per key, after any data messages
+    /// for that key, carrying the pending state after processing.
+    KeyProcessed { pending: PendingState },
     /// Command-line shown (from ext_cmdline redraw event)
     CmdlineShow {
         content: String,
@@ -483,7 +484,9 @@ mod tests {
     fn from_neovim_simple_variants_roundtrip() {
         // Test all data-less or simple variants
         for msg in [
-            FromNeovim::KeyProcessed,
+            FromNeovim::KeyProcessed {
+                pending: PendingState::Motion,
+            },
             FromNeovim::PassthroughKey,
             FromNeovim::NvimExited,
             FromNeovim::CmdlineShow {

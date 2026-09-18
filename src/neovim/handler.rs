@@ -21,14 +21,6 @@ use super::protocol::{
 };
 use crate::config::Config;
 
-/// Single pending state for multi-key sequences (mutually exclusive).
-static PENDING: AtomicPendingState = AtomicPendingState::new();
-
-/// Get a reference to the global pending state.
-pub fn pending_state() -> &'static AtomicPendingState {
-    &PENDING
-}
-
 type NvimWriter = nvim_rs::compat::tokio::Compat<tokio::process::ChildStdin>;
 type NvimResult<T> = Result<T, NvimError>;
 
@@ -96,6 +88,8 @@ fn send_msg(tx: &MainTx, msg: FromNeovim) {
 #[derive(Clone)]
 pub struct NvimHandler {
     tx: MainTx,
+    /// Pending state shared with the key loop (`KeySession`).
+    pending: Arc<AtomicPendingState>,
     /// Cached popupmenu items for popupmenu_select (ext_popupmenu).
     last_popupmenu_items: Arc<Mutex<Vec<String>>>,
 }
@@ -173,7 +167,7 @@ impl Handler for NvimHandler {
             && let Some(map) = value.as_map()
         {
             if let Some((executed, cmdtype)) = self.handle_ime_cmdline(map) {
-                PENDING.clear();
+                self.pending.clear();
                 // After a ':' command executes, the buffer may have changed
                 // (e.g. :tabnew, :bnext). Query snapshot to update preedit.
                 if executed && cmdtype == ":" {
@@ -284,7 +278,7 @@ impl NvimHandler {
         // plugin-triggered command-line mode (e.g., input() from
         // skkeleton dictionary registration) also suppresses the
         // c-mode recovery in handle_snapshot_response.
-        PENDING.store(PendingState::CommandLine);
+        self.pending.store(PendingState::CommandLine);
         log::debug!(
             "[NVIM] cmdline_show: firstc={:?}, prompt={:?}, content={:?}, pos={}, level={}",
             firstc,
@@ -516,7 +510,7 @@ impl NvimHandler {
 
     /// Handle ime_cmdline notification (CmdlineLeave autocmd).
     /// Returns Some((executed, cmdtype)) if the event was processed, None otherwise.
-    /// Note: caller is responsible for clearing PENDING state.
+    /// Note: caller is responsible for clearing the pending state.
     fn handle_ime_cmdline(&self, map: &[(Value, Value)]) -> Option<(bool, String)> {
         let get_str = |field: &str| -> Option<String> {
             map.iter()
@@ -557,6 +551,7 @@ mod tests {
         (
             NvimHandler {
                 tx: MainTx::new(tx, None),
+                pending: Arc::new(AtomicPendingState::new()),
                 last_popupmenu_items: Arc::new(Mutex::new(Vec::new())),
             },
             rx,
@@ -608,7 +603,6 @@ mod tests {
 
     #[test]
     fn cmdline_show_and_hide_emit_messages_and_set_pending_state() {
-        PENDING.clear();
         let (handler, rx) = make_handler();
 
         handler.handle_cmdline_show(&Value::Array(vec![
@@ -620,7 +614,7 @@ mod tests {
             Value::from(1),
         ]));
 
-        assert_eq!(PENDING.load(), PendingState::CommandLine);
+        assert_eq!(handler.pending.load(), PendingState::CommandLine);
         match rx.try_recv().unwrap() {
             FromNeovim::CmdlineShow {
                 content,
@@ -643,7 +637,6 @@ mod tests {
             FromNeovim::CmdlineHide { level } => assert_eq!(level, 1),
             other => panic!("expected CmdlineHide, got {other:?}"),
         }
-        PENDING.clear();
     }
 
     #[test]
@@ -799,8 +792,11 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
         cmd.arg("--clean");
     }
 
+    // Fresh pending state per Neovim process (not carried over on respawn)
+    let pending = Arc::new(AtomicPendingState::new());
     let handler = NvimHandler {
         tx: tx.clone(),
+        pending: pending.clone(),
         last_popupmenu_items: Arc::new(Mutex::new(Vec::new())),
     };
     let (nvim, io_handler, _child) = new_child_cmd(&mut cmd, handler)
@@ -831,11 +827,16 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
         });
     }
 
-    // Track last known vim mode for insert-mode fire-and-forget optimization.
-    let mut last_mode = if config.behavior.startinsert {
-        String::from("i")
-    } else {
-        String::from("n")
+    let mut session = KeySession {
+        nvim: nvim.clone(),
+        tx: tx.clone(),
+        pending,
+        commit_key: config.keybinds.commit.clone(),
+        last_mode: if config.behavior.startinsert {
+            String::from("i")
+        } else {
+            String::from("n")
+        },
     };
 
     // Main loop - process messages from IME
@@ -847,9 +848,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
                     continue;
                 }
                 log::debug!("[NVIM] Received key: {:?}", key);
-                if let Err(e) = handle_key(&nvim, &key, &tx, config, &mut last_mode).await {
-                    log::error!("[NVIM] Key handling error: {}", e);
-                }
+                session.process_key(&key).await;
             }
             Ok(ToNeovim::Shutdown) | Err(_) => {
                 log::info!("[NVIM] Shutting down...");
@@ -951,349 +950,313 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
     Ok(())
 }
 
-async fn handle_key(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-    config: &Config,
-    last_mode: &mut String,
-) -> anyhow::Result<()> {
-    // Dispatch through handlers in priority order.
-    // Each returns Ok(true) if it fully handled the key.
-    if handle_commandline_mode(nvim, key, tx).await?
-        || handle_getchar_pending(nvim, key, tx, last_mode).await?
-        || handle_commit_key(nvim, key, tx, config, last_mode).await?
-        || handle_backspace(nvim, key, tx).await?
-        || handle_enter(nvim, key, tx).await?
-        || handle_insert_register(nvim, key, tx).await?
-        || handle_normal_register(nvim, key, tx).await?
-    {
-        return Ok(());
-    }
+/// Per-session key processing state, owned by the key loop.
+struct KeySession {
+    nvim: Neovim<NvimWriter>,
+    tx: MainTx,
+    /// Pending state for multi-key sequences, shared with `NvimHandler`
+    /// (redraw events may set CommandLine, CmdlineLeave clears it).
+    pending: Arc<AtomicPendingState>,
+    commit_key: String,
+    /// Last known vim mode for insert-mode fire-and-forget optimization.
+    last_mode: String,
+}
 
-    // Register-pending and motion-pending may send the key themselves.
-    // `key_sent` tracks whether nvim.input(key) was already called.
-    let current = PENDING.load();
-    let key_sent;
-    if current.is_register() {
-        if let Some(handled) = handle_register_pending(nvim, key, tx, current).await? {
-            if !handled {
-                return Ok(());
-            }
-            // handled == true means key was sent and register completed; fall through to query
-            key_sent = true;
-        } else {
-            key_sent = false;
+impl KeySession {
+    /// Process one key, then always acknowledge with `KeyProcessed` (also on
+    /// error) so the main thread never has to wait for its timeout.
+    async fn process_key(&mut self, key: &str) {
+        if let Err(e) = self.handle_key(key).await {
+            log::error!("[NVIM] Key handling error: {}", e);
         }
-    } else {
-        key_sent = false;
+        send_msg(
+            &self.tx,
+            FromNeovim::KeyProcessed {
+                pending: self.pending.load(),
+            },
+        );
     }
 
-    if current.is_motion() {
-        if !handle_motion_pending(nvim, key, tx, current).await? {
+    async fn handle_key(&mut self, key: &str) -> anyhow::Result<()> {
+        // Dispatch through handlers in priority order.
+        // Each returns Ok(true) if it fully handled the key.
+        if self.handle_commandline_mode(key).await?
+            || self.handle_getchar_pending(key).await?
+            || self.handle_commit_key(key).await?
+            || self.handle_backspace(key).await?
+            || self.handle_enter(key).await?
+            || self.handle_insert_register(key).await?
+            || self.handle_normal_register(key).await?
+        {
             return Ok(());
         }
-        // Motion completed — fall through to query snapshot
-    } else if !key_sent {
-        let _ = nvim.input(key).await;
-    }
 
-    // Insert mode fire-and-forget: autocmd will push snapshot via rpcnotify.
-    // Exception: Escape changes mode but no insert-mode autocmd fires after it.
-    if last_mode.as_str() == "i" && key != "<Esc>" && key != "<C-c>" {
-        if matches!(key, "<C-k>" | "<C-v>" | "<C-q>") && is_blocked(nvim).await? {
-            PENDING.store(PendingState::Getchar);
-            log::debug!("[NVIM] Insert-mode key {} triggered blocking state", key);
+        let current = self.pending.load();
+        if current.is_register() {
+            if !self.handle_register_pending(key, current).await? {
+                return Ok(());
+            }
+            // Register paste completed (key already sent) — fall through to query
+        } else if current.is_motion() {
+            if !self.handle_motion_pending(key, current).await? {
+                return Ok(());
+            }
+            // Motion completed — fall through to query snapshot
+        } else {
+            let _ = self.nvim.input(key).await;
         }
-        send_msg(tx, FromNeovim::KeyProcessed);
-        return Ok(());
+
+        // Insert mode fire-and-forget: autocmd will push snapshot via rpcnotify.
+        // Exception: Escape changes mode but no insert-mode autocmd fires after it.
+        if self.last_mode == "i" && key != "<Esc>" && key != "<C-c>" {
+            if matches!(key, "<C-k>" | "<C-v>" | "<C-q>") && is_blocked(&self.nvim).await? {
+                self.pending.store(PendingState::Getchar);
+                log::debug!("[NVIM] Insert-mode key {} triggered blocking state", key);
+            }
+            return Ok(());
+        }
+
+        // ":", "/", "?" in normal mode enter command-line mode.
+        // Display update comes via cmdline_show (ext_cmdline).
+        // Must set pending synchronously to prevent handle_snapshot_response
+        // from escaping command-line mode before cmdline_show arrives.
+        if matches!(key, ":" | "/" | "?") && self.last_mode == "n" {
+            self.pending.store(PendingState::CommandLine);
+            log::debug!("[NVIM] Entered command-line mode ({})", key);
+            return Ok(());
+        }
+
+        // Check blocking before querying snapshot.
+        if is_blocked(&self.nvim).await? {
+            self.pending.store(PendingState::Getchar);
+            log::debug!("[NVIM] Blocked in getchar, waiting for next key");
+            return Ok(());
+        }
+
+        self.handle_snapshot_response().await
     }
 
-    // ":", "/", "?" in normal mode enter command-line mode.
-    // Display update comes via cmdline_show (ext_cmdline).
-    // Must set PENDING synchronously to prevent handle_snapshot_response
-    // from escaping command-line mode before cmdline_show arrives.
-    if matches!(key, ":" | "/" | "?") && last_mode.as_str() == "n" {
-        PENDING.store(PendingState::CommandLine);
-        log::debug!("[NVIM] Entered command-line mode ({})", key);
-        send_msg(tx, FromNeovim::KeyProcessed);
-        return Ok(());
+    // --- Sub-handlers: each returns Ok(true) when it fully handled the key ---
+
+    /// Forward key in command-line mode (display comes via ext_cmdline).
+    async fn handle_commandline_mode(&self, key: &str) -> anyhow::Result<bool> {
+        if self.pending.load() != PendingState::CommandLine {
+            return Ok(false);
+        }
+        log::debug!("[NVIM] CommandLine mode, forwarding key: {}", key);
+        let _ = self.nvim.input(key).await;
+        Ok(true)
     }
 
-    // Check blocking before querying snapshot.
-    if is_blocked(nvim).await? {
-        PENDING.store(PendingState::Getchar);
-        log::debug!("[NVIM] Blocked in getchar, waiting for next key");
-        send_msg(tx, FromNeovim::KeyProcessed);
-        return Ok(());
+    /// Complete a getchar-blocking key (q, f, t, r, m, etc.).
+    async fn handle_getchar_pending(&mut self, key: &str) -> anyhow::Result<bool> {
+        if self.pending.load() != PendingState::Getchar {
+            return Ok(false);
+        }
+        log::debug!("[NVIM] Completing getchar with key: {}", key);
+        let _ = self.nvim.input(key).await;
+        self.pending.clear();
+        if is_blocked(&self.nvim).await? {
+            self.pending.store(PendingState::Getchar);
+            log::debug!("[NVIM] Still blocked in getchar after key: {}", key);
+            return Ok(true);
+        }
+        let snapshot = query_snapshot(&self.nvim, &self.tx).await?;
+        self.last_mode = snapshot.mode.clone();
+        if snapshot.mode.starts_with("no") {
+            self.pending.store(PendingState::Motion);
+            log::debug!(
+                "[NVIM] Getchar completed into operator-pending mode ({})",
+                snapshot.mode
+            );
+        }
+        Ok(true)
     }
 
-    handle_snapshot_response(nvim, tx, last_mode).await
-}
-
-// --- Sub-handlers: each returns Ok(true) when it fully handled the key ---
-
-/// Forward key in command-line mode (display comes via CmdlineChanged autocmd).
-async fn handle_commandline_mode(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-) -> anyhow::Result<bool> {
-    if PENDING.load() != PendingState::CommandLine {
-        return Ok(false);
+    /// Handle commit key (default: Ctrl+Enter). Skip if motion-pending (exec_lua would deadlock).
+    async fn handle_commit_key(&mut self, key: &str) -> anyhow::Result<bool> {
+        let pending = self.pending.load();
+        if key != self.commit_key || pending.is_motion() || pending.is_register() {
+            return Ok(false);
+        }
+        let result = self
+            .nvim
+            .exec_lua("return ime_handle_commit()", vec![])
+            .await?;
+        if get_map_str(&result, "type") == Some("commit") {
+            if let Some(text) = get_map_str(&result, "text") {
+                send_msg(&self.tx, FromNeovim::Commit(text.to_string()));
+            }
+            send_msg(&self.tx, FromNeovim::Preedit(PreeditInfo::empty()));
+        } else {
+            // Empty buffer — passthrough so the app receives the key (e.g., Ctrl+Enter to send)
+            send_msg(&self.tx, FromNeovim::PassthroughKey);
+        }
+        self.last_mode = String::from("i");
+        Ok(true)
     }
-    log::debug!("[NVIM] CommandLine mode, forwarding key: {}", key);
-    let _ = nvim.input(key).await;
-    send_msg(tx, FromNeovim::KeyProcessed);
-    Ok(true)
-}
 
-/// Complete a getchar-blocking key (q, f, t, r, m, etc.).
-async fn handle_getchar_pending(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-    last_mode: &mut String,
-) -> anyhow::Result<bool> {
-    if PENDING.load() != PendingState::Getchar {
-        return Ok(false);
+    /// Handle Backspace — in empty preedit, passthrough to app; otherwise process in Neovim.
+    async fn handle_backspace(&self, key: &str) -> anyhow::Result<bool> {
+        let pending = self.pending.load();
+        if key != "<BS>" || pending.is_motion() || pending.is_register() {
+            return Ok(false);
+        }
+        let result = self.nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
+        if get_map_str(&result, "type") == Some("passthrough") {
+            send_msg(&self.tx, FromNeovim::PassthroughKey);
+        }
+        Ok(true)
     }
-    log::debug!("[NVIM] Completing getchar with key: {}", key);
-    let _ = nvim.input(key).await;
-    PENDING.clear();
-    if is_blocked(nvim).await? {
-        PENDING.store(PendingState::Getchar);
-        log::debug!("[NVIM] Still blocked in getchar after key: {}", key);
-        send_msg(tx, FromNeovim::KeyProcessed);
-        return Ok(true);
+
+    /// Handle Enter — detect empty buffer for passthrough. Skip if motion/register pending.
+    async fn handle_enter(&self, key: &str) -> anyhow::Result<bool> {
+        let pending = self.pending.load();
+        if !matches!(key, "<CR>" | "<C-CR>" | "<A-CR>")
+            || pending.is_motion()
+            || pending.is_register()
+        {
+            return Ok(false);
+        }
+        let result = self
+            .nvim
+            .exec_lua("return ime_handle_enter()", vec![])
+            .await?;
+        if get_map_str(&result, "type") == Some("passthrough") {
+            send_msg(&self.tx, FromNeovim::PassthroughKey);
+        }
+        Ok(true)
     }
-    let snapshot = query_snapshot(nvim, tx).await?;
-    *last_mode = snapshot.mode.clone();
-    if snapshot.mode.starts_with("no") {
-        PENDING.store(PendingState::Motion);
+
+    /// Handle <C-r> in insert mode — enter register-paste pending state.
+    async fn handle_insert_register(&self, key: &str) -> anyhow::Result<bool> {
+        if key != "<C-r>" || self.pending.load().is_pending() {
+            return Ok(false);
+        }
+        let mode_str = self.nvim.command_output("echo mode(1)").await?;
+        if mode_str.trim() != "i" {
+            return Ok(false);
+        }
+        let _ = self.nvim.input(key).await;
+        self.pending.store(PendingState::InsertRegister);
+        log::debug!("[NVIM] Sent <C-r>, waiting for register name (insert mode)");
+        Ok(true)
+    }
+
+    /// Handle " in normal/visual mode — enter register-prefix pending state.
+    async fn handle_normal_register(&self, key: &str) -> anyhow::Result<bool> {
+        if key != "\"" || self.pending.load().is_pending() {
+            return Ok(false);
+        }
+        let mode_str = self.nvim.command_output("echo mode(1)").await?;
+        let mode = mode_str.trim();
+        if mode != "n" && !mode.starts_with('v') {
+            return Ok(false);
+        }
+        let _ = self.nvim.input(key).await;
+        self.pending.store(PendingState::NormalRegister);
+        log::debug!("[NVIM] Sent \", waiting for register name ({} mode)", mode);
+        Ok(true)
+    }
+
+    /// Handle register-pending: complete <C-r>+reg or "+reg sequences.
+    /// Always sends the key. Returns `true` if a register paste completed
+    /// (caller falls through to query), `false` if fully handled.
+    async fn handle_register_pending(
+        &self,
+        key: &str,
+        current: PendingState,
+    ) -> anyhow::Result<bool> {
         log::debug!(
-            "[NVIM] Getchar completed into operator-pending mode ({})",
-            snapshot.mode
+            "[NVIM] In register-pending (state={:?}), sending: {}",
+            current,
+            key
         );
-    }
-    Ok(true)
-}
+        let _ = self.nvim.input(key).await;
 
-/// Handle commit key (default: Ctrl+Enter). Skip if motion-pending (exec_lua would deadlock).
-async fn handle_commit_key(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-    config: &Config,
-    last_mode: &mut String,
-) -> anyhow::Result<bool> {
-    let pending = PENDING.load();
-    if key != config.keybinds.commit || pending.is_motion() || pending.is_register() {
-        return Ok(false);
-    }
-    let result = nvim.exec_lua("return ime_handle_commit()", vec![]).await?;
-    if get_map_str(&result, "type") == Some("commit") {
-        if let Some(text) = get_map_str(&result, "text") {
-            send_msg(tx, FromNeovim::Commit(text.to_string()));
+        if current == PendingState::InsertRegister {
+            if key == "<C-r>" {
+                // <C-r><C-r> = insert register literally — still waiting for name
+                log::debug!("[NVIM] Literal register insert mode, still waiting for register name");
+                return Ok(false);
+            }
+            self.pending.clear();
+            Ok(true) // Paste done, fall through to query preedit
+        } else {
+            // Normal mode " — register selected, waiting for operator
+            self.pending.clear();
+            log::debug!("[NVIM] Register '{}' selected, waiting for operator", key);
+            Ok(false)
         }
-        send_msg(tx, FromNeovim::Preedit(PreeditInfo::empty()));
-    } else {
-        // Empty buffer — passthrough so the app receives the key (e.g., Ctrl+Enter to send)
-        send_msg(tx, FromNeovim::PassthroughKey);
-    }
-    send_msg(tx, FromNeovim::KeyProcessed);
-    *last_mode = String::from("i");
-    Ok(true)
-}
-
-/// Handle Backspace — in empty preedit, passthrough to app; otherwise process in Neovim.
-async fn handle_backspace(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-) -> anyhow::Result<bool> {
-    let pending = PENDING.load();
-    if key != "<BS>" || pending.is_motion() || pending.is_register() {
-        return Ok(false);
-    }
-    let result = nvim.exec_lua("return ime_handle_bs()", vec![]).await?;
-    if get_map_str(&result, "type") == Some("passthrough") {
-        send_msg(tx, FromNeovim::PassthroughKey);
-        send_msg(tx, FromNeovim::KeyProcessed);
-    } else {
-        send_msg(tx, FromNeovim::KeyProcessed);
-    }
-    Ok(true)
-}
-
-/// Handle Enter — detect empty buffer for passthrough. Skip if motion/register pending.
-async fn handle_enter(nvim: &Neovim<NvimWriter>, key: &str, tx: &MainTx) -> anyhow::Result<bool> {
-    let pending = PENDING.load();
-    if !matches!(key, "<CR>" | "<C-CR>" | "<A-CR>") || pending.is_motion() || pending.is_register()
-    {
-        return Ok(false);
-    }
-    let result = nvim.exec_lua("return ime_handle_enter()", vec![]).await?;
-    if get_map_str(&result, "type") == Some("passthrough") {
-        send_msg(tx, FromNeovim::PassthroughKey);
-    }
-    send_msg(tx, FromNeovim::KeyProcessed);
-    Ok(true)
-}
-
-/// Handle <C-r> in insert mode — enter register-paste pending state.
-async fn handle_insert_register(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-) -> anyhow::Result<bool> {
-    if key != "<C-r>" || PENDING.load().is_pending() {
-        return Ok(false);
-    }
-    let mode_str = nvim.command_output("echo mode(1)").await?;
-    if mode_str.trim() != "i" {
-        return Ok(false);
-    }
-    let _ = nvim.input(key).await;
-    PENDING.store(PendingState::InsertRegister);
-    log::debug!("[NVIM] Sent <C-r>, waiting for register name (insert mode)");
-    send_msg(tx, FromNeovim::KeyProcessed);
-    Ok(true)
-}
-
-/// Handle " in normal/visual mode — enter register-prefix pending state.
-async fn handle_normal_register(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-) -> anyhow::Result<bool> {
-    if key != "\"" || PENDING.load().is_pending() {
-        return Ok(false);
-    }
-    let mode_str = nvim.command_output("echo mode(1)").await?;
-    let mode = mode_str.trim();
-    if mode != "n" && !mode.starts_with('v') {
-        return Ok(false);
-    }
-    let _ = nvim.input(key).await;
-    PENDING.store(PendingState::NormalRegister);
-    log::debug!("[NVIM] Sent \", waiting for register name ({} mode)", mode);
-    send_msg(tx, FromNeovim::KeyProcessed);
-    Ok(true)
-}
-
-/// Handle register-pending: complete <C-r>+reg or "+reg sequences.
-/// Returns `Some(true)` = key sent & register completed (fall through to query),
-/// `Some(false)` = fully handled (caller should return),
-/// `None` = not in register-pending (caller continues).
-async fn handle_register_pending(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-    current: PendingState,
-) -> anyhow::Result<Option<bool>> {
-    if !current.is_register() {
-        return Ok(None);
-    }
-    log::debug!(
-        "[NVIM] In register-pending (state={:?}), sending: {}",
-        current,
-        key
-    );
-    let _ = nvim.input(key).await;
-
-    if current == PendingState::InsertRegister {
-        if key == "<C-r>" {
-            // <C-r><C-r> = insert register literally — still waiting for name
-            log::debug!("[NVIM] Literal register insert mode, still waiting for register name");
-            send_msg(tx, FromNeovim::KeyProcessed);
-            return Ok(Some(false));
-        }
-        PENDING.clear();
-        Ok(Some(true)) // Paste done, fall through to query preedit
-    } else {
-        // Normal mode " — register selected, waiting for operator
-        PENDING.clear();
-        log::debug!("[NVIM] Register '{}' selected, waiting for operator", key);
-        send_msg(tx, FromNeovim::KeyProcessed);
-        Ok(Some(false))
-    }
-}
-
-/// Handle motion-pending: advance operator-pending state machine.
-/// Returns `true` if motion completed (fall through to snapshot query),
-/// `false` if still pending (caller should return).
-///
-/// Queries Neovim's actual mode after sending the key to determine completion.
-/// This correctly handles all motion types including char-search motions
-/// (f/t/F/T) that require an argument character.
-async fn handle_motion_pending(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &MainTx,
-    current: PendingState,
-) -> anyhow::Result<bool> {
-    log::debug!(
-        "[NVIM] In operator-pending (state={:?}), sending key: {}",
-        current,
-        key
-    );
-    let _ = nvim.input(key).await;
-
-    // Query Neovim's actual mode to determine if the motion completed.
-    let mode_info = nvim.get_mode().await?;
-    let blocking = mode_info
-        .iter()
-        .any(|(k, v)| k.as_str() == Some("blocking") && v.as_bool() == Some(true));
-    let mode = mode_info
-        .iter()
-        .find(|(k, _)| k.as_str() == Some("mode"))
-        .and_then(|(_, v)| v.as_str())
-        .unwrap_or("n");
-
-    if blocking || mode.starts_with("no") {
-        // Still pending: either blocked in getchar (e.g., f/t waiting for char)
-        // or still in operator-pending (e.g., "di" waiting for text object name).
-        send_msg(tx, FromNeovim::KeyProcessed);
-        return Ok(false);
     }
 
-    // Motion completed (mode is now n, i, v, etc.)
-    log::debug!("[NVIM] Motion completed, resuming normal queries");
-    PENDING.clear();
-    Ok(true)
-}
-
-/// Query snapshot and handle post-key mode transitions (operator-pending, command-line recovery).
-async fn handle_snapshot_response(
-    nvim: &Neovim<NvimWriter>,
-    tx: &MainTx,
-    last_mode: &mut String,
-) -> anyhow::Result<()> {
-    let snapshot = query_snapshot(nvim, tx).await?;
-    *last_mode = snapshot.mode.clone();
-
-    if snapshot.mode.starts_with("no") {
-        PENDING.store(PendingState::Motion);
-        log::debug!("[NVIM] Entered operator-pending mode ({})", snapshot.mode);
-        send_msg(tx, FromNeovim::KeyProcessed);
-        return Ok(());
-    }
-
-    // Unexpected command-line mode (plugin triggered). Escape and restore insert mode.
-    if snapshot.mode.starts_with('c') && PENDING.load() != PendingState::CommandLine {
-        log::warn!(
-            "[NVIM] Unexpected command-line mode ({}), escaping",
-            snapshot.mode
+    /// Handle motion-pending: advance operator-pending state machine.
+    /// Returns `true` if motion completed (fall through to snapshot query),
+    /// `false` if still pending (caller should return).
+    ///
+    /// Queries Neovim's actual mode after sending the key to determine completion.
+    /// This correctly handles all motion types including char-search motions
+    /// (f/t/F/T) that require an argument character.
+    async fn handle_motion_pending(
+        &self,
+        key: &str,
+        current: PendingState,
+    ) -> anyhow::Result<bool> {
+        log::debug!(
+            "[NVIM] In operator-pending (state={:?}), sending key: {}",
+            current,
+            key
         );
-        let _ = nvim.input("<C-c>").await;
-        nvim.command("startinsert").await?;
-        let snapshot = query_snapshot(nvim, tx).await?;
-        *last_mode = snapshot.mode.clone();
+        let _ = self.nvim.input(key).await;
+
+        // Query Neovim's actual mode to determine if the motion completed.
+        let mode_info = self.nvim.get_mode().await?;
+        let blocking = mode_info
+            .iter()
+            .any(|(k, v)| k.as_str() == Some("blocking") && v.as_bool() == Some(true));
+        let mode = mode_info
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("mode"))
+            .and_then(|(_, v)| v.as_str())
+            .unwrap_or("n");
+
+        if blocking || mode.starts_with("no") {
+            // Still pending: either blocked in getchar (e.g., f/t waiting for char)
+            // or still in operator-pending (e.g., "di" waiting for text object name).
+            return Ok(false);
+        }
+
+        // Motion completed (mode is now n, i, v, etc.)
+        log::debug!("[NVIM] Motion completed, resuming normal queries");
+        self.pending.clear();
+        Ok(true)
     }
 
-    send_msg(tx, FromNeovim::KeyProcessed);
-    Ok(())
+    /// Query snapshot and handle post-key mode transitions (operator-pending, command-line recovery).
+    async fn handle_snapshot_response(&mut self) -> anyhow::Result<()> {
+        let snapshot = query_snapshot(&self.nvim, &self.tx).await?;
+        self.last_mode = snapshot.mode.clone();
+
+        if snapshot.mode.starts_with("no") {
+            self.pending.store(PendingState::Motion);
+            log::debug!("[NVIM] Entered operator-pending mode ({})", snapshot.mode);
+            return Ok(());
+        }
+
+        // Unexpected command-line mode (plugin triggered). Escape and restore insert mode.
+        if snapshot.mode.starts_with('c') && self.pending.load() != PendingState::CommandLine {
+            log::warn!(
+                "[NVIM] Unexpected command-line mode ({}), escaping",
+                snapshot.mode
+            );
+            let _ = self.nvim.input("<C-c>").await;
+            self.nvim.command("startinsert").await?;
+            let snapshot = query_snapshot(&self.nvim, &self.tx).await?;
+            self.last_mode = snapshot.mode.clone();
+        }
+
+        Ok(())
+    }
 }
 
 /// Check if Neovim is blocked in getchar() via nvim_get_mode().
