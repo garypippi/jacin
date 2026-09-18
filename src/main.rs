@@ -39,6 +39,7 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().any(|a| a == "--clean") {
         config.clean = true;
     }
+    log::info!("[CONFIG] Display mode: {:?}", config.behavior.display);
 
     // Connect to Wayland display
     let conn = Connection::connect_to_env()?;

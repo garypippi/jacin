@@ -193,7 +193,21 @@ impl State {
             rec_blink_on: self.animations.rec_blink.on,
             cmdline_cursor_pos: self.model.view.cmdline.as_ref().map(|c| c.cursor_byte),
             window_view: match self.config.behavior.display {
-                DisplayMode::Grid => self.model.view.screen.window_view(MAX_GRID_ROWS),
+                DisplayMode::Grid => {
+                    let view = self.model.view.screen.window_view(MAX_GRID_ROWS);
+                    match &view {
+                        Some(v) => log::debug!(
+                            "[POPUP] grid display: {} rows, cursor={:?}",
+                            v.rows.len(),
+                            v.cursor
+                        ),
+                        None => log::debug!(
+                            "[POPUP] grid display: no window grid (cursor on grid {}), using snapshot",
+                            self.model.view.screen.cursor.grid
+                        ),
+                    }
+                    view
+                }
                 DisplayMode::Snapshot => None,
             },
         };
