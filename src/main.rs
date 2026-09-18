@@ -26,6 +26,7 @@ mod neovim;
 mod state;
 mod ui;
 
+use config::DisplayMode;
 use model::Model;
 use neovim::NeovimHandle;
 use state::{Animations, KeyRepeatState, KeyboardState, WaylandState};
@@ -119,7 +120,7 @@ fn main() -> anyhow::Result<()> {
 
     // Create unified popup window using input method popup surface
     // The popup surface is automatically positioned near the cursor by the compositor
-    let popup = if let (Some(renderer), Some(mono)) = (text_renderer, mono_renderer) {
+    let mut popup = if let (Some(renderer), Some(mono)) = (text_renderer, mono_renderer) {
         match UnifiedPopup::new(&compositor, &input_method, &shm, &qh, renderer, mono) {
             Some(win) => {
                 log::info!("Unified popup window created (using input popup surface)");
@@ -133,6 +134,17 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Grid display: size Neovim's UI to what the popup can show, so long
+    // lines wrap at the popup width and Neovim scrolls the window itself
+    let ui_grid_size = match (&mut popup, config.behavior.display) {
+        (Some(popup), DisplayMode::Grid) => Some(popup.grid_ui_size()),
+        _ => None,
+    };
+    if let (Some(nvim), Some((cols, rows))) = (&nvim, ui_grid_size) {
+        log::info!("[IME] Grid display UI size: {}x{}", cols, rows);
+        nvim.resize_ui(cols, rows);
+    }
 
     // Create application state
     let mut state = State {
@@ -151,6 +163,7 @@ fn main() -> anyhow::Result<()> {
         config: config.clone(),
         nvim,
         nvim_wake,
+        ui_grid_size,
         popup,
         repeat_timer_token: None,
         keypress_timer_token: None,
@@ -349,6 +362,8 @@ pub struct State {
     pub(crate) nvim: Option<NeovimHandle>,
     // Wakes the event loop when the Neovim thread sends a message (reused on respawn)
     pub(crate) nvim_wake: Ping,
+    // Neovim UI size for grid display mode (re-applied on respawn)
+    pub(crate) ui_grid_size: Option<(usize, usize)>,
     // Unified popup window (preedit, keypress, candidates)
     pub(crate) popup: Option<UnifiedPopup>,
     // On-demand timer tokens (None = timer not running)

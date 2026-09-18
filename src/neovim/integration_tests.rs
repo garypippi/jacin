@@ -347,3 +347,47 @@ fn grid_shadow_matches_snapshot() {
 
     shutdown_and_wait(&handle);
 }
+
+/// Grid display (B2): after resizing the UI, a line longer than the width
+/// wraps in the window grid and window_view shows it as two rows of one
+/// buffer line.
+#[test]
+#[ignore]
+fn resized_ui_wraps_long_line_in_window_view() {
+    use crate::model::Model;
+
+    let handle = spawn_neovim(clean_config(), None).expect("failed to spawn neovim");
+    handle.resize_ui(20, 9);
+    let mut model = Model::new();
+    model.ime.start_enabling();
+    model.ime.complete_enabling();
+
+    let text = "abcdefghijklmnopqrstuvwxy"; // 25 chars > 20 columns
+    for c in text.chars() {
+        handle.send_key(&c.to_string());
+    }
+    let deadline = Instant::now() + MSG_TIMEOUT;
+    loop {
+        if let Some(view) = model.view.screen.window_view(8)
+            && view.rows.len() == 2
+        {
+            let rows: Vec<String> = view
+                .rows
+                .iter()
+                .map(|r| r.iter().map(|c| c.text.as_str()).collect())
+                .collect();
+            if rows.concat() == text {
+                assert_eq!(rows[0].len(), 20);
+                assert_eq!(view.cursor, (1, 5));
+                break;
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let msg = handle
+            .recv_timeout(remaining)
+            .unwrap_or_else(|| panic!("no wrapped view: {:?}", model.view.screen.window_view(8)));
+        model.reduce(msg, true);
+    }
+
+    shutdown_and_wait(&handle);
+}

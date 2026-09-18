@@ -87,6 +87,8 @@ impl AtomicPendingState {
 pub enum ToNeovim {
     /// Send a key to Neovim (raw key string like "a", "A", "<BS>", "<CR>")
     Key(String),
+    /// Resize the attached UI (grid columns x rows)
+    ResizeUi { width: u64, height: u64 },
     /// Shutdown Neovim
     Shutdown,
 }

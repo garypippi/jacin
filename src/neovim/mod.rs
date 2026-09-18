@@ -37,6 +37,14 @@ impl NeovimHandle {
         let _ = self.sender.try_send(ToNeovim::Key(key.to_string()));
     }
 
+    /// Resize the attached UI grid (non-blocking: dropped if channel full)
+    pub fn resize_ui(&self, width: usize, height: usize) {
+        let _ = self.sender.try_send(ToNeovim::ResizeUi {
+            width: width as u64,
+            height: height as u64,
+        });
+    }
+
     /// Try to receive a message from Neovim (non-blocking)
     pub fn try_recv(&self) -> Option<FromNeovim> {
         self.receiver.try_recv().ok()

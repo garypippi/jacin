@@ -14,19 +14,19 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 pub use super::layout::PopupContent;
 use super::layout::{
     BG_COLOR, BORDER_COLOR, CURSOR_BG, ICON_SEPARATOR_GAP, ICON_SEPARATOR_WIDTH,
-    KEYPRESS_ENTRY_GAP, KEYPRESS_TEXT_COLOR, Layout, MAX_VISIBLE_CANDIDATES, MODE_GAP,
-    MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING, REC_CIRCLE_RADIUS,
-    REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH, SELECTED_BG, TEXT_COLOR,
-    VISUAL_BG, calculate_layout, format_recording_label, mode_label, preedit_scroll_offset, rgba,
-    scrollbar_thumb_geometry,
+    KEYPRESS_ENTRY_GAP, KEYPRESS_TEXT_COLOR, Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT,
+    MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR,
+    NUMBER_WIDTH, PADDING, REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB,
+    SCROLLBAR_WIDTH, SELECTED_BG, TEXT_COLOR, VISUAL_BG, calculate_layout, format_recording_label,
+    mode_label, preedit_scroll_offset, rgba, scrollbar_thumb_geometry,
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
 use crate::neovim::VisualSelection;
 use crate::state::WindowView;
 
-/// Pool size: 600×450×4×2 bytes for double buffering (~2MB)
-const POOL_SIZE: usize = 600 * 450 * 4 * 2;
+/// Pool size: two ARGB buffers of the maximum popup size (double buffering)
+const POOL_SIZE: usize = (MAX_POPUP_WIDTH * MAX_POPUP_HEIGHT * 4 * 2) as usize;
 
 /// Double buffer state
 struct Buffer {
@@ -110,6 +110,15 @@ impl UnifiedPopup {
             surface,
             popup_surface,
         }
+    }
+
+    /// Neovim UI size (columns, rows) for grid display mode: columns fill
+    /// the maximum popup width, rows are the visible grid rows plus one for
+    /// the statusline (which stays on the global grid)
+    pub fn grid_ui_size(&mut self) -> (usize, usize) {
+        let cell_width = self.mono_renderer.measure_text(" ").max(1.0);
+        let cols = ((MAX_POPUP_WIDTH as f32 - PADDING * 2.0) / cell_width).floor() as usize;
+        (cols.max(20), MAX_GRID_ROWS + 1)
     }
 
     /// Update the popup with new content

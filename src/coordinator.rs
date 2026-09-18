@@ -34,6 +34,9 @@ impl State {
                 match neovim::spawn_neovim(self.config.clone(), Some(self.nvim_wake.clone())) {
                     Ok(handle) => {
                         log::info!("[IME] Respawned Neovim backend");
+                        if let Some((cols, rows)) = self.ui_grid_size {
+                            handle.resize_ui(cols, rows);
+                        }
                         self.nvim = Some(handle);
                     }
                     Err(e) => {

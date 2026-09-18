@@ -869,6 +869,20 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
                 log::debug!("[NVIM] Received key: {:?}", key);
                 session.process_key(&key).await;
             }
+            Ok(ToNeovim::ResizeUi { width, height }) => {
+                log::debug!("[NVIM] Resizing UI to {}x{}", width, height);
+                match nvim
+                    .call(
+                        "nvim_ui_try_resize",
+                        vec![Value::from(width), Value::from(height)],
+                    )
+                    .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => log::warn!("[NVIM] nvim_ui_try_resize failed: {e:?}"),
+                    Err(e) => log::warn!("[NVIM] nvim_ui_try_resize failed: {e}"),
+                }
+            }
             Ok(ToNeovim::Shutdown) | Err(_) => {
                 log::info!("[NVIM] Shutting down...");
                 if !exited.load(Ordering::SeqCst) {
