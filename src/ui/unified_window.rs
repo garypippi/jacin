@@ -329,114 +329,104 @@ impl UnifiedPopup {
         vim_mode: &str,
         layout: &Layout,
     ) {
-        let line_height = self.renderer.line_height();
-        let cell_width = self.mono_renderer.measure_text(" ");
-        let right_edge = layout.width as f32 - PADDING;
-        // Integer cell edges keep fills crisp and off tiny-skia's AA hairline path
-        let cell_x = |col: usize| (PADDING + col as f32 * cell_width).round();
-        let row_y = |row: usize| (layout.preedit_y + row as f32 * line_height).round();
+        let geo = CellGeometry {
+            left: PADDING,
+            top: layout.preedit_y,
+            cell_width: self.mono_renderer.measure_text(" "),
+            line_height: self.renderer.line_height(),
+            right_edge: layout.width as f32 - PADDING,
+        };
         let block_cursor = !matches!(vim_mode.chars().next(), Some('i' | 'R' | 'c'));
         let (cursor_row, cursor_col) = view.cursor;
 
         for (row, cells) in view.rows.iter().enumerate() {
-            for (col, cell) in cells.iter().enumerate() {
-                let (x0, x1) = (cell_x(col), cell_x(col + 1));
-                if x1 > right_edge {
-                    break;
-                }
+            let style_of = |col: usize, cell: &StyledCell| {
                 let on_cursor = block_cursor
                     && row == cursor_row
                     && (col == cursor_col || (col == cursor_col + 1 && cell.text.is_empty()));
-                let style = if on_cursor {
+                if on_cursor {
                     CellStyle::Cursor
                 } else {
                     CellStyle::Normal
-                };
-                self.draw_grid_cell(pixmap, cell, x0, x1, row_y(row), line_height, style);
-            }
+                }
+            };
+            self.draw_grid_row(pixmap, &geo, row, 0, cells, style_of);
         }
 
         // Cursor past the end of the row (or on an empty row)
         let row_len = view.rows.get(cursor_row).map_or(0, Vec::len);
-        let x0 = cell_x(cursor_col);
-        if x0 < right_edge {
-            let y_top = row_y(cursor_row);
+        let x0 = geo.x(cursor_col);
+        if x0 < geo.right_edge {
+            let (y_top, height) = (geo.y(cursor_row), geo.line_height.round());
             if !block_cursor {
-                fill_rect(
-                    pixmap,
-                    x0,
-                    y_top,
-                    x0 + 2.0,
-                    line_height.round(),
-                    rgba(TEXT_COLOR),
-                );
+                fill_rect(pixmap, x0, y_top, x0 + 2.0, height, rgba(TEXT_COLOR));
             } else if cursor_col >= row_len {
-                let x1 = cell_x(cursor_col + 1).min(right_edge);
-                fill_rect(pixmap, x0, y_top, x1, line_height.round(), rgba(CURSOR_BG));
+                let x1 = geo.x(cursor_col + 1).min(geo.right_edge);
+                fill_rect(pixmap, x0, y_top, x1, height, rgba(CURSOR_BG));
             }
         }
 
         // Floating windows on top, lowest zindex first
         for float in &view.floats {
             for (r, cells) in float.rows.iter().enumerate() {
-                let y_top = row_y(float.row + r);
-                for (c, cell) in cells.iter().enumerate() {
-                    let (x0, x1) = (cell_x(float.col + c), cell_x(float.col + c + 1));
-                    if x1 > right_edge {
-                        break;
-                    }
-                    self.draw_grid_cell(
-                        pixmap,
-                        cell,
-                        x0,
-                        x1,
-                        y_top,
-                        line_height,
-                        CellStyle::Opaque,
-                    );
-                }
+                self.draw_grid_row(pixmap, &geo, float.row + r, float.col, cells, |_, _| {
+                    CellStyle::Opaque
+                });
             }
         }
     }
 
-    /// Draw one grid cell spanning [x0, x1) at row top `y_top`.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_grid_cell(
+    /// Draw one row of grid cells starting at screen column `first_col`.
+    /// All backgrounds are painted before any glyph: the right half of a
+    /// double-width char is a separate (empty) cell whose background would
+    /// otherwise cover the glyph.
+    fn draw_grid_row(
         &mut self,
         pixmap: &mut Pixmap,
-        cell: &StyledCell,
-        x0: f32,
-        x1: f32,
-        y_top: f32,
-        line_height: f32,
-        style: CellStyle,
+        geo: &CellGeometry,
+        row: usize,
+        first_col: usize,
+        cells: &[StyledCell],
+        style_of: impl Fn(usize, &StyledCell) -> CellStyle,
     ) {
-        let theme_fg = rgba(TEXT_COLOR);
-        let theme_bg = rgba(BG_COLOR);
-        let mut fg = cell.fg.map_or(theme_fg, rgb_color);
-        let mut bg = cell.bg.map(rgb_color);
-        if cell.reverse {
-            (fg, bg) = (bg.unwrap_or(theme_bg), Some(fg));
-        }
-        match style {
-            CellStyle::Normal => {}
-            CellStyle::Cursor => {
-                bg = Some(rgba(CURSOR_BG));
-                fg = Color::from_rgba8(40, 44, 52, 255);
+        let visible = (0..cells.len())
+            .take_while(|&i| geo.x(first_col + i + 1) <= geo.right_edge)
+            .count();
+        let colors: Vec<(Color, Option<Color>)> = cells[..visible]
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| cell_colors(cell, style_of(first_col + i, cell)))
+            .collect();
+        let y_top = geo.y(row);
+
+        for (i, cell) in cells[..visible].iter().enumerate() {
+            let (fg, bg) = colors[i];
+            let (x0, x1) = (geo.x(first_col + i), geo.x(first_col + i + 1));
+            if let Some(bg) = bg {
+                fill_rect(pixmap, x0, y_top, x1, geo.line_height.round(), bg);
             }
-            // Floats hide what is below them even where they have no highlight
-            CellStyle::Opaque => bg = Some(bg.unwrap_or(theme_bg)),
+            if cell.underline {
+                let y = (y_top + geo.line_height * 0.85).round();
+                fill_rect(pixmap, x0, y, x1, 1.0, fg);
+            }
         }
-        if let Some(bg) = bg {
-            fill_rect(pixmap, x0, y_top, x1, line_height.round(), bg);
-        }
-        if cell.underline {
-            let y = (y_top + line_height * 0.85).round();
-            fill_rect(pixmap, x0, y, x1, 1.0, fg);
-        }
-        if !cell.text.is_empty() && cell.text != " " {
+
+        for (i, cell) in cells[..visible].iter().enumerate() {
+            if cell.text.is_empty() || cell.text == " " {
+                continue;
+            }
+            // Center the glyph in its span (two cells for double-width chars)
+            let span = if cells.get(i + 1).is_some_and(|c| c.text.is_empty()) {
+                2
+            } else {
+                1
+            };
+            let (x0, x1) = (geo.x(first_col + i), geo.x(first_col + i + span));
+            let advance = self.mono_renderer.measure_text(&cell.text);
+            let x = x0 + ((x1 - x0) - advance).max(0.0) / 2.0;
+            let y_baseline = y_top + geo.line_height * 0.75;
             self.mono_renderer
-                .draw_text(pixmap, &cell.text, x0, y_top + line_height * 0.75, fg);
+                .draw_text(pixmap, &cell.text, x, y_baseline, colors[i].0);
         }
     }
 
@@ -884,6 +874,46 @@ fn draw_filled_circle(pixmap: &mut Pixmap, cx: f32, cy: f32, radius: f32, color:
 /// 0xRRGGBB → opaque color
 fn rgb_color(rgb: u32) -> Color {
     Color::from_rgba8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
+}
+
+/// Pixel geometry of the grid area in the popup
+struct CellGeometry {
+    left: f32,
+    top: f32,
+    cell_width: f32,
+    line_height: f32,
+    /// Cells must end at or before this x
+    right_edge: f32,
+}
+
+impl CellGeometry {
+    /// Left edge of `col` (integer edges keep fills crisp and off
+    /// tiny-skia's AA hairline path)
+    fn x(&self, col: usize) -> f32 {
+        (self.left + col as f32 * self.cell_width).round()
+    }
+
+    /// Top edge of `row`
+    fn y(&self, row: usize) -> f32 {
+        (self.top + row as f32 * self.line_height).round()
+    }
+}
+
+/// Foreground and optional background of a cell over the popup theme
+fn cell_colors(cell: &StyledCell, style: CellStyle) -> (Color, Option<Color>) {
+    let theme_fg = rgba(TEXT_COLOR);
+    let theme_bg = rgba(BG_COLOR);
+    let mut fg = cell.fg.map_or(theme_fg, rgb_color);
+    let mut bg = cell.bg.map(rgb_color);
+    if cell.reverse {
+        (fg, bg) = (bg.unwrap_or(theme_bg), Some(fg));
+    }
+    match style {
+        CellStyle::Normal => (fg, bg),
+        CellStyle::Cursor => (Color::from_rgba8(40, 44, 52, 255), Some(rgba(CURSOR_BG))),
+        // Floats hide what is below them even where they have no highlight
+        CellStyle::Opaque => (fg, Some(bg.unwrap_or(theme_bg))),
+    }
 }
 
 /// How a grid cell is painted
