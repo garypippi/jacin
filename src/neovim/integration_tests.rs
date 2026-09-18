@@ -268,9 +268,17 @@ fn force_quit_exits_with_write_to_commit() {
     recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
         .expect("Neovim did not send Ready");
     // Modified acwrite buffer: :q! must still exit (no E37)
+    let mut msgs = Vec::new();
     for key in ["a", "b", "<Esc>", ":", "q", "!", "<CR>"] {
-        send_and_collect(&handle, key);
+        msgs.extend(send_and_collect(&handle, key));
     }
-    let exited = recv_until(&handle, |m| matches!(m, FromNeovim::NvimExited), MSG_TIMEOUT);
-    assert!(exited.is_some(), "expected NvimExited after :q!");
+    // NvimExited may arrive before or after the <CR> acknowledgment
+    let exited = msgs.iter().any(|m| matches!(m, FromNeovim::NvimExited))
+        || recv_until(
+            &handle,
+            |m| matches!(m, FromNeovim::NvimExited),
+            MSG_TIMEOUT,
+        )
+        .is_some();
+    assert!(exited, "expected NvimExited after :q!, got {msgs:?}");
 }
