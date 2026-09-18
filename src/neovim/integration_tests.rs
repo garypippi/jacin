@@ -47,7 +47,7 @@ fn recv_until(
 
 /// Spawn Neovim with --clean and wait for Ready.
 fn spawn_and_wait_ready() -> super::NeovimHandle {
-    let handle = spawn_neovim(clean_config()).expect("failed to spawn neovim");
+    let handle = spawn_neovim(clean_config(), None).expect("failed to spawn neovim");
     let ready = recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT);
     assert!(ready.is_some(), "Neovim did not send Ready within timeout");
     handle
@@ -63,7 +63,7 @@ fn shutdown_and_wait(handle: &super::NeovimHandle) {
 #[test]
 #[ignore]
 fn spawn_and_receive_ready() {
-    let handle = spawn_neovim(clean_config()).expect("failed to spawn neovim");
+    let handle = spawn_neovim(clean_config(), None).expect("failed to spawn neovim");
     let msg = recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT);
     assert!(msg.is_some(), "expected Ready message from Neovim");
     shutdown_and_wait(&handle);
@@ -141,7 +141,7 @@ fn shutdown_exits_cleanly() {
 #[ignore]
 fn startinsert_true_starts_in_insert_mode() {
     let config = clean_config_with_startinsert(true);
-    let handle = spawn_neovim(config).expect("failed to spawn neovim");
+    let handle = spawn_neovim(config, None).expect("failed to spawn neovim");
     recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
         .expect("Neovim did not send Ready");
 
@@ -164,7 +164,7 @@ fn startinsert_true_starts_in_insert_mode() {
 #[ignore]
 fn startinsert_false_starts_in_normal_mode() {
     let config = clean_config_with_startinsert(false);
-    let handle = spawn_neovim(config).expect("failed to spawn neovim");
+    let handle = spawn_neovim(config, None).expect("failed to spawn neovim");
     recv_until(&handle, |m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
         .expect("Neovim did not send Ready");
 

@@ -3,7 +3,6 @@
 //! Provides communication with an embedded Neovim instance for input processing.
 //! Users manage their own Japanese input plugins inside Neovim.
 
-mod event_source;
 mod handler;
 #[cfg(test)]
 mod integration_tests;
@@ -12,13 +11,10 @@ pub mod protocol;
 use std::thread;
 use std::time::Duration;
 
+use calloop::ping::Ping;
 use crossbeam_channel::{Receiver, Sender, bounded};
 
 use crate::config::Config;
-
-// Re-export event source types (for future calloop integration)
-#[allow(unused_imports)]
-pub use event_source::{NeovimEventSource, NeovimPing};
 
 pub use handler::pending_state;
 pub use protocol::{
@@ -59,22 +55,20 @@ impl NeovimHandle {
             .sender
             .send_timeout(ToNeovim::Shutdown, Duration::from_millis(200));
     }
-
-    /// Get the receiver for use with calloop event source
-    #[allow(dead_code)]
-    pub fn receiver(&self) -> &Receiver<FromNeovim> {
-        &self.receiver
-    }
 }
 
-/// Spawn Neovim backend in a separate thread
-pub fn spawn_neovim(config: Config) -> anyhow::Result<NeovimHandle> {
+/// Spawn Neovim backend in a separate thread.
+///
+/// `wake` is pinged after every message sent to the main thread, so the
+/// calloop event loop wakes up to drain it (None in tests without a loop).
+pub fn spawn_neovim(config: Config, wake: Option<Ping>) -> anyhow::Result<NeovimHandle> {
     // Use bounded channels for backpressure
     let (to_nvim_tx, to_nvim_rx) = bounded::<ToNeovim>(CHANNEL_CAPACITY);
     let (from_nvim_tx, from_nvim_rx) = bounded::<FromNeovim>(CHANNEL_CAPACITY);
 
+    let main_tx = handler::MainTx::new(from_nvim_tx, wake);
     thread::spawn(move || {
-        handler::run_blocking(to_nvim_rx, from_nvim_tx, config);
+        handler::run_blocking(to_nvim_rx, main_tx, config);
     });
 
     Ok(NeovimHandle {

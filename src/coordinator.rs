@@ -28,7 +28,7 @@ impl State {
         if !was_enabled {
             // Respawn Neovim if it exited (e.g., after :q)
             if self.nvim.is_none() {
-                match neovim::spawn_neovim(self.config.clone()) {
+                match neovim::spawn_neovim(self.config.clone(), Some(self.nvim_wake.clone())) {
                     Ok(handle) => {
                         log::info!("[IME] Respawned Neovim backend");
                         self.nvim = Some(handle);

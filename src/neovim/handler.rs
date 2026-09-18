@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::{error::Error, fmt};
 
 use async_trait::async_trait;
+use calloop::ping::Ping;
 use crossbeam_channel::{Receiver, Sender};
 use tokio::runtime::Runtime;
 
@@ -64,9 +65,28 @@ impl From<anyhow::Error> for NvimError {
     }
 }
 
-fn send_msg(tx: &Sender<FromNeovim>, msg: FromNeovim) {
-    if let Err(e) = tx.send(msg) {
+/// Sender to the main thread that also wakes its calloop event loop,
+/// so push notifications (redraw, autocmd rpcnotify) are handled promptly
+/// even when no Wayland event is pending.
+#[derive(Clone)]
+pub struct MainTx {
+    tx: Sender<FromNeovim>,
+    wake: Option<Ping>,
+}
+
+impl MainTx {
+    pub fn new(tx: Sender<FromNeovim>, wake: Option<Ping>) -> Self {
+        Self { tx, wake }
+    }
+}
+
+fn send_msg(tx: &MainTx, msg: FromNeovim) {
+    if let Err(e) = tx.tx.send(msg) {
         log::warn!("[NVIM] Failed to send message to main thread: {}", e);
+        return;
+    }
+    if let Some(ref wake) = tx.wake {
+        wake.ping();
     }
 }
 
@@ -75,7 +95,7 @@ fn send_msg(tx: &Sender<FromNeovim>, msg: FromNeovim) {
 /// forwards them to the main thread via the tx channel.
 #[derive(Clone)]
 pub struct NvimHandler {
-    tx: Sender<FromNeovim>,
+    tx: MainTx,
     /// Cached popupmenu items for popupmenu_select (ext_popupmenu).
     last_popupmenu_items: Arc<Mutex<Vec<String>>>,
 }
@@ -536,7 +556,7 @@ mod tests {
         let (tx, rx) = unbounded();
         (
             NvimHandler {
-                tx,
+                tx: MainTx::new(tx, None),
                 last_popupmenu_items: Arc::new(Mutex::new(Vec::new())),
             },
             rx,
@@ -753,7 +773,7 @@ mod tests {
 }
 
 /// Run the Neovim event loop in a blocking manner
-pub fn run_blocking(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: Config) {
+pub fn run_blocking(rx: Receiver<ToNeovim>, tx: MainTx, config: Config) {
     let rt = match Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -769,11 +789,7 @@ pub fn run_blocking(rx: Receiver<ToNeovim>, tx: Sender<FromNeovim>, config: Conf
     });
 }
 
-async fn run_neovim(
-    rx: Receiver<ToNeovim>,
-    tx: Sender<FromNeovim>,
-    config: &Config,
-) -> NvimResult<()> {
+async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> NvimResult<()> {
     log::info!("[NVIM] Starting Neovim...");
 
     // Start Neovim in embedded mode
@@ -938,7 +954,7 @@ async fn init_neovim(nvim: &Neovim<NvimWriter>, config: &Config) -> anyhow::Resu
 async fn handle_key(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
     config: &Config,
     last_mode: &mut String,
 ) -> anyhow::Result<()> {
@@ -1021,7 +1037,7 @@ async fn handle_key(
 async fn handle_commandline_mode(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
 ) -> anyhow::Result<bool> {
     if PENDING.load() != PendingState::CommandLine {
         return Ok(false);
@@ -1036,7 +1052,7 @@ async fn handle_commandline_mode(
 async fn handle_getchar_pending(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
     last_mode: &mut String,
 ) -> anyhow::Result<bool> {
     if PENDING.load() != PendingState::Getchar {
@@ -1067,7 +1083,7 @@ async fn handle_getchar_pending(
 async fn handle_commit_key(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
     config: &Config,
     last_mode: &mut String,
 ) -> anyhow::Result<bool> {
@@ -1094,7 +1110,7 @@ async fn handle_commit_key(
 async fn handle_backspace(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
 ) -> anyhow::Result<bool> {
     let pending = PENDING.load();
     if key != "<BS>" || pending.is_motion() || pending.is_register() {
@@ -1111,11 +1127,7 @@ async fn handle_backspace(
 }
 
 /// Handle Enter — detect empty buffer for passthrough. Skip if motion/register pending.
-async fn handle_enter(
-    nvim: &Neovim<NvimWriter>,
-    key: &str,
-    tx: &Sender<FromNeovim>,
-) -> anyhow::Result<bool> {
+async fn handle_enter(nvim: &Neovim<NvimWriter>, key: &str, tx: &MainTx) -> anyhow::Result<bool> {
     let pending = PENDING.load();
     if !matches!(key, "<CR>" | "<C-CR>" | "<A-CR>") || pending.is_motion() || pending.is_register()
     {
@@ -1133,7 +1145,7 @@ async fn handle_enter(
 async fn handle_insert_register(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
 ) -> anyhow::Result<bool> {
     if key != "<C-r>" || PENDING.load().is_pending() {
         return Ok(false);
@@ -1153,7 +1165,7 @@ async fn handle_insert_register(
 async fn handle_normal_register(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
 ) -> anyhow::Result<bool> {
     if key != "\"" || PENDING.load().is_pending() {
         return Ok(false);
@@ -1177,7 +1189,7 @@ async fn handle_normal_register(
 async fn handle_register_pending(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
     current: PendingState,
 ) -> anyhow::Result<Option<bool>> {
     if !current.is_register() {
@@ -1218,7 +1230,7 @@ async fn handle_register_pending(
 async fn handle_motion_pending(
     nvim: &Neovim<NvimWriter>,
     key: &str,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
     current: PendingState,
 ) -> anyhow::Result<bool> {
     log::debug!(
@@ -1255,7 +1267,7 @@ async fn handle_motion_pending(
 /// Query snapshot and handle post-key mode transitions (operator-pending, command-line recovery).
 async fn handle_snapshot_response(
     nvim: &Neovim<NvimWriter>,
-    tx: &Sender<FromNeovim>,
+    tx: &MainTx,
     last_mode: &mut String,
 ) -> anyhow::Result<()> {
     let snapshot = query_snapshot(nvim, tx).await?;
@@ -1296,10 +1308,7 @@ async fn is_blocked(nvim: &Neovim<NvimWriter>) -> anyhow::Result<bool> {
 
 /// Query full state snapshot from Neovim via collect_snapshot() Lua function.
 /// Replaces separate getline/col/strlen queries with a single RPC call.
-async fn query_snapshot(
-    nvim: &Neovim<NvimWriter>,
-    tx: &Sender<FromNeovim>,
-) -> anyhow::Result<Snapshot> {
+async fn query_snapshot(nvim: &Neovim<NvimWriter>, tx: &MainTx) -> anyhow::Result<Snapshot> {
     let result = nvim.exec_lua("return collect_snapshot()", vec![]).await?;
     let snapshot = parse_snapshot(&result).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 

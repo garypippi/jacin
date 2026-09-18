@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use calloop::{
     EventLoop, LoopSignal, RegistrationToken,
-    ping::make_ping,
+    ping::{Ping, make_ping},
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
 };
@@ -85,8 +85,11 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Ping used by the Neovim thread to wake the event loop after sending a message
+    let (nvim_wake, nvim_wake_source) = make_ping()?;
+
     // Spawn Neovim backend
-    let nvim = match neovim::spawn_neovim(config.clone()) {
+    let nvim = match neovim::spawn_neovim(config.clone(), Some(nvim_wake.clone())) {
         Ok(handle) => {
             log::info!("Neovim backend spawned");
             Some(handle)
@@ -145,6 +148,7 @@ fn main() -> anyhow::Result<()> {
         toggle_flag: Arc::new(AtomicBool::new(false)),
         config: config.clone(),
         nvim,
+        nvim_wake,
         visual_display: None,
         popup,
         repeat_timer_token: None,
@@ -189,6 +193,11 @@ fn main() -> anyhow::Result<()> {
     event_loop
         .handle()
         .insert_source(ping_source, |_, _, _| {})?;
+
+    // Wake-up source for Neovim messages (drained in the loop callback below)
+    event_loop
+        .handle()
+        .insert_source(nvim_wake_source, |_, _, _| {})?;
 
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -329,6 +338,8 @@ pub struct State {
     pub(crate) config: config::Config,
     // Neovim backend
     pub(crate) nvim: Option<NeovimHandle>,
+    // Wakes the event loop when the Neovim thread sends a message (reused on respawn)
+    pub(crate) nvim_wake: Ping,
     // Transient visual selection display state (observed from Neovim, not IME-owned)
     pub(crate) visual_display: Option<VisualSelection>,
     // Unified popup window (preedit, keypress, candidates)
