@@ -106,9 +106,28 @@ impl WaylandState {
         }
     }
 
+    /// Send an empty preedit to make the application report where the text
+    /// cursor is.
+    ///
+    /// jacin shows the text in its popup and never puts it in the preedit, but
+    /// some applications (Firefox and other GTK ones) only report the cursor
+    /// rectangle in response to a preedit update. Without this the compositor
+    /// keeps placing the popup where the previously focused field was.
+    ///
+    /// A second commit without a preedit ends the composition the empty
+    /// preedit starts: text committed during one is dropped by some editors.
+    pub fn refresh_cursor_rectangle(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.input_method.set_preedit_string(String::new(), 0, 0);
+        self.input_method.commit(self.serial);
+        self.input_method.commit(self.serial);
+        log::debug!("[IM] Requested cursor rectangle (serial={})", self.serial);
+    }
+
     pub fn commit_string(&mut self, text: &str) {
         self.input_method.commit_string(text.to_string());
-        self.input_method.set_preedit_string(String::new(), 0, 0);
         self.input_method.commit(self.serial);
     }
 

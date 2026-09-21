@@ -281,6 +281,7 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                     state.model.view.set_vim_mode("n");
                                 }
                                 state.keyboard.mark_ready();
+                                state.wayland.refresh_cursor_rectangle();
                                 if let Some(ref nvim) = state.nvim {
                                     if state.config.behavior.startinsert {
                                         log::debug!("[IME] Restoring insert mode");

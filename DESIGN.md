@@ -167,7 +167,7 @@ Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and
 
 ### Popup-Only Display
 
-- The app gets no preedit (`set_preedit_string` is only used to clear it on commit); text appears in the app only on commit
+- The app gets no preedit content; text appears in the app only on commit. An empty preedit is still sent whenever the IME is enabled, because applications such as Firefox only report the cursor rectangle in response to a preedit update, and the compositor otherwise places the popup at the previously focused field
 - UnifiedPopup renders Neovim's window grid (with floats such as nvim-cmp menus), keypress/mode, and candidates
 
 ### Wayland-Dependent vs Independent
