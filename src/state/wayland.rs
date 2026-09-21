@@ -28,6 +28,8 @@ pub struct WaylandState {
     pub virtual_keyboard: Option<ZwpVirtualKeyboardV1>,
     /// Whether the virtual keyboard has a keymap set (required before sending events)
     pub virtual_keyboard_ready: bool,
+    /// Hash of the keymap currently set on the virtual keyboard
+    virtual_keymap_hash: u64,
     /// Pending activate flag (set in Activate, processed in Done)
     pub pending_activate: bool,
     /// Pending deactivate flag (set in Deactivate, processed in Done)
@@ -44,6 +46,7 @@ impl WaylandState {
             active: false,
             virtual_keyboard: None,
             virtual_keyboard_ready: false,
+            virtual_keymap_hash: 0,
             pending_activate: false,
             pending_deactivate: false,
         }
@@ -68,14 +71,25 @@ impl WaylandState {
         }
     }
 
-    /// Set the keymap on the virtual keyboard (must be called before clear_modifiers)
+    /// Set the keymap on the virtual keyboard (must be called before clear_modifiers).
+    ///
+    /// The grab delivers a keymap on every activation, but setting the same one
+    /// again makes the compositor rebuild the virtual keyboard, and the keys it
+    /// sends afterwards never reach the application (passthrough silently stops
+    /// working once focus has moved between text fields).
     pub fn set_virtual_keymap(&mut self, keymap_str: &str) {
+        let hash = hash_keymap(keymap_str);
+        if self.virtual_keyboard_ready && self.virtual_keymap_hash == hash {
+            log::debug!("[VK] Keymap unchanged, not re-setting");
+            return;
+        }
         if let Some(ref vk) = self.virtual_keyboard
             && let Some(fd) = create_keymap_memfd(keymap_str)
         {
             let size = (keymap_str.len() + 1) as u32; // +1 for null terminator
             vk.keymap(1, fd.as_fd(), size); // 1 = XKB_V1 format
             self.virtual_keyboard_ready = true;
+            self.virtual_keymap_hash = hash;
             log::debug!("[VK] Keymap set on virtual keyboard (size={})", size);
         }
     }
@@ -127,6 +141,14 @@ impl WaylandState {
             mods_depressed
         );
     }
+}
+
+fn hash_keymap(keymap_str: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    keymap_str.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Create a memfd containing the keymap string (with null terminator) for the virtual keyboard
