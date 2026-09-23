@@ -63,7 +63,7 @@ impl State {
             // Clear Neovim buffer (must clear here, not rely on Deactivate —
             // rapid re-enable can happen before Deactivate fires)
             if let Some(ref nvim) = self.nvim {
-                nvim.send_key("<Esc>ggdG");
+                nvim.send_key(neovim::CLEAR_BUFFER_KEYS);
             }
             self.model.ime.disable();
         }
@@ -135,8 +135,8 @@ impl State {
 
     fn render_popup(&mut self) {
         // IME disabled: skip content generation entirely and ensure popup is hidden.
-        // After toggle-off, Neovim sends a burst of push notifications (<Esc>ggdG
-        // triggers mode changes and redraws) — without this guard, each notification
+        // After toggle-off, Neovim sends a burst of push notifications (clearing
+        // the buffer triggers mode changes and redraws) — without this guard, each notification
         // would rebuild PopupContent and potentially recreate/destroy surfaces.
         if !self.model.ime.is_enabled() {
             self.hide_popup();

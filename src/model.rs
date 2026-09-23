@@ -140,7 +140,7 @@ impl Model {
             }
             FromNeovim::BufLines { first, last, lines } => {
                 // Always applied: the mirror must follow Neovim even while
-                // disabled (e.g. the <Esc>ggdG sent on toggle-off)
+                // disabled (e.g. the buffer clear sent on toggle-off)
                 self.view.buffer.apply(first, last, lines);
                 vec![]
             }

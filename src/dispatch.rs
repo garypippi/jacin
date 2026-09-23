@@ -215,7 +215,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                         state.reset_ime_state();
                         // Clear Neovim buffer to reset state for next activation
                         if let Some(ref nvim) = state.nvim {
-                            nvim.send_key("<Esc>ggdG");
+                            nvim.send_key(crate::neovim::CLEAR_BUFFER_KEYS);
                         }
                     }
                 }

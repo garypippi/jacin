@@ -23,6 +23,12 @@ pub use protocol::{FromNeovim, GridCell, GridEvent, HlAttr, PendingState, ToNeov
 /// This provides backpressure if messages accumulate
 const CHANNEL_CAPACITY: usize = 64;
 
+/// Keys that return to normal mode and clear the buffer from any mode.
+/// After an insert-mode key that waits for an argument (<C-r>, <C-v>, <C-k>),
+/// the first <Esc> only cancels that key, so a second one is needed to leave
+/// insert mode before ggdG.
+pub const CLEAR_BUFFER_KEYS: &str = "<Esc><Esc>ggdG";
+
 /// Handle to communicate with Neovim backend
 pub struct NeovimHandle {
     sender: Sender<ToNeovim>,

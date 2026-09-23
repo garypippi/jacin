@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{FromNeovim, PendingState, spawn_neovim};
+use super::{CLEAR_BUFFER_KEYS, FromNeovim, PendingState, spawn_neovim};
 use crate::config::Config;
 use crate::model::Model;
 
@@ -392,9 +392,27 @@ fn buffer_mirror_follows_enew() {
     probe.keys(&["<Esc>", ":", "enew", "<CR>", "i", "x"]);
     probe.wait_buffer("x");
 
-    // Toggle-off clears the buffer with <Esc>ggdG
-    probe.keys(&["<Esc>", "g", "g", "d", "G"]);
+    // Toggle-off clears the buffer
+    probe.key(CLEAR_BUFFER_KEYS);
     probe.wait_buffer("");
+
+    probe.shutdown();
+}
+
+/// Toggle-off clears the buffer even while an insert-mode key waits for its
+/// argument (the keys must not be inserted as text).
+#[test]
+#[ignore]
+fn clear_buffer_keys_work_after_pending_insert_keys() {
+    let mut probe = Probe::spawn(true);
+
+    for pending_key in ["<C-r>", "<C-v>", "<C-k>"] {
+        probe.keys(&["a", "b", "c", pending_key]);
+        probe.key(CLEAR_BUFFER_KEYS);
+        probe.wait_buffer("");
+        // Back to insert mode for the next case, as re-enabling does
+        probe.key("i");
+    }
 
     probe.shutdown();
 }
