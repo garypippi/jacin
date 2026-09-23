@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use super::{BufferMirror, Screen};
+use crate::neovim::Mode;
 
 /// How long a transient message stays visible before auto-clearing
 pub const TRANSIENT_MESSAGE_DURATION: Duration = Duration::from_millis(2000);
@@ -27,8 +28,8 @@ pub struct Cmdline {
 /// Display state observed from Neovim
 #[derive(Debug, Default)]
 pub struct NvimView {
-    /// Current vim mode string (i, n, v, no, c, etc.)
-    pub vim_mode: String,
+    /// Vim mode, from mode_change and nvim_get_mode (whichever came last)
+    pub mode: Mode,
     /// Currently recording macro register ("" when not recording)
     pub recording: String,
     /// Completion candidates
@@ -57,10 +58,6 @@ impl NvimView {
         self.clear_transient_message();
     }
 
-    pub fn set_vim_mode(&mut self, mode: &str) {
-        self.vim_mode = mode.to_string();
-    }
-
     /// Update candidates (clears any transient message — candidates take priority)
     pub fn set_candidates(&mut self, candidates: Vec<String>, selected: usize) {
         self.candidates = candidates;
@@ -86,7 +83,6 @@ impl NvimView {
             prefix_len: prefix.len(),
             level,
         });
-        self.set_vim_mode("c");
     }
 
     /// Update command-line cursor position. Returns true if updated.
@@ -174,29 +170,29 @@ mod tests {
     }
 
     #[test]
-    fn clear_keeps_vim_mode() {
-        let mut view = NvimView::default();
-        view.set_vim_mode("n");
+    fn clear_keeps_mode() {
+        let mut view = NvimView {
+            mode: Mode::Visual,
+            ..Default::default()
+        };
         view.recording = "q".into();
         view.set_candidates(vec!["a".into()], 0);
         view.show_cmdline(":", "set", 3, 1);
-        view.set_vim_mode("n");
 
         view.clear();
-        assert_eq!(view.vim_mode, "n");
+        assert_eq!(view.mode, Mode::Visual);
         assert!(view.recording.is_empty());
         assert!(view.candidates.is_empty());
         assert!(view.cmdline.is_none());
     }
 
     #[test]
-    fn show_cmdline_sets_text_cursor_and_mode() {
+    fn show_cmdline_sets_text_and_cursor() {
         let mut view = NvimView::default();
         view.show_cmdline(":", "hello", 2, 1);
         let c = view.cmdline.as_ref().unwrap();
         assert_eq!(c.text, ":hello");
         assert_eq!(c.cursor_byte, 3);
-        assert_eq!(view.vim_mode, "c");
     }
 
     #[test]

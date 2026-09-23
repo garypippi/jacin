@@ -1,8 +1,13 @@
+use std::os::fd::OwnedFd;
 use std::sync::atomic::Ordering;
+
+use calloop::PostAction;
+use calloop::generic::Generic;
+use calloop::{Interest, Mode as Trigger};
 
 use crate::State;
 use crate::model::Effect;
-use crate::neovim::{self, FromNeovim};
+use crate::neovim::{CLEAR_BUFFER_KEYS, FromNeovim, Neovim, ReadStatus};
 use crate::ui::{MAX_GRID_ROWS, PopupContent};
 
 impl State {
@@ -29,20 +34,8 @@ impl State {
 
         if !was_enabled {
             // Respawn Neovim if it exited (e.g., after :q)
-            if self.nvim.is_none() {
-                match neovim::spawn_neovim(self.config.clone(), Some(self.nvim_wake.clone())) {
-                    Ok(handle) => {
-                        log::info!("[IME] Respawned Neovim backend");
-                        if let Some((cols, rows)) = self.ui_grid_size {
-                            handle.resize_ui(cols, rows);
-                        }
-                        self.nvim = Some(handle);
-                    }
-                    Err(e) => {
-                        log::error!("[IME] Failed to respawn Neovim: {}", e);
-                        return;
-                    }
-                }
+            if self.nvim.is_none() && !self.start_nvim() {
+                return;
             }
             if self.wayland.active && self.wayland.keyboard_grab.is_none() {
                 log::debug!("[IME] Grabbing keyboard");
@@ -62,9 +55,7 @@ impl State {
             self.reset_ime_state();
             // Clear Neovim buffer (must clear here, not rely on Deactivate —
             // rapid re-enable can happen before Deactivate fires)
-            if let Some(ref nvim) = self.nvim {
-                nvim.input(neovim::CLEAR_BUFFER_KEYS);
-            }
+            self.clear_nvim_buffer();
             self.model.ime.disable();
         }
     }
@@ -90,11 +81,6 @@ impl State {
                 Effect::Render => self.update_popup(),
                 Effect::CommitString(text) => self.wayland.commit_string(&text),
                 Effect::PassthroughKey(key) => self.wayland.send_virtual_key(key),
-                Effect::NvimInput(keys) => {
-                    if let Some(ref nvim) = self.nvim {
-                        nvim.input(keys);
-                    }
-                }
                 Effect::CancelToggle => self.toggle_flag.store(false, Ordering::SeqCst),
                 Effect::NvimExited => {
                     self.release_ime_resources();
@@ -102,6 +88,136 @@ impl State {
                 }
             }
         }
+    }
+
+    /// Spawn Neovim and watch its stdout. Returns false if it failed.
+    pub(crate) fn start_nvim(&mut self) -> bool {
+        let nvim = match Neovim::spawn(&self.config, self.ui_grid_size) {
+            Ok(nvim) => nvim,
+            Err(e) => {
+                log::error!("[NVIM] Failed to spawn Neovim: {e}");
+                return false;
+            }
+        };
+        // The source gets its own fd; the pipe itself stays with `Neovim`
+        let fd = match nvim.read_fd().try_clone_to_owned() {
+            Ok(fd) => fd,
+            Err(e) => {
+                log::error!("[NVIM] Failed to watch Neovim output: {e}");
+                return false;
+            }
+        };
+        let source = Generic::new(fd, Interest::READ, Trigger::Level);
+        match self.loop_handle.insert_source(source, |_, _, state| {
+            state.on_nvim_readable();
+            // Neovim exited: this source belonged to it
+            Ok(if state.nvim.is_some() {
+                PostAction::Continue
+            } else {
+                PostAction::Remove
+            })
+        }) {
+            Ok(_) => {
+                log::info!("[NVIM] Neovim backend spawned");
+                self.nvim = Some(nvim);
+                true
+            }
+            Err(e) => {
+                log::error!("[NVIM] Failed to watch Neovim output: {e}");
+                false
+            }
+        }
+    }
+
+    /// Handle everything Neovim has sent
+    fn on_nvim_readable(&mut self) {
+        let Some(nvim) = self.nvim.as_mut() else {
+            return;
+        };
+        let status = nvim.read();
+        self.drain_nvim_messages();
+        if status == ReadStatus::Eof && self.nvim.is_some() {
+            self.handle_nvim_message(FromNeovim::NvimExited);
+        }
+    }
+
+    /// Handle Neovim messages one at a time: each one's events are applied
+    /// to the model before the next message is handled, which reads its mode
+    fn drain_nvim_messages(&mut self) {
+        loop {
+            let mode = self.model.view.mode;
+            let Some(nvim) = self.nvim.as_mut() else {
+                return;
+            };
+            match nvim.next_message(mode) {
+                Ok(Some(events)) => {
+                    for event in events {
+                        self.handle_nvim_message(event);
+                    }
+                }
+                Ok(None) => return,
+                Err(e) => {
+                    log::error!("[NVIM] {e}");
+                    nvim.kill();
+                    self.handle_nvim_message(FromNeovim::NvimExited);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Watch stdin while requests wait for the pipe to take them
+    pub(crate) fn watch_nvim_writable(&mut self) {
+        let Some(ref nvim) = self.nvim else {
+            return;
+        };
+        if !nvim.wants_write() || self.nvim_write_token.is_some() {
+            return;
+        }
+        let fd: OwnedFd = match nvim.write_fd().try_clone_to_owned() {
+            Ok(fd) => fd,
+            Err(e) => {
+                log::error!("[NVIM] Failed to watch Neovim input: {e}");
+                return;
+            }
+        };
+        let source = Generic::new(fd, Interest::WRITE, Trigger::Level);
+        match self.loop_handle.insert_source(source, |_, _, state| {
+            if let Some(ref mut nvim) = state.nvim {
+                nvim.flush();
+                if nvim.wants_write() {
+                    return Ok(PostAction::Continue);
+                }
+            }
+            state.nvim_write_token = None;
+            Ok(PostAction::Remove)
+        }) {
+            Ok(token) => self.nvim_write_token = Some(token),
+            Err(e) => log::error!("[NVIM] Failed to watch Neovim input: {e}"),
+        }
+    }
+
+    /// Input keys on jacin's behalf (after keys already queued)
+    pub(crate) fn nvim_input(&mut self, keys: &str) {
+        let mode = self.model.view.mode;
+        let Some(nvim) = self.nvim.as_mut() else {
+            return;
+        };
+        let events = nvim.input(keys, mode);
+        for event in events {
+            self.handle_nvim_message(event);
+        }
+    }
+
+    /// Clear Neovim's buffer, dropping keys not processed yet (they were
+    /// typed for the text being thrown away)
+    pub(crate) fn clear_nvim_buffer(&mut self) {
+        if let Some(nvim) = self.nvim.as_mut() {
+            for seq in nvim.discard_queued_keys() {
+                self.model.sent_keys.remove(seq);
+            }
+        }
+        self.nvim_input(CLEAR_BUFFER_KEYS);
     }
 
     /// Request a popup redraw. Rendering is deferred to the end of the
@@ -130,7 +246,7 @@ impl State {
         }
         let t = std::time::Instant::now();
         let content = PopupContent {
-            vim_mode: self.model.view.vim_mode.clone(),
+            mode: self.model.view.mode,
             keypress_entries: if let Some(ref cmdline) = self.model.view.cmdline {
                 vec![cmdline.text.clone()]
             } else if self.model.keypress.should_show() {

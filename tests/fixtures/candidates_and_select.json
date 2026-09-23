@@ -1,7 +1,7 @@
 {
   "description": "Type, see candidates, select one, then commit",
   "messages": [
-    { "ModeChange": "i" },
+    { "ModeChange": "Insert" },
     { "BufLines": { "first": 0, "last": 1, "lines": ["かん"] } },
     { "Candidates": { "candidates": ["漢字", "感じ", "幹事"], "selected": 0 } },
     { "Candidates": { "candidates": ["漢字", "感じ", "幹事"], "selected": 1 } },
@@ -9,7 +9,7 @@
     { "Commit": "感じ" }
   ],
   "expect": {
-    "vim_mode": "i",
+    "mode": "Insert",
     "recording": "",
     "candidates_count": 0,
     "committed": ["感じ"],

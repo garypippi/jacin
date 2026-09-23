@@ -1,95 +1,43 @@
 //! Typed protocol messages for Neovim communication
 //!
-//! Defines all messages that can be sent to/from the Neovim backend.
-
-use std::sync::atomic::{AtomicU8, Ordering};
+//! Messages from the Neovim backend to the IME model.
 
 use serde::{Deserialize, Serialize};
 
-/// Pending state for multi-key sequences in the Neovim handler.
+use super::mode::Mode;
+
+/// Multi-key sequence in progress, reported with each processed key.
 ///
 /// These states are mutually exclusive — only one can be active at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[repr(u8)]
 pub enum PendingState {
     /// No pending operation
-    None = 0,
+    None,
     /// Neovim blocked in getchar (after q, f, t, r, m, etc.)
-    Getchar = 1,
+    Getchar,
     /// Operator pending, waiting for motion (after d, c, y, etc.)
-    Motion = 2,
-    /// Operator pending after i/a, waiting for text object char
-    TextObject = 3,
+    Motion,
     /// Insert mode <C-r>, waiting for register name
-    InsertRegister = 4,
+    InsertRegister,
     /// Normal mode " prefix, waiting for register name
-    NormalRegister = 5,
-    /// In command-line mode (after typing :)
-    CommandLine = 6,
+    NormalRegister,
+    /// In command-line mode (derived from the mode, not a key sequence)
+    CommandLine,
 }
 
 impl PendingState {
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::Getchar,
-            2 => Self::Motion,
-            3 => Self::TextObject,
-            4 => Self::InsertRegister,
-            5 => Self::NormalRegister,
-            6 => Self::CommandLine,
-            _ => Self::None,
-        }
-    }
-
     pub fn is_pending(self) -> bool {
         self != Self::None
     }
 
-    /// Check if in a motion-pending state (Motion or TextObject)
     pub fn is_motion(self) -> bool {
-        matches!(self, Self::Motion | Self::TextObject)
+        self == Self::Motion
     }
 
     /// Check if in a register-pending state (InsertRegister or NormalRegister)
     pub fn is_register(self) -> bool {
         matches!(self, Self::InsertRegister | Self::NormalRegister)
     }
-}
-
-/// Atomic wrapper around `PendingState` for cross-thread sharing.
-pub struct AtomicPendingState(AtomicU8);
-
-impl AtomicPendingState {
-    pub const fn new() -> Self {
-        Self(AtomicU8::new(PendingState::None as u8))
-    }
-
-    pub fn load(&self) -> PendingState {
-        PendingState::from_u8(self.0.load(Ordering::SeqCst))
-    }
-
-    pub fn store(&self, state: PendingState) {
-        self.0.store(state as u8, Ordering::SeqCst);
-    }
-
-    pub fn clear(&self) {
-        self.store(PendingState::None);
-    }
-}
-
-/// Messages sent from IME to Neovim
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToNeovim {
-    /// A key typed by the user (raw key string like "a", "A", "<BS>", "<CR>"),
-    /// acknowledged with `KeyProcessed` carrying the same `seq`
-    Key { seq: u64, key: String },
-    /// Keys input on jacin's behalf (clearing the buffer, restoring the
-    /// mode): not handled as user keys and not acknowledged
-    Input(String),
-    /// Resize the attached UI (grid columns x rows)
-    ResizeUi { width: u64, height: u64 },
-    /// Shutdown Neovim
-    Shutdown,
 }
 
 /// One run of cells in a `grid_line` event (hl id already resolved)
@@ -225,8 +173,8 @@ pub enum FromNeovim {
     CmdlineHide { level: u64 },
     /// Command output message (e.g., from :s/foo/bar/g)
     CmdlineMessage { text: String, cmdtype: String },
-    /// Vim mode changed (from mode_change redraw event)
-    ModeChange(String),
+    /// Vim mode changed (mode_change redraw event or nvim_get_mode reply)
+    ModeChange(Mode),
     /// Key `seq` should be passed through to the application via virtual
     /// keyboard
     PassthroughKey { seq: u64 },
@@ -273,34 +221,11 @@ mod tests {
         assert!(PendingState::Motion.is_pending());
 
         assert!(PendingState::Motion.is_motion());
-        assert!(PendingState::TextObject.is_motion());
         assert!(!PendingState::Getchar.is_motion());
 
         assert!(PendingState::InsertRegister.is_register());
         assert!(PendingState::NormalRegister.is_register());
         assert!(!PendingState::Motion.is_register());
-    }
-
-    #[test]
-    fn pending_state_roundtrip() {
-        for v in 0..=6u8 {
-            let state = PendingState::from_u8(v);
-            assert_eq!(state as u8, v);
-        }
-        // Out-of-range maps to None
-        assert_eq!(PendingState::from_u8(255), PendingState::None);
-    }
-
-    #[test]
-    fn atomic_pending_state() {
-        let atomic = AtomicPendingState::new();
-        assert_eq!(atomic.load(), PendingState::None);
-
-        atomic.store(PendingState::Motion);
-        assert_eq!(atomic.load(), PendingState::Motion);
-
-        atomic.clear();
-        assert_eq!(atomic.load(), PendingState::None);
     }
 
     fn roundtrip_from_neovim(msg: &FromNeovim) -> FromNeovim {
@@ -371,28 +296,6 @@ mod tests {
             // Just verify it doesn't panic — variant matching would be verbose
             let _ = rt;
         }
-    }
-
-    #[test]
-    fn to_neovim_roundtrip() {
-        let key = ToNeovim::Key {
-            seq: 7,
-            key: "<C-r>a".into(),
-        };
-        let json = serde_json::to_string(&key).unwrap();
-        let rt: ToNeovim = serde_json::from_str(&json).unwrap();
-        match rt {
-            ToNeovim::Key { seq, key } => {
-                assert_eq!(seq, 7);
-                assert_eq!(key, "<C-r>a");
-            }
-            _ => panic!("expected Key"),
-        }
-
-        let shutdown = ToNeovim::Shutdown;
-        let json = serde_json::to_string(&shutdown).unwrap();
-        let rt: ToNeovim = serde_json::from_str(&json).unwrap();
-        assert!(matches!(rt, ToNeovim::Shutdown));
     }
 
     #[test]

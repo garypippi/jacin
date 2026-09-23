@@ -1,5 +1,6 @@
 //! Layout calculation and constants for the unified popup
 
+use crate::neovim::Mode;
 use crate::state::WindowView;
 
 use super::text_render::TextRenderer;
@@ -49,7 +50,7 @@ pub(crate) const MODE_RECORDING_COLOR: Rgba = (224, 108, 117, 255); // Red
 /// Content to display in the unified popup
 #[derive(Default, Clone)]
 pub struct PopupContent {
-    pub vim_mode: String,
+    pub mode: Mode,
     pub keypress_entries: Vec<String>,
     pub candidates: Vec<String>,
     pub selected: usize,
@@ -71,23 +72,14 @@ impl PopupContent {
     }
 }
 
-/// Get mode label text and color from vim_mode string
-pub(crate) fn mode_label(vim_mode: &str) -> (&'static str, Rgba) {
-    if vim_mode.starts_with("no") {
-        ("OP", MODE_OP_COLOR)
-    } else {
-        match vim_mode {
-            "n" => ("NOR", MODE_NORMAL_COLOR),
-            "v" | "V" | "\x16" => ("VIS", MODE_VISUAL_COLOR),
-            "c" => ("CMD", MODE_CMD_COLOR),
-            _ => {
-                if vim_mode.starts_with('v') || vim_mode.starts_with('V') {
-                    ("VIS", MODE_VISUAL_COLOR)
-                } else {
-                    ("INS", MODE_INSERT_COLOR)
-                }
-            }
-        }
+/// Mode label text and color
+pub(crate) fn mode_label(mode: Mode) -> (&'static str, Rgba) {
+    match mode {
+        Mode::Insert | Mode::Replace => ("INS", MODE_INSERT_COLOR),
+        Mode::Normal | Mode::Other => ("NOR", MODE_NORMAL_COLOR),
+        Mode::OperatorPending => ("OP", MODE_OP_COLOR),
+        Mode::Visual => ("VIS", MODE_VISUAL_COLOR),
+        Mode::CmdLine => ("CMD", MODE_CMD_COLOR),
     }
 }
 
@@ -171,7 +163,7 @@ pub(crate) fn calculate_layout(
     let mut max_width: f32 = 0.0;
 
     // Keypress row icon width: mode_label + [gap + circle + gap + @reg] + separator area
-    let (mode_text, _) = mode_label(&content.vim_mode);
+    let (mode_text, _) = mode_label(content.mode);
     let mode_text_width = mono_renderer.measure_text(mode_text);
     let recording_width = if !content.recording.is_empty() {
         let rec_label = format_recording_label(&content.recording);
@@ -325,38 +317,12 @@ mod tests {
     // --- mode_label ---
 
     #[test]
-    fn mode_label_insert() {
-        let (label, color) = mode_label("i");
-        assert_eq!(label, "INS");
-        assert_eq!(color, MODE_INSERT_COLOR);
-    }
-
-    #[test]
-    fn mode_label_normal() {
-        let (label, color) = mode_label("n");
-        assert_eq!(label, "NOR");
-        assert_eq!(color, MODE_NORMAL_COLOR);
-    }
-
-    #[test]
-    fn mode_label_visual() {
-        assert_eq!(mode_label("v").0, "VIS");
-        assert_eq!(mode_label("V").0, "VIS");
-        assert_eq!(mode_label("\x16").0, "VIS");
-        // v-prefix
-        assert_eq!(mode_label("vs").0, "VIS");
-    }
-
-    #[test]
-    fn mode_label_operator_pending() {
-        assert_eq!(mode_label("no").0, "OP");
-        assert_eq!(mode_label("nov").0, "OP");
-    }
-
-    #[test]
-    fn mode_label_command() {
-        let (label, color) = mode_label("c");
-        assert_eq!(label, "CMD");
-        assert_eq!(color, MODE_CMD_COLOR);
+    fn mode_labels() {
+        assert_eq!(mode_label(Mode::Insert), ("INS", MODE_INSERT_COLOR));
+        assert_eq!(mode_label(Mode::Replace).0, "INS");
+        assert_eq!(mode_label(Mode::Normal), ("NOR", MODE_NORMAL_COLOR));
+        assert_eq!(mode_label(Mode::Visual), ("VIS", MODE_VISUAL_COLOR));
+        assert_eq!(mode_label(Mode::OperatorPending), ("OP", MODE_OP_COLOR));
+        assert_eq!(mode_label(Mode::CmdLine), ("CMD", MODE_CMD_COLOR));
     }
 }

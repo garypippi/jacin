@@ -4,7 +4,7 @@
 //! returns the side effects to perform. It does no I/O, so message sequences
 //! can be replayed in tests; `State::apply_effects` executes the effects.
 
-use crate::neovim::FromNeovim;
+use crate::neovim::{FromNeovim, Mode, PendingState};
 use crate::state::{BufferMirror, ImeState, KeypressState, NvimView, Screen, SentKey, SentKeys};
 
 /// Side effect requested by `Model::reduce`
@@ -16,8 +16,6 @@ pub enum Effect {
     CommitString(String),
     /// Forward a key to the application
     PassthroughKey(SentKey),
-    /// Send keys to Neovim
-    NvimInput(&'static str),
     /// Drop a pending IME toggle request (Alt in the commit key <A-;>
     /// also triggers SIGUSR1 — don't let it re-enable after commit)
     CancelToggle,
@@ -51,9 +49,29 @@ impl Model {
         let enabled = self.ime.is_fully_enabled();
         match msg {
             FromNeovim::Ready => vec![],
-            FromNeovim::KeyProcessed { seq, .. } => {
+            FromNeovim::KeyProcessed { seq, pending } => {
+                let key = self.sent_keys.get(seq).cloned();
                 self.sent_keys.acknowledge(seq);
-                vec![]
+                // The command line is shown by cmdline_show instead
+                if !enabled || pending == PendingState::CommandLine {
+                    return vec![];
+                }
+                let mut effects = vec![];
+                if let Some(key) = key {
+                    // In insert mode, only Ctrl/Alt keys (<C-r>a, <C-w>) and
+                    // register names after <C-r> are shown, not typed text,
+                    // <BS>, <CR>, etc.
+                    let show = self.view.mode != Mode::Insert
+                        || key.ctrl
+                        || key.alt
+                        || self.keypress.pending_type == PendingState::InsertRegister;
+                    if show {
+                        self.keypress.push_key(&key.vim_key);
+                        effects.push(Effect::Render);
+                    }
+                }
+                self.keypress.set_pending(pending);
+                effects
             }
             FromNeovim::Commit(text) => {
                 self.view.clear_candidates();
@@ -61,8 +79,6 @@ impl Model {
                 vec![
                     Effect::CommitString(text),
                     Effect::CancelToggle,
-                    // Clear Neovim buffer and stay in insert mode for next input
-                    Effect::NvimInput("<Esc>ggdGi"),
                     Effect::Render,
                 ]
             }
@@ -85,7 +101,7 @@ impl Model {
                 vec![Effect::Render]
             }
             FromNeovim::PassthroughKey { seq } => match self.sent_keys.get(seq) {
-                Some(key) => vec![Effect::PassthroughKey(key)],
+                Some(key) => vec![Effect::PassthroughKey(key.clone())],
                 None => {
                     log::warn!("[IME] PassthroughKey for unknown key #{seq}");
                     vec![]
@@ -135,11 +151,14 @@ impl Model {
                 vec![Effect::Render]
             }
             FromNeovim::ModeChange(mode) => {
-                if !enabled {
-                    return vec![];
+                // Always applied: key processing reads it, also for keys
+                // input while disabled (e.g. the buffer clear on toggle-off)
+                self.view.mode = mode;
+                if enabled {
+                    vec![Effect::Render]
+                } else {
+                    vec![]
                 }
-                self.view.set_vim_mode(&mode);
-                vec![Effect::Render]
             }
             FromNeovim::NvimExited => {
                 self.reset();
@@ -148,6 +167,7 @@ impl Model {
                 // Neovim starts from scratch (otherwise it flashes on re-enable)
                 self.view.screen = Screen::default();
                 self.view.buffer = BufferMirror::default();
+                self.view.mode = Mode::default();
                 self.sent_keys.clear();
                 vec![Effect::NvimExited]
             }
@@ -218,7 +238,7 @@ mod replay_tests {
 
     #[derive(Deserialize)]
     struct Expected {
-        vim_mode: String,
+        mode: Mode,
         recording: String,
         candidates_count: usize,
         committed: Vec<String>,
@@ -240,10 +260,7 @@ mod replay_tests {
 
         let model = &replay.model;
         let expect = &fixture.expect;
-        assert_eq!(
-            model.view.vim_mode, expect.vim_mode,
-            "vim_mode mismatch in {path}"
-        );
+        assert_eq!(model.view.mode, expect.mode, "mode mismatch in {path}");
         assert_eq!(
             model.view.recording, expect.recording,
             "recording mismatch in {path}"
@@ -286,7 +303,7 @@ mod replay_tests {
     }
 
     #[test]
-    fn commit_clears_buffer_and_cancels_toggle() {
+    fn commit_cancels_toggle() {
         let mut model = enabled_model();
         let effects = model.reduce(FromNeovim::Commit("確定".into()));
         assert_eq!(
@@ -294,7 +311,6 @@ mod replay_tests {
             vec![
                 Effect::CommitString("確定".into()),
                 Effect::CancelToggle,
-                Effect::NvimInput("<Esc>ggdGi"),
                 Effect::Render,
             ]
         );
@@ -360,16 +376,19 @@ mod replay_tests {
                 depressed: if ctrl { 0x4 } else { 0 },
                 ..Default::default()
             },
+            vim_key: if ctrl { "<C-x>".into() } else { "x".into() },
+            ctrl,
+            alt: false,
         }
     }
 
-    /// A passthrough arriving after the next key was sent (its wait timed
-    /// out) forwards its own key, with the modifiers held when it was pressed.
+    /// A passthrough arriving after the next key was sent forwards its own
+    /// key, with the modifiers held when it was pressed.
     #[test]
     fn late_passthrough_forwards_its_own_key() {
         let mut model = enabled_model();
         let commit_key = sent_key(28, true);
-        let first = model.sent_keys.push(commit_key);
+        let first = model.sent_keys.push(commit_key.clone());
         model.sent_keys.push(sent_key(30, false));
 
         assert_eq!(
@@ -384,7 +403,7 @@ mod replay_tests {
         let seq = model.sent_keys.push(sent_key(14, false));
         model.reduce(FromNeovim::KeyProcessed {
             seq,
-            pending: crate::neovim::PendingState::None,
+            pending: PendingState::None,
         });
 
         assert!(model.reduce(FromNeovim::PassthroughKey { seq }).is_empty());
@@ -397,5 +416,68 @@ mod replay_tests {
         model.reduce(FromNeovim::NvimExited);
 
         assert!(model.sent_keys.get(seq).is_none());
+    }
+
+    fn processed(model: &mut Model, key: SentKey, pending: PendingState) -> Vec<Effect> {
+        let seq = model.sent_keys.push(key);
+        model.reduce(FromNeovim::KeyProcessed { seq, pending })
+    }
+
+    #[test]
+    fn processed_key_is_shown_outside_insert_mode() {
+        let mut model = enabled_model();
+        model.view.mode = Mode::Normal;
+        let effects = processed(&mut model, sent_key(32, false), PendingState::Motion);
+        assert_eq!(effects, vec![Effect::Render]);
+        assert_eq!(model.keypress.display_text(), "x");
+        assert_eq!(model.keypress.pending_type, PendingState::Motion);
+    }
+
+    #[test]
+    fn typed_text_in_insert_mode_is_not_shown() {
+        let mut model = enabled_model();
+        model.view.mode = Mode::Insert;
+        assert!(processed(&mut model, sent_key(32, false), PendingState::None).is_empty());
+        assert_eq!(model.keypress.display_text(), "");
+
+        // Ctrl keys are
+        processed(&mut model, sent_key(32, true), PendingState::InsertRegister);
+        assert_eq!(model.keypress.display_text(), "<C-x>");
+        // and so is the register name after <C-r>
+        processed(&mut model, sent_key(30, false), PendingState::None);
+        assert_eq!(model.keypress.display_text(), "<C-x>x");
+    }
+
+    #[test]
+    fn cmdline_keys_are_not_shown() {
+        let mut model = enabled_model();
+        model.view.mode = Mode::CmdLine;
+        let seq = model.sent_keys.push(sent_key(32, false));
+        let effects = model.reduce(FromNeovim::KeyProcessed {
+            seq,
+            pending: PendingState::CommandLine,
+        });
+        assert!(effects.is_empty());
+        assert!(model.sent_keys.get(seq).is_none());
+        assert_eq!(model.keypress.display_text(), "");
+    }
+
+    #[test]
+    fn mode_is_followed_while_disabled() {
+        let mut model = Model::new();
+        assert!(
+            model
+                .reduce(FromNeovim::ModeChange(Mode::Insert))
+                .is_empty()
+        );
+        assert_eq!(model.view.mode, Mode::Insert);
+    }
+
+    #[test]
+    fn last_mode_wins() {
+        let mut model = enabled_model();
+        model.reduce(FromNeovim::ModeChange(Mode::Insert));
+        model.reduce(FromNeovim::ModeChange(Mode::Normal));
+        assert_eq!(model.view.mode, Mode::Normal);
     }
 }

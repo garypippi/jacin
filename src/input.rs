@@ -2,7 +2,7 @@ use wayland_client::protocol::wl_keyboard;
 
 use crate::State;
 use crate::keysym::keysym_to_vim;
-use crate::neovim::{FromNeovim, PendingState};
+use crate::neovim::MAX_QUEUED_KEYS;
 use crate::state::SentKey;
 
 /// Scope guard that logs elapsed time on drop.
@@ -72,77 +72,44 @@ impl State {
         );
         log::debug!("[KEY] vim_key={:?}", vim_key);
 
-        if let Some(ref vim_key) = vim_key {
-            // Kept with the key in case Neovim passes it through
-            let seq = self.model.sent_keys.push(SentKey {
-                keycode: key,
-                mods: self.keyboard.mods,
-            });
-            let sent = self
-                .nvim
-                .as_ref()
-                .is_some_and(|nvim| nvim.send_key(seq, vim_key));
-            // Wait for Neovim response with timeout; on timeout keep the
-            // previous pending state
-            let after = if sent {
-                self.wait_for_nvim_response(seq)
-            } else {
-                self.model.sent_keys.remove(seq);
-                None
-            }
-            .unwrap_or(self.model.keypress.pending_type);
-
-            // Command-line mode: display updates come via ext_cmdline (cmdline_show)
-            if after == PendingState::CommandLine {
-                return;
-            }
-
-            // Keypress display: in insert mode, only show Ctrl/Alt modified keys
-            // (e.g., <C-r>a, <C-w>) and pending register names (key after <C-r>);
-            // suppress normal typing, <BS>, <CR>, etc.
-            let should_show_keypress = !self.model.view.vim_mode.starts_with('i')
-                || self.keyboard.ctrl_pressed
-                || self.keyboard.alt_pressed
-                || self.model.keypress.pending_type == PendingState::InsertRegister;
-
-            if should_show_keypress {
-                self.model.keypress.push_key(vim_key);
-                self.update_popup();
-            }
-
-            self.model.keypress.set_pending(after);
-        } else {
+        let Some(vim_key) = vim_key else {
             log::debug!(
                 "[SKIP] no printable char, ctrl={}",
                 self.keyboard.ctrl_pressed
             );
+            return;
+        };
+        let mode = self.model.view.mode;
+        let Some(nvim) = self.nvim.as_mut() else {
+            return;
+        };
+        if nvim.queued_keys() >= MAX_QUEUED_KEYS {
+            log::warn!("[KEY] {vim_key:?} dropped: Neovim is not keeping up");
+            return;
         }
-        _perf.mode = self.model.view.vim_mode.clone();
+        // Kept with the key to show it and in case Neovim passes it through
+        let seq = self.model.sent_keys.push(SentKey {
+            keycode: key,
+            mods: self.keyboard.mods,
+            vim_key: vim_key.clone(),
+            ctrl: self.keyboard.ctrl_pressed,
+            alt: self.keyboard.alt_pressed,
+        });
+        // Not waited for: KeyProcessed and the rest arrive as Neovim messages
+        let events = nvim.push_key(seq, &vim_key, mode);
+        for event in events {
+            self.handle_nvim_message(event);
+        }
+        _perf.mode = format!("{:?}", self.model.view.mode);
     }
 
-    /// Handle Neovim messages until `KeyProcessed` for key `seq` arrives (or
-    /// 200ms deadline). Returns the pending state it reports, None on timeout.
-    fn wait_for_nvim_response(&mut self, seq: u64) -> Option<PendingState> {
-        let _perf = PerfGuard::new("nvim_rpc");
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                log::debug!("[NVIM] wait_for_nvim_response: deadline reached");
-                return None;
-            }
-            let msg = self.nvim.as_ref().and_then(|n| n.recv_timeout(remaining))?;
-            // An earlier key's late acknowledgment doesn't end the wait
-            let done = match msg {
-                FromNeovim::KeyProcessed { seq: s, pending } if s == seq => Some(pending),
-                _ => None,
-            };
-            self.handle_nvim_message(msg);
-            if done.is_some() {
-                return done;
-            }
+    /// A held key repeats only while Neovim keeps up: repeats are not queued
+    /// behind keys still being processed
+    pub(crate) fn handle_repeat_key(&mut self, key: u32) {
+        if self.nvim.as_ref().is_some_and(|nvim| nvim.is_busy()) {
+            return;
         }
+        self.handle_key(key, wl_keyboard::KeyState::Pressed);
     }
 
     pub(crate) fn update_modifiers(

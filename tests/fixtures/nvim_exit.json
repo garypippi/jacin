@@ -1,12 +1,12 @@
 {
   "description": "Neovim exits (:q), IME should be disabled",
   "messages": [
-    { "ModeChange": "i" },
+    { "ModeChange": "Insert" },
     { "BufLines": { "first": 0, "last": 1, "lines": ["test"] } },
     "NvimExited"
   ],
   "expect": {
-    "vim_mode": "i",
+    "mode": "Normal",
     "recording": "",
     "candidates_count": 0,
     "committed": [],

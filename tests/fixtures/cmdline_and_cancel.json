@@ -1,14 +1,14 @@
 {
   "description": "Enter command mode, type :set, then cancel",
   "messages": [
-    { "ModeChange": "n" },
+    { "ModeChange": "Normal" },
     { "CmdlineShow": { "content": "set", "pos": 3, "firstc": ":", "prompt": "", "level": 1 } },
-    { "ModeChange": "c" },
+    { "ModeChange": "CmdLine" },
     { "CmdlineHide": { "level": 1 } },
-    { "ModeChange": "n" }
+    { "ModeChange": "Normal" }
   ],
   "expect": {
-    "vim_mode": "n",
+    "mode": "Normal",
     "recording": "",
     "candidates_count": 0,
     "committed": [],

@@ -4,9 +4,11 @@
 //! communication protocol. They require `nvim` in PATH and are gated
 //! behind `#[ignore]` — run with `cargo test -- --ignored`.
 
+use std::collections::VecDeque;
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use super::{CLEAR_BUFFER_KEYS, FromNeovim, PendingState, spawn_neovim};
+use super::{CLEAR_BUFFER_KEYS, FromNeovim, Mode, Neovim, PendingState, ReadStatus};
 use crate::config::Config;
 use crate::model::Model;
 use crate::state::{Modifiers, SentKey};
@@ -23,11 +25,15 @@ fn clean_config_with_startinsert(startinsert: bool) -> Config {
     config
 }
 
-/// A Neovim backend whose every message is applied to a `Model`, so the
-/// buffer mirror, mode, recording and screen follow Neovim like in jacin.
+/// A Neovim backend whose every message is applied to a `Model` as it is
+/// handled, so the buffer mirror, mode, recording and screen follow Neovim
+/// like in jacin. Handled messages are also kept for the test to inspect.
 struct Probe {
-    handle: super::NeovimHandle,
+    nvim: Neovim,
     model: Model,
+    /// Handled messages not taken by `recv_timeout` yet
+    received: VecDeque<FromNeovim>,
+    exited: bool,
 }
 
 impl Probe {
@@ -36,24 +42,95 @@ impl Probe {
         Self::spawn_with(startinsert, None)
     }
 
-    /// Like `spawn`, resizing the UI (cols x rows) before Ready.
+    /// Like `spawn`, with the UI sized cols x rows.
     fn spawn_with(startinsert: bool, ui_size: Option<(usize, usize)>) -> Self {
-        let handle = spawn_neovim(clean_config_with_startinsert(startinsert), None)
+        let nvim = Neovim::spawn(&clean_config_with_startinsert(startinsert), ui_size)
             .expect("failed to spawn neovim");
-        if let Some((cols, rows)) = ui_size {
-            handle.resize_ui(cols, rows);
-        }
         let mut model = Model::new();
         model.ime.start_enabling();
         model.ime.complete_enabling();
-        let mut probe = Self { handle, model };
+        let mut probe = Self {
+            nvim,
+            model,
+            received: VecDeque::new(),
+            exited: false,
+        };
         probe
             .recv_until(|m| matches!(m, FromNeovim::Ready), STARTUP_TIMEOUT)
             .expect("Neovim did not send Ready");
         probe
     }
 
-    /// Receive (and apply) messages until one matches, or timeout.
+    fn apply(&mut self, events: Vec<FromNeovim>) {
+        for event in events {
+            self.model.reduce(event.clone());
+            self.received.push_back(event);
+        }
+    }
+
+    /// Wait up to `timeout` for Neovim's pipes, then handle what it sent
+    fn pump(&mut self, timeout: Duration) {
+        if self.exited {
+            std::thread::sleep(timeout);
+            return;
+        }
+        let mut fds = [
+            libc::pollfd {
+                fd: self.nvim.read_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.nvim.write_fd().as_raw_fd(),
+                events: if self.nvim.wants_write() {
+                    libc::POLLOUT
+                } else {
+                    0
+                },
+                revents: 0,
+            },
+        ];
+        // SAFETY: fds is a valid pollfd array for the duration of the call
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout.as_millis() as i32) };
+        if ready <= 0 {
+            return;
+        }
+        if fds[1].revents != 0 {
+            self.nvim.flush();
+        }
+        if fds[0].revents == 0 {
+            return;
+        }
+        let status = self.nvim.read();
+        loop {
+            let mode = self.model.view.mode;
+            match self.nvim.next_message(mode).expect("broken stream") {
+                Some(events) => self.apply(events),
+                None => break,
+            }
+        }
+        if status == ReadStatus::Eof {
+            self.exited = true;
+            self.apply(vec![FromNeovim::NvimExited]);
+        }
+    }
+
+    /// The next handled message, waiting up to `timeout` for one
+    fn recv_timeout(&mut self, timeout: Duration) -> Option<FromNeovim> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(msg) = self.received.pop_front() {
+                return Some(msg);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            self.pump(remaining.min(Duration::from_millis(100)));
+        }
+    }
+
+    /// Receive messages until one matches, or timeout.
     fn recv_until(
         &mut self,
         predicate: impl Fn(&FromNeovim) -> bool,
@@ -62,18 +139,8 @@ impl Probe {
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return None;
-            }
-            let Some(msg) = self
-                .handle
-                .recv_timeout(remaining.min(Duration::from_millis(100)))
-            else {
-                continue;
-            };
-            let matched = predicate(&msg);
-            self.model.reduce(msg.clone());
-            if matched {
+            let msg = self.recv_timeout(remaining)?;
+            if predicate(&msg) {
                 return Some(msg);
             }
         }
@@ -84,14 +151,13 @@ impl Probe {
         let deadline = Instant::now() + MSG_TIMEOUT;
         while !cond(&self.model) {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let msg = self.handle.recv_timeout(remaining).unwrap_or_else(|| {
+            if self.recv_timeout(remaining).is_none() {
                 panic!(
                     "timed out waiting for {what}: buffer={:?} mode={:?}",
                     self.model.view.buffer.text(),
-                    self.model.view.vim_mode
-                )
-            });
-            self.model.reduce(msg);
+                    self.model.view.mode
+                );
+            }
         }
     }
 
@@ -106,8 +172,12 @@ impl Probe {
         let seq = self.model.sent_keys.push(SentKey {
             keycode: 0,
             mods: Modifiers::default(),
+            vim_key: key.to_string(),
+            ctrl: false,
+            alt: false,
         });
-        assert!(self.handle.send_key(seq, key), "key {key:?} dropped");
+        let events = self.nvim.push_key(seq, key, self.model.view.mode);
+        self.apply(events);
         seq
     }
 
@@ -117,7 +187,7 @@ impl Probe {
         let mut msgs = Vec::new();
         loop {
             let msg = self
-                .recv_until(|_| true, MSG_TIMEOUT)
+                .recv_timeout(MSG_TIMEOUT)
                 .unwrap_or_else(|| panic!("no KeyProcessed for key {key:?}"));
             let done = matches!(msg, FromNeovim::KeyProcessed { seq: s, .. } if s == seq);
             msgs.push(msg);
@@ -131,17 +201,20 @@ impl Probe {
         keys.iter().flat_map(|k| self.key(k)).collect()
     }
 
+    /// Input keys on jacin's behalf
+    fn input(&mut self, keys: &str) {
+        let events = self.nvim.input(keys, self.model.view.mode);
+        self.apply(events);
+    }
+
     /// Whether a message matching `predicate` is among `msgs` (already
     /// received) or arrives within the timeout.
     fn saw(&mut self, msgs: &[FromNeovim], predicate: impl Fn(&FromNeovim) -> bool) -> bool {
         msgs.iter().any(&predicate) || self.recv_until(predicate, MSG_TIMEOUT).is_some()
     }
 
-    /// Shutdown Neovim and wait for NvimExited confirmation.
-    fn shutdown(mut self) {
-        self.handle.shutdown();
-        let exited = self.recv_until(|m| matches!(m, FromNeovim::NvimExited), MSG_TIMEOUT);
-        assert!(exited.is_some(), "expected NvimExited after shutdown");
+    fn shutdown(self) {
+        self.nvim.shutdown();
     }
 }
 
@@ -191,7 +264,7 @@ fn escape_switches_to_normal_mode() {
     probe.keys(&["h", "i"]);
     probe.wait_buffer("hi");
     probe.key("<Esc>");
-    probe.wait("normal mode", |m| m.view.vim_mode == "n");
+    probe.wait("normal mode", |m| m.view.mode == Mode::Normal);
 
     probe.shutdown();
 }
@@ -273,10 +346,10 @@ fn macro_recording_is_reported() {
     probe.shutdown();
 }
 
-/// cmdline_hide (level 1) ends the command-line pending state.
+/// Leaving the command line ends the command-line pending state.
 #[test]
 #[ignore]
-fn cmdline_hide_clears_pending() {
+fn leaving_cmdline_clears_pending() {
     let mut probe = Probe::spawn(false);
 
     let msgs = probe.keys(&[":", "echo 1"]);
@@ -299,14 +372,14 @@ fn cmdline_hide_clears_pending() {
 fn quit_exits_with_modified_buffer() {
     let mut probe = Probe::spawn(true);
     // buftype=nofile: plain :q must exit even with a modified buffer (no E37)
-    let mut msgs = Vec::new();
-    for key in ["a", "b", "<Esc>", ":", "q", "<CR>"] {
-        msgs.extend(probe.key(key));
-    }
-    // NvimExited may arrive before or after the <CR> acknowledgment
+    probe.keys(&["a", "b", "<Esc>", ":", "q"]);
+    // Neovim exits before answering, so <CR> is never acknowledged
+    probe.send("<CR>");
     assert!(
-        probe.saw(&msgs, |m| matches!(m, FromNeovim::NvimExited)),
-        "expected NvimExited after :q, got {msgs:?}"
+        probe
+            .recv_until(|m| matches!(m, FromNeovim::NvimExited), MSG_TIMEOUT)
+            .is_some(),
+        "expected NvimExited after :q"
     );
 }
 
@@ -405,7 +478,7 @@ fn buffer_mirror_follows_enew() {
     probe.wait_buffer("x");
 
     // Toggle-off clears the buffer
-    probe.handle.input(CLEAR_BUFFER_KEYS);
+    probe.input(CLEAR_BUFFER_KEYS);
     probe.wait_buffer("");
 
     probe.shutdown();
@@ -420,7 +493,7 @@ fn clear_buffer_keys_work_after_pending_insert_keys() {
 
     for pending_key in ["<C-r>", "<C-v>", "<C-k>"] {
         probe.keys(&["a", "b", "c", pending_key]);
-        probe.handle.input(CLEAR_BUFFER_KEYS);
+        probe.input(CLEAR_BUFFER_KEYS);
         probe.wait_buffer("");
         // Back to insert mode for the next case, as re-enabling does
         probe.key("i");
@@ -437,7 +510,7 @@ fn input_is_not_acknowledged() {
     let mut probe = Probe::spawn(true);
 
     probe.keys(&["a", "b"]);
-    probe.handle.input("<Esc>ggdGi");
+    probe.input("<Esc>ggdGi");
     let msgs = probe.key("c");
     let acks = msgs
         .iter()
@@ -464,6 +537,74 @@ fn passthrough_carries_its_key_seq() {
         matches!(msg, Some(FromNeovim::PassthroughKey { seq: s }) if s == seq),
         "expected PassthroughKey for key #{seq}, got {msg:?}"
     );
+
+    probe.shutdown();
+}
+
+/// Leaving insert mode by a mapping is followed: `r` then waits for its
+/// argument, and a <BS> right after it neither deadlocks nor edits the
+/// buffer (nvim_buf_get_lines would not answer while blocked in getchar).
+#[test]
+#[ignore]
+fn escape_by_mapping_then_getchar_key() {
+    let mut probe = Probe::spawn(true);
+
+    probe.keys(&["<Esc>", ":", "inoremap jj <lt>Esc>", "<CR>", "i", "a", "b"]);
+    probe.wait_buffer("ab");
+    // Sent back to back: r may start before mode_change reports normal mode
+    probe.send("j");
+    probe.send("j");
+    probe.send("r");
+    // Cancels r
+    probe.key("<BS>");
+    probe.wait("normal mode", |m| m.view.mode == Mode::Normal);
+
+    let msgs = probe.key("r");
+    assert_eq!(ack_pending(&msgs), PendingState::Getchar);
+    probe.key("x");
+    probe.wait_buffer("ax");
+
+    probe.shutdown();
+}
+
+/// The key right after executing a command line is a normal-mode key, even
+/// before cmdline_hide / mode_change arrive.
+#[test]
+#[ignore]
+fn key_right_after_cmdline_is_normal_mode_key() {
+    let mut probe = Probe::spawn(false);
+
+    probe.keys(&["i", "a", "<Esc>", ":", "echo 1"]);
+    probe.send("<CR>");
+    let msgs = probe.key("r");
+    assert_eq!(ack_pending(&msgs), PendingState::Getchar);
+    probe.key("x");
+    probe.wait_buffer("x");
+
+    probe.shutdown();
+}
+
+/// Keys typed right after the commit key (queued before the commit is
+/// known) are not cleared with the committed text.
+#[test]
+#[ignore]
+fn key_typed_right_after_commit_is_kept() {
+    let mut probe = Probe::spawn(true);
+
+    probe.keys(&["a", "b"]);
+    probe.wait_buffer("ab");
+    probe.send("<C-CR>");
+    probe.send("c");
+    assert!(
+        probe
+            .recv_until(
+                |m| matches!(m, FromNeovim::Commit(text) if text == "ab"),
+                MSG_TIMEOUT
+            )
+            .is_some(),
+        "expected Commit 'ab'"
+    );
+    probe.wait_buffer("c");
 
     probe.shutdown();
 }

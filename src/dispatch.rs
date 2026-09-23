@@ -214,9 +214,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                         // while deactivated — compositor clears preedit automatically)
                         state.reset_ime_state();
                         // Clear Neovim buffer to reset state for next activation
-                        if let Some(ref nvim) = state.nvim {
-                            nvim.input(crate::neovim::CLEAR_BUFFER_KEYS);
-                        }
+                        state.clear_nvim_buffer();
                     }
                 }
 
@@ -274,22 +272,15 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             if state.model.ime.complete_enabling()
                                 || state.model.ime.is_fully_enabled()
                             {
-                                // Set vim_mode for popup display to match initial mode
-                                if state.config.behavior.startinsert {
-                                    state.model.view.set_vim_mode("i");
-                                } else {
-                                    state.model.view.set_vim_mode("n");
-                                }
                                 state.keyboard.mark_ready();
                                 state.wayland.refresh_cursor_rectangle();
-                                if let Some(ref nvim) = state.nvim {
-                                    if state.config.behavior.startinsert {
-                                        log::debug!("[IME] Restoring insert mode");
-                                        nvim.input("<Esc>i");
-                                    } else {
-                                        log::debug!("[IME] Restoring normal mode");
-                                        nvim.input("<Esc>");
-                                    }
+                                // The mode shown follows from Neovim's reply
+                                if state.config.behavior.startinsert {
+                                    log::debug!("[IME] Restoring insert mode");
+                                    state.nvim_input("<Esc>i");
+                                } else {
+                                    log::debug!("[IME] Restoring normal mode");
+                                    state.nvim_input("<Esc>");
                                 }
                                 state.update_popup();
                             }

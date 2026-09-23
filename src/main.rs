@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use calloop::{
-    EventLoop, LoopSignal, RegistrationToken,
-    ping::{Ping, make_ping},
+    EventLoop, LoopHandle, LoopSignal, RegistrationToken,
+    ping::make_ping,
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
 };
@@ -11,7 +11,7 @@ use calloop_wayland_source::WaylandSource;
 use wayland_client::{
     Connection,
     globals::registry_queue_init,
-    protocol::{wl_compositor, wl_keyboard, wl_shm},
+    protocol::{wl_compositor, wl_shm},
 };
 use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manager_v2;
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1;
@@ -27,7 +27,7 @@ mod state;
 mod ui;
 
 use model::Model;
-use neovim::NeovimHandle;
+use neovim::Neovim;
 use state::{Animations, KeyRepeatState, KeyboardState, WaylandState};
 use ui::{TextRenderer, UnifiedPopup};
 
@@ -81,20 +81,6 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Ping used by the Neovim thread to wake the event loop after sending a message
-    let (nvim_wake, nvim_wake_source) = make_ping()?;
-
-    let nvim = match neovim::spawn_neovim(config.clone(), Some(nvim_wake.clone())) {
-        Ok(handle) => {
-            log::info!("Neovim backend spawned");
-            Some(handle)
-        }
-        Err(e) => {
-            log::warn!("Failed to spawn Neovim: {} (continuing without backend)", e);
-            None
-        }
-    };
-
     let font_size = config
         .font
         .size
@@ -127,12 +113,14 @@ fn main() -> anyhow::Result<()> {
     // Size Neovim's UI to what the popup can show, so long lines wrap at
     // the popup width and Neovim scrolls the window itself
     let ui_grid_size = popup.as_mut().map(|popup| popup.grid_ui_size());
-    if let (Some(nvim), Some((cols, rows))) = (&nvim, ui_grid_size) {
+    if let Some((cols, rows)) = ui_grid_size {
         log::info!("[IME] UI grid size: {}x{}", cols, rows);
-        nvim.resize_ui(cols, rows);
     }
 
+    let mut event_loop: EventLoop<'static, State> = EventLoop::try_new()?;
+
     let mut state = State {
+        loop_handle: event_loop.handle(),
         loop_signal: None,
         wayland: {
             let mut ws = WaylandState::new(qh.clone(), input_method);
@@ -146,8 +134,8 @@ fn main() -> anyhow::Result<()> {
         pending_exit: false,
         toggle_flag: Arc::new(AtomicBool::new(false)),
         config: config.clone(),
-        nvim,
-        nvim_wake,
+        nvim: None,
+        nvim_write_token: None,
         ui_grid_size,
         popup,
         repeat_timer_token: None,
@@ -155,8 +143,11 @@ fn main() -> anyhow::Result<()> {
         popup_dirty: false,
     };
 
-    let mut event_loop: EventLoop<State> = EventLoop::try_new()?;
     state.loop_signal = Some(event_loop.get_signal());
+
+    if !state.start_nvim() {
+        log::warn!("Continuing without Neovim backend");
+    }
 
     WaylandSource::new(conn, event_queue).insert(event_loop.handle())?;
 
@@ -190,11 +181,6 @@ fn main() -> anyhow::Result<()> {
         .handle()
         .insert_source(ping_source, |_, _, _| {})?;
 
-    // Wake-up source for Neovim messages (drained in the loop callback below)
-    event_loop
-        .handle()
-        .insert_source(nvim_wake_source, |_, _, _| {})?;
-
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -207,17 +193,6 @@ fn main() -> anyhow::Result<()> {
             state.handle_ime_toggle();
         }
 
-        // Collect messages first to avoid borrow conflict
-        let messages: Vec<_> = state
-            .nvim
-            .as_ref()
-            .map(|nvim| std::iter::from_fn(|| nvim.try_recv()).collect())
-            .unwrap_or_default();
-
-        for msg in messages {
-            state.handle_nvim_message(msg);
-        }
-
         // Insert on-demand repeat timer when a key is held
         if state.repeat.has_key() && state.repeat_timer_token.is_none() {
             match handle.insert_source(
@@ -228,7 +203,7 @@ fn main() -> anyhow::Result<()> {
                             .repeat
                             .should_fire(state.keyboard.repeat_rate, state.keyboard.repeat_delay)
                     {
-                        state.handle_key(key, wl_keyboard::KeyState::Pressed);
+                        state.handle_repeat_key(key);
                     }
                     if state.repeat.has_key() {
                         TimeoutAction::ToDuration(std::time::Duration::from_millis(5))
@@ -300,6 +275,9 @@ fn main() -> anyhow::Result<()> {
         // (key handling, Neovim messages, timers)
         state.flush_popup();
 
+        // Requests the stdin pipe could not take yet
+        state.watch_nvim_writable();
+
         if state.pending_exit
             && let Some(ref signal) = state.loop_signal
         {
@@ -308,7 +286,7 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     state.wayland.release_keyboard();
-    if let Some(ref nvim) = state.nvim {
+    if let Some(nvim) = state.nvim.take() {
         nvim.shutdown();
     }
     if let Some(window) = state.popup.take() {
@@ -322,6 +300,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 pub struct State {
+    // For event sources added later (Neovim pipes, timers)
+    pub(crate) loop_handle: LoopHandle<'static, State>,
     pub(crate) loop_signal: Option<LoopSignal>,
     pub(crate) wayland: WaylandState,
     pub(crate) keyboard: KeyboardState,
@@ -333,9 +313,9 @@ pub struct State {
     pub(crate) toggle_flag: Arc<AtomicBool>,
     // Config (needed for Neovim respawn after :q)
     pub(crate) config: config::Config,
-    pub(crate) nvim: Option<NeovimHandle>,
-    // Wakes the event loop when the Neovim thread sends a message (reused on respawn)
-    pub(crate) nvim_wake: Ping,
+    pub(crate) nvim: Option<Neovim>,
+    // Source flushing requests to Neovim's stdin (only while the pipe is full)
+    pub(crate) nvim_write_token: Option<RegistrationToken>,
     // Neovim UI size fitted to the popup (re-applied on respawn)
     pub(crate) ui_grid_size: Option<(usize, usize)>,
     // Unified popup window (Neovim window grid, keypress, candidates)

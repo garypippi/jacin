@@ -103,11 +103,6 @@ impl NvimProcess {
         !self.pending_write.is_empty()
     }
 
-    /// Reap the child if it has exited
-    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
-    }
-
     /// Wait up to `timeout` for the child to exit
     pub fn wait_timeout(&mut self, timeout: Duration) -> io::Result<Option<ExitStatus>> {
         let deadline = Instant::now() + timeout;

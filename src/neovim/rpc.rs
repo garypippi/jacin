@@ -75,6 +75,19 @@ impl Rpc {
         msgid
     }
 
+    /// Append an error response to a request from Neovim
+    pub fn error_response(&self, msgid: u32, message: &str, out: &mut Vec<u8>) {
+        write(
+            out,
+            Value::Array(vec![
+                Value::from(RESPONSE),
+                Value::from(msgid),
+                Value::from(message),
+                Value::Nil,
+            ]),
+        );
+    }
+
     /// Append received bytes (may end in the middle of a message)
     pub fn feed(&mut self, bytes: &[u8]) {
         if self.start == self.buf.len() {
@@ -229,6 +242,21 @@ mod tests {
                     params: vec![],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn error_response_decodes_as_error() {
+        let mut out = Vec::new();
+        Rpc::new().error_response(9, "not supported", &mut out);
+        let mut rpc = Rpc::new();
+        rpc.feed(&out);
+        assert_eq!(
+            decode_all(&mut rpc),
+            vec![Message::Response {
+                msgid: 9,
+                result: Err(Value::from("not supported")),
+            }]
         );
     }
 

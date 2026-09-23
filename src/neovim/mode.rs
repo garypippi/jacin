@@ -6,13 +6,17 @@
 //! "s" but "visual"), so modes are grouped at the detail both can tell apart.
 //! Unknown values fall into `Other`, which is handled conservatively.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
     /// Insert mode, also during completion (ic, ix)
     Insert,
     /// Replace and virtual replace mode
     Replace,
-    /// Normal mode, also after <C-o> in insert mode (niI)
+    /// Normal mode, also after <C-o> in insert mode (niI). Neovim starts
+    /// here.
+    #[default]
     Normal,
     OperatorPending,
     /// Visual (charwise, linewise, blockwise) and select mode

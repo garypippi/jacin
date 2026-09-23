@@ -1,22 +1,28 @@
 //! Keys sent to Neovim and not yet acknowledged
 //!
-//! Every key sent to Neovim carries a sequence number that Neovim echoes in
-//! `KeyProcessed` and `PassthroughKey`, so a message that arrives late (after
-//! the wait for its key timed out) is still matched to its own key and never
-//! taken for the next one's.
+//! Every key sent to Neovim carries a sequence number echoed in
+//! `KeyProcessed` and `PassthroughKey`. Keys are processed asynchronously, so
+//! later keys may already be sent when a key's messages arrive; the number
+//! matches them to their own key.
 
 use std::collections::VecDeque;
 
 use super::Modifiers;
 
-/// A key as it was pressed, kept to pass it through to the application
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A key as it was pressed, kept to show it and to pass it through to the
+/// application once Neovim has processed it
+#[derive(Debug, Clone, PartialEq)]
 pub struct SentKey {
     /// Raw evdev keycode
     pub keycode: u32,
     /// Modifiers at the time of the press (they may have changed by the time
-    /// a late passthrough arrives)
+    /// Neovim has processed the key)
     pub mods: Modifiers,
+    /// Key in Vim notation, as sent
+    pub vim_key: String,
+    /// Ctrl / Alt held at the time of the press
+    pub ctrl: bool,
+    pub alt: bool,
 }
 
 #[derive(Default)]
@@ -35,11 +41,11 @@ impl SentKeys {
         seq
     }
 
-    pub fn get(&self, seq: u64) -> Option<SentKey> {
+    pub fn get(&self, seq: u64) -> Option<&SentKey> {
         self.keys
             .iter()
             .find(|(s, _)| *s == seq)
-            .map(|(_, key)| *key)
+            .map(|(_, key)| key)
     }
 
     /// Forget the key `seq` and all keys sent before it (Neovim processes
@@ -50,7 +56,7 @@ impl SentKeys {
         }
     }
 
-    /// Forget a key that could not be sent
+    /// Forget a key that will not be processed (dropped before sending)
     pub fn remove(&mut self, seq: u64) {
         self.keys.retain(|(s, _)| *s != seq);
     }
@@ -69,6 +75,9 @@ mod tests {
         SentKey {
             keycode,
             mods: Modifiers::default(),
+            vim_key: "a".into(),
+            ctrl: false,
+            alt: false,
         }
     }
 
@@ -77,8 +86,8 @@ mod tests {
         let mut keys = SentKeys::default();
         assert_eq!(keys.push(key(1)), 0);
         assert_eq!(keys.push(key(2)), 1);
-        assert_eq!(keys.get(0), Some(key(1)));
-        assert_eq!(keys.get(1), Some(key(2)));
+        assert_eq!(keys.get(0), Some(&key(1)));
+        assert_eq!(keys.get(1), Some(&key(2)));
     }
 
     #[test]
@@ -91,7 +100,7 @@ mod tests {
         keys.acknowledge(b);
         assert_eq!(keys.get(a), None);
         assert_eq!(keys.get(b), None);
-        assert_eq!(keys.get(c), Some(key(3)));
+        assert_eq!(keys.get(c), Some(&key(3)));
     }
 
     #[test]
@@ -102,7 +111,7 @@ mod tests {
 
         keys.remove(a);
         assert_eq!(keys.get(a), None);
-        assert_eq!(keys.get(b), Some(key(2)));
+        assert_eq!(keys.get(b), Some(&key(2)));
 
         keys.clear();
         assert_eq!(keys.get(b), None);

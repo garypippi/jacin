@@ -2,7 +2,7 @@
 //!
 //! Pure functions over msgpack values.
 
-use nvim_rs::Value;
+use rmpv::Value;
 
 use super::protocol::{GridCell, GridEvent, HlAttr};
 

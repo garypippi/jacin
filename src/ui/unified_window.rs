@@ -23,6 +23,7 @@ use super::layout::{
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
+use crate::neovim::Mode;
 use crate::state::{StyledCell, WindowView};
 
 /// Pool size: two ARGB buffers of the maximum popup size (double buffering)
@@ -232,7 +233,7 @@ impl UnifiedPopup {
                 .as_ref()
                 .map_or(1, |view| view.total_rows().max(1));
             if let Some(ref view) = content.window_view {
-                self.render_grid_section(&mut pixmap, view, &content.vim_mode, layout);
+                self.render_grid_section(&mut pixmap, view, content.mode, layout);
             }
 
             // Draw separator below the window if more sections follow
@@ -316,7 +317,7 @@ impl UnifiedPopup {
         &mut self,
         pixmap: &mut Pixmap,
         view: &WindowView,
-        vim_mode: &str,
+        mode: Mode,
         layout: &Layout,
     ) {
         let geo = CellGeometry {
@@ -327,7 +328,7 @@ impl UnifiedPopup {
             right_edge: layout.width as f32 - PADDING,
         };
         let block_cursor =
-            view.cursor_visible && !matches!(vim_mode.chars().next(), Some('i' | 'R' | 'c'));
+            view.cursor_visible && !matches!(mode, Mode::Insert | Mode::Replace | Mode::CmdLine);
         let (cursor_row, cursor_col) = view.cursor;
 
         for (row, cells) in view.rows.iter().enumerate() {
@@ -431,7 +432,7 @@ impl UnifiedPopup {
         let line_height = self.renderer.line_height();
         let y_baseline = layout.keypress_y + line_height * 0.75;
 
-        let (mode_text, mode_color) = mode_label(&content.vim_mode);
+        let (mode_text, mode_color) = mode_label(content.mode);
         let mode_x = PADDING;
         self.mono_renderer
             .draw_text(pixmap, mode_text, mode_x, y_baseline, rgba(mode_color));

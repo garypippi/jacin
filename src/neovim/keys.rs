@@ -194,10 +194,12 @@ impl KeyProcessor {
             "[KEYS] #{seq} {key:?} (mode {mode:?}, pending {:?})",
             self.pending
         );
-        // Any command line (:, /, input() from a plugin, ...) edits the keys
+        // Any command line (:, /, input() from a plugin, ...) edits the keys.
+        // The mode is queried after each key: <CR> or <Esc> may have left it
+        // before mode_change arrives.
         if mode == Mode::CmdLine {
-            out.push(Cmd::Input(key));
-            self.finish(seq, mode, out);
+            out.push(Cmd::Input(key.clone()));
+            self.request(Some((seq, key)), Wait::AfterKey, Req::GetMode, out);
             return;
         }
         if self.pending == PendingState::Getchar {
@@ -267,7 +269,7 @@ impl KeyProcessor {
                 self.finish(seq, mode, out);
                 return;
             }
-            PendingState::Motion | PendingState::TextObject => {
+            PendingState::Motion => {
                 self.request(Some((seq, key)), Wait::MotionDone, Req::GetMode, out);
                 return;
             }
@@ -382,10 +384,14 @@ impl KeyProcessor {
                     self.pending = PendingState::Getchar;
                 } else if mode == Mode::OperatorPending {
                     self.pending = PendingState::Motion;
-                } else if key == "q" {
-                    // q while recording stops it
-                    self.request(Some((seq, key)), Wait::Recording, Req::RegRecording, out);
-                    return;
+                } else {
+                    self.pending = PendingState::None;
+                    if key == "q" && mode != Mode::CmdLine {
+                        // q while recording stops it
+                        let wait = Wait::Recording;
+                        self.request(Some((seq, key)), wait, Req::RegRecording, out);
+                        return;
+                    }
                 }
             }
             Wait::Lines(_) | Wait::Recording | Wait::InputDone => {
@@ -781,16 +787,53 @@ mod tests {
     }
 
     #[test]
-    fn cmdline_keys_are_input_only() {
+    fn cmdline_keys_are_input_then_mode_is_queried() {
         // Same for :, / and input() from a plugin
         let mut h = Harness::new(Mode::CmdLine);
-        for key in ["a", "<BS>", "<C-r>", "\"", "<CR>"] {
-            let cmds = h.key(key);
+        for key in ["a", "<BS>", "<C-r>", "\"", "q"] {
+            assert_eq!(h.key(key), vec![input(key), get_mode()]);
             assert_eq!(
-                cmds,
-                vec![input(key), done(h.seq, PendingState::CommandLine)]
+                h.mode(Mode::CmdLine, false),
+                vec![
+                    Cmd::SetMode(Mode::CmdLine),
+                    done(h.seq, PendingState::CommandLine)
+                ]
             );
         }
+    }
+
+    #[test]
+    fn enter_leaving_cmdline_reports_the_new_mode() {
+        let mut h = Harness::new(Mode::CmdLine);
+        h.key("<CR>");
+        assert_eq!(
+            h.mode(Mode::Normal, false),
+            vec![Cmd::SetMode(Mode::Normal), done(1, PendingState::None)]
+        );
+        // The next key is not a command-line key, whatever push says later
+        assert_eq!(h.key("r"), vec![input("r"), get_mode()]);
+    }
+
+    #[test]
+    fn register_in_cmdline_blocks_then_completes() {
+        let mut h = Harness::new(Mode::CmdLine);
+        h.key("<C-r>");
+        assert_eq!(
+            h.mode(Mode::CmdLine, true),
+            vec![
+                Cmd::SetMode(Mode::CmdLine),
+                done(1, PendingState::CommandLine)
+            ]
+        );
+        h.key("a");
+        assert_eq!(
+            h.mode(Mode::CmdLine, false),
+            vec![
+                Cmd::SetMode(Mode::CmdLine),
+                done(2, PendingState::CommandLine)
+            ]
+        );
+        assert!(!h.kp.is_busy());
     }
 
     #[test]
@@ -804,18 +847,7 @@ mod tests {
                 done(1, PendingState::CommandLine)
             ]
         );
-        assert_eq!(
-            h.key("w"),
-            vec![input("w"), done(2, PendingState::CommandLine)]
-        );
-    }
-
-    #[test]
-    fn key_after_cmdline_closes_uses_the_new_mode() {
-        let mut h = Harness::new(Mode::CmdLine);
-        h.key("<CR>");
-        h.mode = Mode::from_ui("normal").unwrap();
-        assert_eq!(h.key("x"), vec![input("x"), get_mode()]);
+        assert_eq!(h.key("w"), vec![input("w"), get_mode()]);
     }
 
     #[test]
