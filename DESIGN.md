@@ -12,119 +12,160 @@
    │                            │                    │
    ▼                            │                    │
 ┌────────────────────────────────────────────────────────────────┐
-│                     Main Thread (calloop)                       │
+│                   Single thread (calloop)                       │
 │                                                                │
 │  dispatch.rs     Wayland event dispatch (key, activate, etc.)  │
-│  input.rs        handle_key → keysym→Vim notation → ToNeovim  │
+│  input.rs        handle_key → keysym→Vim notation → push_key   │
 │  model.rs        Model::reduce(FromNeovim) → Vec<Effect>       │
-│  coordinator.rs  apply_effects → commit/popup/passthrough      │
+│  coordinator.rs  apply_effects, Neovim sources, popup          │
 │                                                                │
 │  State:                                                        │
 │    ImeState      mode (Disabled/Enabling/Enabled)              │
-│    NvimView      observed vim mode, cmdline, candidates, msgs, │
+│    NvimView      vim mode, cmdline, candidates, msgs,          │
 │                  Screen (grids), BufferMirror (buffer lines)   │
+│    SentKeys      keys sent to Neovim, awaiting KeyProcessed    │
 │    KeyboardState XKB context, modifiers                        │
 │    KeypressState accumulated key sequences, display timeout    │
 │    WaylandState  protocol handles, serial, virtual keyboard    │
 │                                                                │
 │  Calloop sources:                                              │
 │    WaylandSource, SIGINT/SIGTERM, SIGUSR1 ping (toggle),       │
-│    Neovim wake ping, repeat timer, keypress/animation timer    │
+│    Neovim stdout (+ stdin while the pipe is full),             │
+│    repeat timer, keypress/animation timer                      │
 └──────────┬──────────────────────────────────────┬──────────────┘
-           │ ToNeovim (crossbeam ch)              │ PopupContent
+           │ Neovim (non-blocking calls)          │ PopupContent
            ▼                                      ▼
 ┌──────────────────────────┐  ┌──────────────────────────────────┐
-│  Neovim Backend          │  │  UI Layer                        │
-│  (Tokio thread)          │  │                                  │
-│                          │  │  UnifiedPopup                    │
-│  handler.rs              │  │    window grid + floats + cursor │
-│    recv ToNeovim::Key    │  │    keypress display              │
-│    nvim.input / get_mode │  │    candidates + scrollbar        │
-│    handle_redraw         │  │    mode indicator                │
-│      (ext_cmdline,       │  │                                  │
-│       ext_popupmenu,     │  │  TextRenderer (fontdue + cache)  │
-│       ext_messages,      │  │  Layout (layout.rs)              │
-│       ext_multigrid,     │  └──────────────────────────────────┘
-│       mode_change)       │
-│    nvim_buf_lines_event  │
-│    → FromNeovim (ch)     │
+│  Neovim Backend (neovim/)│  │  UI Layer                        │
+│                          │  │                                  │
+│  mod.rs   Neovim: glue,  │  │  UnifiedPopup                    │
+│           request ids,   │  │    window grid + floats + cursor │
+│           startup        │  │    keypress display              │
+│  keys.rs  KeyProcessor   │  │    candidates + scrollbar        │
+│           (no I/O)       │  │    mode indicator                │
+│  redraw.rs  redraw →     │  │                                  │
+│           FromNeovim     │  │  TextRenderer (fontdue + cache)  │
+│  rpc.rs   msgpack-rpc    │  │  Layout (layout.rs)              │
+│           codec (no I/O) │  └──────────────────────────────────┘
+│  process.rs  nvim --embed│
+│           non-blocking   │
+│           pipes          │
 │                          │
 │  Neovim process          │
-│  (headless, nvim-rs)     │
 │  + plugins (skkeleton…)  │
 └──────────────────────────┘
 ```
 
+Everything runs on one thread: Neovim's stdout is an event source like the
+Wayland socket, and nothing waits for Neovim.
+
 ## 2. RPC Strategy
 
 No Lua is injected and no autocmds are defined: jacin only calls the
-Neovim API and observes UI (redraw) and buffer events.
+Neovim API and observes UI (redraw) and buffer events. msgpack-rpc is
+implemented in `rpc.rs` (with `rmpv` for values).
+
+### Message Order
+
+Messages are handled one at a time: each message's events are applied to
+the model before the next message is decoded. Notifications (redraw, buffer
+events) and responses come in the order Neovim sent them on its single
+stdout, so the model's mode — set by both `mode_change` and `nvim_get_mode`
+replies — is always the latest Neovim reported.
+
+### Key Queue
+
+`handle_key` registers the key in `SentKeys` (seq, keycode, modifiers, Vim
+notation) and pushes it to the `KeyProcessor`, which processes queued keys
+one at a time; at most one of its requests is outstanding. A held key does
+not repeat while keys are still queued or processing.
+
+`nvim_input` only queues keys in Neovim and `nvim_get_mode` (fast) answers
+immediately, so a mode query sent together with the input would report the
+state before the keys. Key-processing requests are therefore held until the
+`nvim_input` before them has been answered.
 
 ### Insert Mode: Fire-and-Forget
 
 ```
-Main Thread          Handler Thread       Neovim
-    |  ToNeovim::Key      |                  |
-    |-------------------->|  nvim.input()    |
-    |  FromNeovim::        |---------------->|
-    |  KeyProcessed       |                  | redraw (grid_line, flush)
-    |<--------------------|                  | nvim_buf_lines_event
-    |  (ready for next)   |<-----------------|
-    |                     |  FromNeovim::GridFlush / BufLines
-    |<--------------------|
-    |--> render popup     |
+KeyProcessor              Neovim
+    |  nvim_input(key)      |
+    |---------------------->|
+    |  KeyProcessed         |  redraw (grid_line, flush)
+    |  (at once)            |  nvim_buf_lines_event
+    |<----------------------|
 ```
 
-1 RPC + push notifications. No blocking wait.
+1 RPC + push notifications. The key is done as soon as it is sent. Keys that
+wait for an argument in insert mode (`<C-k>`, `<C-v>`, `<C-q>`) also query
+the mode.
 
-### Normal Mode: Synchronous 2-RPC
+### Other Modes: Input, then Mode
 
 ```
-Main Thread          Handler Thread       Neovim
-    |  ToNeovim::Key      |                  |
-    |-------------------->|  nvim.input()    |
-    |                     |  nvim_get_mode() |
-    |                     |<-----------------|
-    |  KeyProcessed       |  (Getchar / Motion pending, last_mode)
-    |<--------------------|
+KeyProcessor              Neovim
+    |  nvim_input(key)      |
+    |---------------------->|
+    |<----------------------|  (answered)
+    |  nvim_get_mode()      |
+    |---------------------->|
+    |<----------------------|  mode, blocking
+    |  KeyProcessed (Getchar / Motion / CommandLine / None)
 ```
 
-2 RPCs (nvim_input + nvim_get_mode, a fast API that answers even while
-blocked in getchar). The display follows from redraw events. After `q`
-sequences, `reg_recording()` updates the REC indicator.
+`nvim_get_mode` is a fast API that answers even while Neovim is blocked in
+getchar(); `blocking` tells that it is. After `q` sequences,
+`reg_recording()` updates the REC indicator. In the command line (`:`, `/`,
+`input()` from a plugin, …) keys are input as typed and the mode is queried
+after each one, so the key after `<CR>` is not taken for a command-line key.
 
 ### Special Keys (BS, Enter, Commit)
 
-One `nvim_buf_get_lines` RPC: if the whole buffer is empty the key passes
-through to the app, otherwise BS/Enter go to Neovim and the commit key
-commits all lines joined with `\n`.
+`nvim_get_mode` first: if Neovim is blocked in getchar() the key answers
+it. Otherwise one `nvim_buf_get_lines`: if the whole buffer is empty the
+key passes through to the app, otherwise BS/Enter go to Neovim and the
+commit key commits all lines joined with `\n`, then clears the buffer
+(`<Esc>ggdGi`) before any key typed after it.
+
+Non-fast requests (`nvim_buf_get_lines`, `reg_recording()`) don't answer
+while Neovim is blocked in getchar(), so they are only sent after
+`nvim_get_mode` has shown it is not.
 
 ### Key Acknowledgment
 
-Each user key is sent as `ToNeovim::Key { seq, key }`, and the handler
-echoes `seq` in `KeyProcessed` and `PassthroughKey`. The main thread waits
-(up to 200ms) only for the `KeyProcessed` with its own `seq`, and resolves a
-`PassthroughKey` to the keycode and modifiers recorded when that key was
-pressed (`SentKeys` in the model). A message arriving after its wait timed
-out is still matched to its own key, never to the next one.
+Each key carries its `seq` through `KeyProcessed` and `PassthroughKey`.
+`Model::reduce(KeyProcessed)` shows the key (outside insert mode, Ctrl/Alt
+keys, register names after `<C-r>`) with the modifiers recorded when it was
+pressed; a `PassthroughKey` resolves to the keycode and modifiers of its own
+key, even if later keys were pressed since.
 
-Keys jacin inputs on its own behalf (clearing the buffer on IME off, restoring
-the mode on re-activation, clearing after commit) are sent as
-`ToNeovim::Input`: they bypass key handling, are not acknowledged, and only
-re-sync the handler's pending state and mode from `nvim_get_mode()`.
+Keys jacin inputs on its own behalf (clearing the buffer on IME off,
+restoring the mode on re-activation) are queued as input items: they keep
+their place after queued keys, are not acknowledged, and only re-sync the
+pending state and mode from `nvim_get_mode()`. IME off / Deactivate first
+drops keys that have not started.
 
 ### nvim_ui_attach Redraw Events
 
-`nvim_ui_attach` with `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `ext_multigrid` extensions. The `handle_redraw` dispatcher processes:
-- `cmdline_show/pos/hide` — command-line display; `cmdline_hide` at level 1 ends the CommandLine pending state
+`nvim_ui_attach` with `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `ext_multigrid` extensions, sized to what the popup can show. `redraw.rs` handles:
+- `cmdline_show/pos/hide` — command-line display
 - `popupmenu_show/select/hide` — completion candidates
 - `msg_show/msg_clear` — command output messages
 - `mode_change` — mode updates
 - grid events (`grid_line`, `win_pos`, `win_float_pos`, `win_viewport`, …) — batched per `flush` into `FromNeovim::GridFlush`, mirrored in `Screen`
 
+Requests from Neovim (none are expected) get an error response, since
+Neovim waits for one.
+
 ### Buffer Events
 
 `nvim_buf_attach` on the current buffer keeps `BufferMirror` in sync via `nvim_buf_lines_event`; on `nvim_buf_detach_event` (e.g. `:enew` wipes the buffer) jacin re-attaches to the current buffer. IME off commits the mirror without an RPC.
+
+### Process Lifetime
+
+stdout EOF means Neovim exited (e.g. `:q`): the IME is disabled and the next
+toggle spawns a new Neovim. On exit jacin sends `qa!`, waits up to 200ms,
+then kills it.
 
 ## 3. State Model
 
@@ -144,26 +185,32 @@ re-sync the handler's pending state and mode from `nvim_get_mode()`.
 
 ### Vim mode (Axis 2, observed)
 
-Not tracked by the IME state machine. `NvimView.vim_mode` mirrors Neovim (`mode_change` redraw event).
+Not tracked by the IME state machine. `NvimView.mode` holds the last mode
+Neovim reported, by `mode_change` or an `nvim_get_mode` reply, also while the
+IME is disabled (key processing reads it). Both are classified into `Mode`
+(`neovim/mode.rs`) at the detail both report — completion (`ic`) is
+`Insert`, select mode is `Visual` — and unknown modes are `Other`, which is
+never handled fire-and-forget.
 
 ### PendingState (Axis 3, per Neovim session)
 
 ```
              None
           ╱  │  │  ╲
-    Getchar  │  │  CommandLine
-   (q,f,t,r) │  │   (:)
+    Getchar  │  │  (CommandLine:
+   (q,f,t,r) │  │   from the mode)
               │  │
-     InsertReg│  │Motion (d,c,y)
-     (<C-r>)  │  │  ↓
-              │  TextObject (di_, ca_)
+     InsertReg│  │Motion (d,c,y, di_)
+     (<C-r>)  │
          NormalReg
            (")
 ```
 
-All pending states resolve back to None after the sequence completes. `CommandLine` resolves on `cmdline_hide` (level 1).
-
-Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and the notification handler, recreated on each spawn). The main thread only sees it through `FromNeovim::KeyProcessed { seq, pending }`, sent exactly once per user key after all data messages for that key.
+All pending states resolve back to None after the sequence completes.
+Owned by the `KeyProcessor` (recreated on each spawn). The model only sees
+it through `FromNeovim::KeyProcessed { seq, pending }`, sent exactly once per
+user key after all data messages for that key; `CommandLine` is reported
+whenever the mode is the command line.
 
 ## 4. Core Design Principles
 
@@ -171,12 +218,12 @@ Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and
 
 - IME only observes Neovim (UI events, buffer events, `nvim_buf_get_lines`), never writes the buffer directly
 - `Screen` and `BufferMirror` are mirrors of Neovim — never edited locally
-- All text manipulation goes through `nvim.input()` to preserve undo/redo/macros/plugins
+- All text manipulation goes through `nvim_input` to preserve undo/redo/macros/plugins
 
 ### Reducer + Effects
 
 - `Model::reduce(msg) -> Vec<Effect>` (model.rs) is the only place that updates IME state from Neovim messages; it performs no I/O
-- `State::apply_effects` (coordinator.rs) executes effects: commit, popup render, passthrough, Neovim input
+- `State::apply_effects` (coordinator.rs) executes effects: commit, popup render, passthrough
 - Replay tests feed `FromNeovim` sequences (tests/fixtures) through the real reducer
 
 ### Popup-Only Display
@@ -190,7 +237,7 @@ Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and
 |---|---|
 | WaylandState (protocol ops, serial) | ImeState (pure state machine) |
 | KeyboardState (XKB keymap) | KeypressState (pure logic) |
-| SIGUSR1 signal handling | Neovim handler (RPC only) |
+| SIGUSR1 signal handling | KeyProcessor, rpc codec, redraw parsing |
 | SHM buffer attach/commit | Config, TextRenderer, Layout |
 
 ## 5. Multiline
