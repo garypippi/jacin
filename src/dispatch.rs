@@ -215,7 +215,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                         state.reset_ime_state();
                         // Clear Neovim buffer to reset state for next activation
                         if let Some(ref nvim) = state.nvim {
-                            nvim.send_key(crate::neovim::CLEAR_BUFFER_KEYS);
+                            nvim.input(crate::neovim::CLEAR_BUFFER_KEYS);
                         }
                     }
                 }
@@ -285,10 +285,10 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                                 if let Some(ref nvim) = state.nvim {
                                     if state.config.behavior.startinsert {
                                         log::debug!("[IME] Restoring insert mode");
-                                        nvim.send_key("<Esc>i");
+                                        nvim.input("<Esc>i");
                                     } else {
                                         log::debug!("[IME] Restoring normal mode");
-                                        nvim.send_key("<Esc>");
+                                        nvim.input("<Esc>");
                                     }
                                 }
                                 state.update_popup();

@@ -63,7 +63,7 @@ impl State {
             // Clear Neovim buffer (must clear here, not rely on Deactivate —
             // rapid re-enable can happen before Deactivate fires)
             if let Some(ref nvim) = self.nvim {
-                nvim.send_key(neovim::CLEAR_BUFFER_KEYS);
+                nvim.input(neovim::CLEAR_BUFFER_KEYS);
             }
             self.model.ime.disable();
         }
@@ -89,10 +89,10 @@ impl State {
             match effect {
                 Effect::Render => self.update_popup(),
                 Effect::CommitString(text) => self.wayland.commit_string(&text),
-                Effect::PassthroughKey => self.passthrough_current_key(),
+                Effect::PassthroughKey(key) => self.wayland.send_virtual_key(key),
                 Effect::NvimInput(keys) => {
                     if let Some(ref nvim) = self.nvim {
-                        nvim.send_key(keys);
+                        nvim.input(keys);
                     }
                 }
                 Effect::CancelToggle => self.toggle_flag.store(false, Ordering::SeqCst),
@@ -101,21 +101,6 @@ impl State {
                     self.nvim = None;
                 }
             }
-        }
-    }
-
-    /// Send the key being processed through the virtual keyboard to the focused app
-    fn passthrough_current_key(&mut self) {
-        if let Some(keycode) = self.current_keycode {
-            self.wayland.send_virtual_key(
-                keycode,
-                self.keyboard.mods_depressed,
-                self.keyboard.mods_latched,
-                self.keyboard.mods_locked,
-                self.keyboard.mods_group,
-            );
-        } else {
-            log::warn!("[IME] PassthroughKey but no current_keycode");
         }
     }
 
@@ -136,8 +121,9 @@ impl State {
     fn render_popup(&mut self) {
         // IME disabled: skip content generation entirely and ensure popup is hidden.
         // After toggle-off, Neovim sends a burst of push notifications (clearing
-        // the buffer triggers mode changes and redraws) — without this guard, each notification
-        // would rebuild PopupContent and potentially recreate/destroy surfaces.
+        // the buffer triggers mode changes and redraws) — without this guard,
+        // each notification would rebuild PopupContent and potentially
+        // recreate/destroy surfaces.
         if !self.model.ime.is_enabled() {
             self.hide_popup();
             return;

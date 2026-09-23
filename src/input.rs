@@ -2,7 +2,8 @@ use wayland_client::protocol::wl_keyboard;
 
 use crate::State;
 use crate::keysym::keysym_to_vim;
-use crate::neovim::PendingState;
+use crate::neovim::{FromNeovim, PendingState};
+use crate::state::SentKey;
 
 /// Scope guard that logs elapsed time on drop.
 struct PerfGuard {
@@ -72,21 +73,24 @@ impl State {
         log::debug!("[KEY] vim_key={:?}", vim_key);
 
         if let Some(ref vim_key) = vim_key {
-            // Drain stale messages before setting current_keycode to avoid
-            // stale PassthroughKey using the new key's keycode
-            self.drain_stale_nvim_messages();
-
-            // Store raw keycode for potential passthrough
-            self.current_keycode = Some(key);
-
-            self.send_to_nvim(vim_key);
+            // Kept with the key in case Neovim passes it through
+            let seq = self.model.sent_keys.push(SentKey {
+                keycode: key,
+                mods: self.keyboard.mods,
+            });
+            let sent = self
+                .nvim
+                .as_ref()
+                .is_some_and(|nvim| nvim.send_key(seq, vim_key));
             // Wait for Neovim response with timeout; on timeout keep the
             // previous pending state
-            let after = self
-                .wait_for_nvim_response()
-                .unwrap_or(self.model.keypress.pending_type);
-
-            self.current_keycode = None;
+            let after = if sent {
+                self.wait_for_nvim_response(seq)
+            } else {
+                self.model.sent_keys.remove(seq);
+                None
+            }
+            .unwrap_or(self.model.keypress.pending_type);
 
             // Command-line mode: display updates come via ext_cmdline (cmdline_show)
             if after == PendingState::CommandLine {
@@ -116,30 +120,9 @@ impl State {
         _perf.mode = self.model.view.vim_mode.clone();
     }
 
-    pub(crate) fn send_to_nvim(&self, key: &str) {
-        if let Some(ref nvim) = self.nvim {
-            nvim.send_key(key);
-        }
-    }
-
-    fn drain_stale_nvim_messages(&mut self) {
-        loop {
-            let msg = self.nvim.as_ref().and_then(|n| n.try_recv());
-            match msg {
-                Some(stale) => {
-                    log::debug!("[NVIM] Draining stale message: {:?}", stale);
-                    self.handle_nvim_message(stale);
-                }
-                None => break,
-            }
-        }
-    }
-
-    /// Handle Neovim messages until `KeyProcessed` arrives (or 200ms deadline).
-    /// Returns the pending state reported by `KeyProcessed`, None on timeout.
-    pub(crate) fn wait_for_nvim_response(&mut self) -> Option<PendingState> {
-        use crate::neovim::FromNeovim;
-
+    /// Handle Neovim messages until `KeyProcessed` for key `seq` arrives (or
+    /// 200ms deadline). Returns the pending state it reports, None on timeout.
+    fn wait_for_nvim_response(&mut self, seq: u64) -> Option<PendingState> {
         let _perf = PerfGuard::new("nvim_rpc");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
@@ -149,11 +132,15 @@ impl State {
                 log::debug!("[NVIM] wait_for_nvim_response: deadline reached");
                 return None;
             }
-            let msg = self.nvim.as_ref().and_then(|n| n.recv_timeout(remaining));
-            match msg {
-                Some(FromNeovim::KeyProcessed { pending }) => return Some(pending),
-                Some(msg) => self.handle_nvim_message(msg),
-                None => return None,
+            let msg = self.nvim.as_ref().and_then(|n| n.recv_timeout(remaining))?;
+            // An earlier key's late acknowledgment doesn't end the wait
+            let done = match msg {
+                FromNeovim::KeyProcessed { seq: s, pending } if s == seq => Some(pending),
+                _ => None,
+            };
+            self.handle_nvim_message(msg);
+            if done.is_some() {
+                return done;
             }
         }
     }

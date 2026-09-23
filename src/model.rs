@@ -5,7 +5,7 @@
 //! can be replayed in tests; `State::apply_effects` executes the effects.
 
 use crate::neovim::FromNeovim;
-use crate::state::{BufferMirror, ImeState, KeypressState, NvimView, Screen};
+use crate::state::{BufferMirror, ImeState, KeypressState, NvimView, Screen, SentKey, SentKeys};
 
 /// Side effect requested by `Model::reduce`
 #[derive(Debug, Clone, PartialEq)]
@@ -14,8 +14,8 @@ pub enum Effect {
     Render,
     /// Commit text to the application
     CommitString(String),
-    /// Forward the key being processed to the application
-    PassthroughKey,
+    /// Forward a key to the application
+    PassthroughKey(SentKey),
     /// Send keys to Neovim
     NvimInput(&'static str),
     /// Drop a pending IME toggle request (Alt in the commit key <A-;>
@@ -31,6 +31,8 @@ pub struct Model {
     pub ime: ImeState,
     pub keypress: KeypressState,
     pub view: NvimView,
+    /// Keys sent to Neovim, awaiting `KeyProcessed`
+    pub sent_keys: SentKeys,
 }
 
 impl Model {
@@ -48,7 +50,11 @@ impl Model {
     pub fn reduce(&mut self, msg: FromNeovim) -> Vec<Effect> {
         let enabled = self.ime.is_fully_enabled();
         match msg {
-            FromNeovim::Ready | FromNeovim::KeyProcessed { .. } => vec![],
+            FromNeovim::Ready => vec![],
+            FromNeovim::KeyProcessed { seq, .. } => {
+                self.sent_keys.acknowledge(seq);
+                vec![]
+            }
             FromNeovim::Commit(text) => {
                 self.view.clear_candidates();
                 self.keypress.clear();
@@ -78,7 +84,13 @@ impl Model {
                 self.view.recording = reg;
                 vec![Effect::Render]
             }
-            FromNeovim::PassthroughKey => vec![Effect::PassthroughKey],
+            FromNeovim::PassthroughKey { seq } => match self.sent_keys.get(seq) {
+                Some(key) => vec![Effect::PassthroughKey(key)],
+                None => {
+                    log::warn!("[IME] PassthroughKey for unknown key #{seq}");
+                    vec![]
+                }
+            },
             FromNeovim::CmdlineShow {
                 content,
                 pos,
@@ -136,6 +148,7 @@ impl Model {
                 // Neovim starts from scratch (otherwise it flashes on re-enable)
                 self.view.screen = Screen::default();
                 self.view.buffer = BufferMirror::default();
+                self.sent_keys.clear();
                 vec![Effect::NvimExited]
             }
             FromNeovim::BufLines { first, last, lines } => {
@@ -338,5 +351,51 @@ mod replay_tests {
         let effects = model.reduce(FromNeovim::Recording("q".into()));
         assert!(effects.is_empty());
         assert!(model.view.recording.is_empty());
+    }
+
+    fn sent_key(keycode: u32, ctrl: bool) -> SentKey {
+        SentKey {
+            keycode,
+            mods: crate::state::Modifiers {
+                depressed: if ctrl { 0x4 } else { 0 },
+                ..Default::default()
+            },
+        }
+    }
+
+    /// A passthrough arriving after the next key was sent (its wait timed
+    /// out) forwards its own key, with the modifiers held when it was pressed.
+    #[test]
+    fn late_passthrough_forwards_its_own_key() {
+        let mut model = enabled_model();
+        let commit_key = sent_key(28, true);
+        let first = model.sent_keys.push(commit_key);
+        model.sent_keys.push(sent_key(30, false));
+
+        assert_eq!(
+            model.reduce(FromNeovim::PassthroughKey { seq: first }),
+            vec![Effect::PassthroughKey(commit_key)]
+        );
+    }
+
+    #[test]
+    fn acknowledged_key_is_not_passed_through() {
+        let mut model = enabled_model();
+        let seq = model.sent_keys.push(sent_key(14, false));
+        model.reduce(FromNeovim::KeyProcessed {
+            seq,
+            pending: crate::neovim::PendingState::None,
+        });
+
+        assert!(model.reduce(FromNeovim::PassthroughKey { seq }).is_empty());
+    }
+
+    #[test]
+    fn nvim_exit_forgets_sent_keys() {
+        let mut model = enabled_model();
+        let seq = model.sent_keys.push(sent_key(14, false));
+        model.reduce(FromNeovim::NvimExited);
+
+        assert!(model.sent_keys.get(seq).is_none());
     }
 }

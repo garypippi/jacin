@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use super::{CLEAR_BUFFER_KEYS, FromNeovim, PendingState, spawn_neovim};
 use crate::config::Config;
 use crate::model::Model;
+use crate::state::{Modifiers, SentKey};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const MSG_TIMEOUT: Duration = Duration::from_secs(5);
@@ -100,15 +101,25 @@ impl Probe {
         });
     }
 
+    /// Send a key without waiting; returns its sequence number.
+    fn send(&mut self, key: &str) -> u64 {
+        let seq = self.model.sent_keys.push(SentKey {
+            keycode: 0,
+            mods: Modifiers::default(),
+        });
+        assert!(self.handle.send_key(seq, key), "key {key:?} dropped");
+        seq
+    }
+
     /// Send a key and collect messages up to and including its `KeyProcessed`.
     fn key(&mut self, key: &str) -> Vec<FromNeovim> {
-        self.handle.send_key(key);
+        let seq = self.send(key);
         let mut msgs = Vec::new();
         loop {
             let msg = self
                 .recv_until(|_| true, MSG_TIMEOUT)
                 .unwrap_or_else(|| panic!("no KeyProcessed for key {key:?}"));
-            let done = matches!(msg, FromNeovim::KeyProcessed { .. });
+            let done = matches!(msg, FromNeovim::KeyProcessed { seq: s, .. } if s == seq);
             msgs.push(msg);
             if done {
                 return msgs;
@@ -136,13 +147,14 @@ impl Probe {
 
 fn ack_pending(msgs: &[FromNeovim]) -> PendingState {
     match msgs.last() {
-        Some(FromNeovim::KeyProcessed { pending }) => *pending,
+        Some(FromNeovim::KeyProcessed { pending, .. }) => *pending,
         other => panic!("expected KeyProcessed last, got {other:?}"),
     }
 }
 
 fn has_passthrough(msgs: &[FromNeovim]) -> bool {
-    msgs.iter().any(|m| matches!(m, FromNeovim::PassthroughKey))
+    msgs.iter()
+        .any(|m| matches!(m, FromNeovim::PassthroughKey { .. }))
 }
 
 #[test]
@@ -158,7 +170,7 @@ fn insert_mode_typing_updates_buffer_and_window() {
     let mut probe = Probe::spawn(true);
 
     for ch in ["h", "e", "l", "l", "o"] {
-        probe.handle.send_key(ch);
+        probe.send(ch);
     }
     probe.wait_buffer("hello");
     probe.wait("window row 'hello'", |m| {
@@ -307,7 +319,7 @@ fn resized_ui_wraps_long_line_in_window_view() {
 
     let text = "abcdefghijklmnopqrstuvwxy"; // 25 chars > 20 columns
     for c in text.chars() {
-        probe.handle.send_key(&c.to_string());
+        probe.send(&c.to_string());
     }
     probe.wait("wrapped view", |m| {
         m.view.screen.window_view(8).is_some_and(|view| {
@@ -393,7 +405,7 @@ fn buffer_mirror_follows_enew() {
     probe.wait_buffer("x");
 
     // Toggle-off clears the buffer
-    probe.key(CLEAR_BUFFER_KEYS);
+    probe.handle.input(CLEAR_BUFFER_KEYS);
     probe.wait_buffer("");
 
     probe.shutdown();
@@ -408,11 +420,50 @@ fn clear_buffer_keys_work_after_pending_insert_keys() {
 
     for pending_key in ["<C-r>", "<C-v>", "<C-k>"] {
         probe.keys(&["a", "b", "c", pending_key]);
-        probe.key(CLEAR_BUFFER_KEYS);
+        probe.handle.input(CLEAR_BUFFER_KEYS);
         probe.wait_buffer("");
         // Back to insert mode for the next case, as re-enabling does
         probe.key("i");
     }
+
+    probe.shutdown();
+}
+
+/// Keys input on jacin's behalf are not acknowledged, so the next key's
+/// wait ends only at its own `KeyProcessed`.
+#[test]
+#[ignore]
+fn input_is_not_acknowledged() {
+    let mut probe = Probe::spawn(true);
+
+    probe.keys(&["a", "b"]);
+    probe.handle.input("<Esc>ggdGi");
+    let msgs = probe.key("c");
+    let acks = msgs
+        .iter()
+        .filter(|m| matches!(m, FromNeovim::KeyProcessed { .. }))
+        .count();
+    assert_eq!(acks, 1, "unexpected acknowledgments: {msgs:?}");
+    probe.wait_buffer("c");
+
+    probe.shutdown();
+}
+
+/// A passthrough names the key it belongs to.
+#[test]
+#[ignore]
+fn passthrough_carries_its_key_seq() {
+    let mut probe = Probe::spawn(true);
+
+    let seq = probe.send("<BS>");
+    let msg = probe.recv_until(
+        |m| matches!(m, FromNeovim::PassthroughKey { .. }),
+        MSG_TIMEOUT,
+    );
+    assert!(
+        matches!(msg, Some(FromNeovim::PassthroughKey { seq: s }) if s == seq),
+        "expected PassthroughKey for key #{seq}, got {msg:?}"
+    );
 
     probe.shutdown();
 }

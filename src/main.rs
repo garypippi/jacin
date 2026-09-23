@@ -152,7 +152,6 @@ fn main() -> anyhow::Result<()> {
         popup,
         repeat_timer_token: None,
         keypress_timer_token: None,
-        current_keycode: None,
         popup_dirty: false,
     };
 
@@ -346,6 +345,4 @@ pub struct State {
     pub(crate) keypress_timer_token: Option<RegistrationToken>,
     // Popup redraw requested; rendered once at the end of the loop iteration
     pub(crate) popup_dirty: bool,
-    // Raw evdev keycode of the currently-being-processed key (for passthrough)
-    pub(crate) current_keycode: Option<u32>,
 }

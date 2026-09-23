@@ -540,6 +540,7 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
         tx: tx.clone(),
         pending,
         commit_key: config.keybinds.commit.clone(),
+        seq: 0,
         last_mode: if config.behavior.startinsert {
             String::from("i")
         } else {
@@ -549,13 +550,20 @@ async fn run_neovim(rx: Receiver<ToNeovim>, tx: MainTx, config: &Config) -> Nvim
 
     loop {
         match rx.recv() {
-            Ok(ToNeovim::Key(key)) => {
+            Ok(ToNeovim::Key { seq, key }) => {
                 if exited.load(Ordering::SeqCst) {
                     log::debug!("[NVIM] Ignoring key {:?} — Neovim already exited", key);
                     continue;
                 }
-                log::debug!("[NVIM] Received key: {:?}", key);
-                session.process_key(&key).await;
+                log::debug!("[NVIM] Received key #{}: {:?}", seq, key);
+                session.process_key(seq, &key).await;
+            }
+            Ok(ToNeovim::Input(keys)) => {
+                if exited.load(Ordering::SeqCst) {
+                    continue;
+                }
+                log::debug!("[NVIM] Input: {:?}", keys);
+                session.input(&keys).await;
             }
             Ok(ToNeovim::ResizeUi { width, height }) => {
                 log::debug!("[NVIM] Resizing UI to {}x{}", width, height);
@@ -645,6 +653,8 @@ struct KeySession {
     /// (cmdline_show sets CommandLine, cmdline_hide at level 1 clears it).
     pending: Arc<AtomicPendingState>,
     commit_key: String,
+    /// Sequence number of the key being processed (echoed in replies)
+    seq: u64,
     /// Last known vim mode for insert-mode fire-and-forget optimization.
     last_mode: String,
 }
@@ -652,16 +662,44 @@ struct KeySession {
 impl KeySession {
     /// Process one key, then always acknowledge with `KeyProcessed` (also on
     /// error) so the main thread never has to wait for its timeout.
-    async fn process_key(&mut self, key: &str) {
+    async fn process_key(&mut self, seq: u64, key: &str) {
+        self.seq = seq;
         if let Err(e) = self.handle_key(key).await {
             log::error!("[NVIM] Key handling error: {}", e);
         }
         send_msg(
             &self.tx,
             FromNeovim::KeyProcessed {
+                seq,
                 pending: self.pending.load(),
             },
         );
+    }
+
+    /// Input keys on jacin's behalf. They all start with <Esc>, cancelling
+    /// any pending key, so they bypass key handling; only the pending state
+    /// and mode are re-synced from Neovim afterwards.
+    async fn input(&mut self, keys: &str) {
+        if let Err(e) = self.input_and_sync(keys).await {
+            log::error!("[NVIM] Input error: {}", e);
+        }
+    }
+
+    async fn input_and_sync(&mut self, keys: &str) -> anyhow::Result<()> {
+        let _ = self.nvim.input(keys).await;
+        let (mode, blocking) = get_mode(&self.nvim).await?;
+        if blocking {
+            self.pending.store(PendingState::Getchar);
+            return Ok(());
+        }
+        if mode.starts_with("no") {
+            self.pending.store(PendingState::Motion);
+        } else if self.pending.load() != PendingState::CommandLine {
+            // CommandLine is cleared by cmdline_hide when the command line closes
+            self.pending.clear();
+        }
+        self.last_mode = mode;
+        Ok(())
     }
 
     async fn handle_key(&mut self, key: &str) -> anyhow::Result<()> {
@@ -766,12 +804,11 @@ impl KeySession {
         let lines = buffer_lines(&self.nvim).await?;
         if is_empty_buffer(&lines) {
             // Passthrough so the app receives the key (e.g., Ctrl+Enter to send)
-            send_msg(&self.tx, FromNeovim::PassthroughKey);
+            send_msg(&self.tx, FromNeovim::PassthroughKey { seq: self.seq });
         } else {
             // The buffer is cleared by the main thread (<Esc>ggdGi), which
             // also returns to insert mode
             send_msg(&self.tx, FromNeovim::Commit(lines.join("\n")));
-            self.last_mode = String::from("i");
         }
         Ok(true)
     }
@@ -805,7 +842,7 @@ impl KeySession {
     /// an empty 2nd line doesn't leak the key to the app.
     async fn input_or_passthrough(&self, key: &str) -> anyhow::Result<()> {
         if is_empty_buffer(&buffer_lines(&self.nvim).await?) {
-            send_msg(&self.tx, FromNeovim::PassthroughKey);
+            send_msg(&self.tx, FromNeovim::PassthroughKey { seq: self.seq });
         } else {
             let _ = self.nvim.input(key).await;
         }

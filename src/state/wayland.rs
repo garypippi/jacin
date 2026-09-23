@@ -12,6 +12,7 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
 
 use crate::State;
+use crate::state::SentKey;
 
 /// Wayland protocol state
 pub struct WaylandState {
@@ -133,14 +134,7 @@ impl WaylandState {
 
     /// Send a key event via the virtual keyboard (for passthrough).
     /// Sends modifiers, key press, key release, then clears modifiers.
-    pub fn send_virtual_key(
-        &self,
-        keycode: u32,
-        mods_depressed: u32,
-        mods_latched: u32,
-        mods_locked: u32,
-        mods_group: u32,
-    ) {
+    pub fn send_virtual_key(&self, key: SentKey) {
         if !self.virtual_keyboard_ready {
             log::warn!("[VK] Cannot send virtual key — keymap not set");
             return;
@@ -149,15 +143,16 @@ impl WaylandState {
             log::warn!("[VK] Cannot send virtual key — no virtual keyboard");
             return;
         };
-        vk.modifiers(mods_depressed, mods_latched, mods_locked, mods_group);
+        let mods = key.mods;
+        vk.modifiers(mods.depressed, mods.latched, mods.locked, mods.group);
         // Key press (time=0 is fine for synthetic events)
-        vk.key(0, keycode, 1); // 1 = pressed
-        vk.key(0, keycode, 0); // 0 = released
+        vk.key(0, key.keycode, 1); // 1 = pressed
+        vk.key(0, key.keycode, 0); // 0 = released
         vk.modifiers(0, 0, 0, 0);
         log::debug!(
             "[VK] Sent virtual key: keycode={}, mods_depressed=0x{:x}",
-            keycode,
-            mods_depressed
+            key.keycode,
+            mods.depressed
         );
     }
 }

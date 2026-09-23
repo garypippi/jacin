@@ -23,7 +23,8 @@ pub use protocol::{FromNeovim, GridCell, GridEvent, HlAttr, PendingState, ToNeov
 /// This provides backpressure if messages accumulate
 const CHANNEL_CAPACITY: usize = 64;
 
-/// Keys that return to normal mode and clear the buffer from any mode.
+/// Keys that return to normal mode and clear the buffer from any mode
+/// (sent with `NeovimHandle::input`).
 /// After an insert-mode key that waits for an argument (<C-r>, <C-v>, <C-k>),
 /// the first <Esc> only cancels that key, so a second one is needed to leave
 /// insert mode before ggdG.
@@ -36,9 +37,35 @@ pub struct NeovimHandle {
 }
 
 impl NeovimHandle {
-    /// Send a key to Neovim (non-blocking: drops key if channel full)
-    pub fn send_key(&self, key: &str) {
-        let _ = self.sender.try_send(ToNeovim::Key(key.to_string()));
+    /// Send a user key, acknowledged with `KeyProcessed { seq }`
+    /// (non-blocking). Returns false if the key was dropped (channel full).
+    pub fn send_key(&self, seq: u64, key: &str) -> bool {
+        let sent = self
+            .sender
+            .try_send(ToNeovim::Key {
+                seq,
+                key: key.to_string(),
+            })
+            .is_ok();
+        if !sent {
+            log::warn!("[NVIM] Key {key:?} dropped: Neovim is not keeping up");
+        }
+        sent
+    }
+
+    /// Input keys on jacin's behalf (not acknowledged). Waits briefly when
+    /// the channel is full: a lost reset leaves old text in the buffer.
+    pub fn input(&self, keys: &str) {
+        if self
+            .sender
+            .send_timeout(
+                ToNeovim::Input(keys.to_string()),
+                Duration::from_millis(200),
+            )
+            .is_err()
+        {
+            log::warn!("[NVIM] Input {keys:?} dropped: Neovim is not keeping up");
+        }
     }
 
     /// Resize the attached UI grid (non-blocking: dropped if channel full)

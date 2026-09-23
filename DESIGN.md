@@ -99,6 +99,20 @@ One `nvim_buf_get_lines` RPC: if the whole buffer is empty the key passes
 through to the app, otherwise BS/Enter go to Neovim and the commit key
 commits all lines joined with `\n`.
 
+### Key Acknowledgment
+
+Each user key is sent as `ToNeovim::Key { seq, key }`, and the handler
+echoes `seq` in `KeyProcessed` and `PassthroughKey`. The main thread waits
+(up to 200ms) only for the `KeyProcessed` with its own `seq`, and resolves a
+`PassthroughKey` to the keycode and modifiers recorded when that key was
+pressed (`SentKeys` in the model). A message arriving after its wait timed
+out is still matched to its own key, never to the next one.
+
+Keys jacin inputs on its own behalf (clearing the buffer on IME off, restoring
+the mode on re-activation, clearing after commit) are sent as
+`ToNeovim::Input`: they bypass key handling, are not acknowledged, and only
+re-sync the handler's pending state and mode from `nvim_get_mode()`.
+
 ### nvim_ui_attach Redraw Events
 
 `nvim_ui_attach` with `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `ext_multigrid` extensions. The `handle_redraw` dispatcher processes:
@@ -149,7 +163,7 @@ Not tracked by the IME state machine. `NvimView.vim_mode` mirrors Neovim (`mode_
 
 All pending states resolve back to None after the sequence completes. `CommandLine` resolves on `cmdline_hide` (level 1).
 
-Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and the notification handler, recreated on each spawn). The main thread only sees it through `FromNeovim::KeyProcessed { pending }`, sent exactly once per key after all data messages for that key.
+Owned by the Neovim thread (`Arc<AtomicPendingState>` shared by the key loop and the notification handler, recreated on each spawn). The main thread only sees it through `FromNeovim::KeyProcessed { seq, pending }`, sent exactly once per user key after all data messages for that key.
 
 ## 4. Core Design Principles
 

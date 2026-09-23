@@ -80,8 +80,12 @@ impl AtomicPendingState {
 /// Messages sent from IME to Neovim
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToNeovim {
-    /// Send a key to Neovim (raw key string like "a", "A", "<BS>", "<CR>")
-    Key(String),
+    /// A key typed by the user (raw key string like "a", "A", "<BS>", "<CR>"),
+    /// acknowledged with `KeyProcessed` carrying the same `seq`
+    Key { seq: u64, key: String },
+    /// Keys input on jacin's behalf (clearing the buffer, restoring the
+    /// mode): not handled as user keys and not acknowledged
+    Input(String),
     /// Resize the attached UI (grid columns x rows)
     ResizeUi { width: u64, height: u64 },
     /// Shutdown Neovim
@@ -204,9 +208,9 @@ pub enum FromNeovim {
     Candidates(CandidateInfo),
     /// Macro register being recorded ("" when not recording)
     Recording(String),
-    /// Key was processed. Sent exactly once per key, after any data messages
-    /// for that key, carrying the pending state after processing.
-    KeyProcessed { pending: PendingState },
+    /// Key `seq` was processed. Sent exactly once per key, after any data
+    /// messages for that key, carrying the pending state after processing.
+    KeyProcessed { seq: u64, pending: PendingState },
     /// Command-line shown (from ext_cmdline redraw event)
     CmdlineShow {
         content: String,
@@ -223,8 +227,9 @@ pub enum FromNeovim {
     CmdlineMessage { text: String, cmdtype: String },
     /// Vim mode changed (from mode_change redraw event)
     ModeChange(String),
-    /// Key should be passed through to the application via virtual keyboard
-    PassthroughKey,
+    /// Key `seq` should be passed through to the application via virtual
+    /// keyboard
+    PassthroughKey { seq: u64 },
     /// Neovim process exited (e.g., :q)
     NvimExited,
     /// Grid updates of one redraw batch, sent at `flush`
@@ -341,9 +346,10 @@ mod tests {
         // Test all data-less or simple variants
         for msg in [
             FromNeovim::KeyProcessed {
+                seq: 3,
                 pending: PendingState::Motion,
             },
-            FromNeovim::PassthroughKey,
+            FromNeovim::PassthroughKey { seq: 3 },
             FromNeovim::NvimExited,
             FromNeovim::CmdlineShow {
                 content: "s/foo/bar/g".into(),
@@ -369,11 +375,17 @@ mod tests {
 
     #[test]
     fn to_neovim_roundtrip() {
-        let key = ToNeovim::Key("<C-r>a".into());
+        let key = ToNeovim::Key {
+            seq: 7,
+            key: "<C-r>a".into(),
+        };
         let json = serde_json::to_string(&key).unwrap();
         let rt: ToNeovim = serde_json::from_str(&json).unwrap();
         match rt {
-            ToNeovim::Key(k) => assert_eq!(k, "<C-r>a"),
+            ToNeovim::Key { seq, key } => {
+                assert_eq!(seq, 7);
+                assert_eq!(key, "<C-r>a");
+            }
             _ => panic!("expected Key"),
         }
 
