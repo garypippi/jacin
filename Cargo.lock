@@ -516,6 +516,7 @@ dependencies = [
  "log",
  "memmap2",
  "nvim-rs",
+ "rmpv",
  "serde",
  "serde_json",
  "signal-hook",
