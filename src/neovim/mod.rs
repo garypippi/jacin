@@ -7,6 +7,10 @@ mod handler;
 #[cfg(test)]
 mod integration_tests;
 #[allow(dead_code)] // not wired up yet
+mod keys;
+#[allow(dead_code)] // not wired up yet
+mod mode;
+#[allow(dead_code)] // not wired up yet
 mod process;
 pub mod protocol;
 mod redraw_grid;

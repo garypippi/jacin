@@ -198,7 +198,7 @@ pub enum GridEvent {
 }
 
 /// Messages sent from Neovim to IME
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FromNeovim {
     /// Neovim is ready
     Ready,
@@ -243,7 +243,7 @@ pub enum FromNeovim {
     },
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CandidateInfo {
     pub candidates: Vec<String>,
     pub selected: usize,
