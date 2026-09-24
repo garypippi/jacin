@@ -31,7 +31,7 @@ use rpc::{Message, Rpc};
 
 pub use mode::Mode;
 pub use process::ReadStatus;
-pub use protocol::{FromNeovim, GridCell, GridEvent, HlAttr, PendingState};
+pub use protocol::{FromNeovim, GridCell, GridEvent, HlAttr};
 pub use rpc::DecodeError;
 
 /// Keys queued beyond this are dropped (Neovim is not keeping up)

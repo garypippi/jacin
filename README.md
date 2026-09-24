@@ -32,7 +32,7 @@ recording_blink = true    # Blink the REC indicator while recording a macro
 
 [font]
 family = "Noto Sans CJK JP"   # Proportional font (candidates/messages). Default: fontconfig auto
-mono_family = "JetBrains Mono" # Monospace font (Neovim window, command line, keypress/mode). Default: "monospace"
+mono_family = "JetBrains Mono" # Monospace font (Neovim window, command line, mode). Default: "monospace"
 size = 16.0                    # Font size in pixels
 ```
 

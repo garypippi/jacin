@@ -4,8 +4,8 @@
 //! returns the side effects to perform. It does no I/O, so message sequences
 //! can be replayed in tests; `State::apply_effects` executes the effects.
 
-use crate::neovim::{FromNeovim, Mode, PendingState};
-use crate::state::{BufferMirror, ImeState, KeypressState, NvimView, Screen, SentKey, SentKeys};
+use crate::neovim::{FromNeovim, Mode};
+use crate::state::{BufferMirror, ImeState, NvimView, Screen, SentKey, SentKeys};
 
 /// Side effect requested by `Model::reduce`
 #[derive(Debug, Clone, PartialEq)]
@@ -27,7 +27,6 @@ pub enum Effect {
 #[derive(Default)]
 pub struct Model {
     pub ime: ImeState,
-    pub keypress: KeypressState,
     pub view: NvimView,
     /// Keys sent to Neovim, awaiting `KeyProcessed`
     pub sent_keys: SentKeys,
@@ -41,7 +40,6 @@ impl Model {
     /// Clear all display state (keeps the IME mode).
     pub fn reset(&mut self) {
         self.view.clear();
-        self.keypress.clear();
     }
 
     /// Apply a Neovim message.
@@ -49,33 +47,12 @@ impl Model {
         let enabled = self.ime.is_fully_enabled();
         match msg {
             FromNeovim::Ready => vec![],
-            FromNeovim::KeyProcessed { seq, pending } => {
-                let key = self.sent_keys.get(seq).cloned();
+            FromNeovim::KeyProcessed { seq, .. } => {
                 self.sent_keys.acknowledge(seq);
-                // The command line is shown by cmdline_show instead
-                if !enabled || pending == PendingState::CommandLine {
-                    return vec![];
-                }
-                let mut effects = vec![];
-                if let Some(key) = key {
-                    // In insert mode, only Ctrl/Alt keys (<C-r>a, <C-w>) and
-                    // register names after <C-r> are shown, not typed text,
-                    // <BS>, <CR>, etc.
-                    let show = self.view.mode != Mode::Insert
-                        || key.ctrl
-                        || key.alt
-                        || self.keypress.pending_type == PendingState::InsertRegister;
-                    if show {
-                        self.keypress.push_key(&key.vim_key);
-                        effects.push(Effect::Render);
-                    }
-                }
-                self.keypress.set_pending(pending);
-                effects
+                vec![]
             }
             FromNeovim::Commit(text) => {
                 self.view.clear_candidates();
-                self.keypress.clear();
                 vec![
                     Effect::CommitString(text),
                     Effect::CancelToggle,
@@ -89,7 +66,8 @@ impl Model {
                 if info.candidates.is_empty() {
                     self.view.clear_candidates();
                 } else {
-                    self.view.set_candidates(info.candidates, info.selected);
+                    self.view
+                        .set_candidates(info.candidates, info.selected, info.cmdline);
                 }
                 vec![Effect::Render]
             }
@@ -120,7 +98,6 @@ impl Model {
                 // Display prompt + content for @-mode, firstc + content for :/?
                 let prefix = if !prompt.is_empty() { &prompt } else { &firstc };
                 self.view.show_cmdline(prefix, &content, pos, level);
-                self.keypress.clear();
                 vec![Effect::Render]
             }
             FromNeovim::CmdlinePos { pos, level } => {
@@ -133,7 +110,6 @@ impl Model {
             FromNeovim::CmdlineHide { level } => {
                 // Only clear if the level matches the active cmdline
                 if self.view.hide_cmdline(level) {
-                    self.keypress.clear();
                     vec![Effect::Render]
                 } else {
                     vec![]
@@ -148,6 +124,13 @@ impl Model {
                 } else {
                     self.view.set_transient_message(text);
                 }
+                vec![Effect::Render]
+            }
+            FromNeovim::ShowCmd(text) => {
+                if !enabled || self.view.showcmd == text {
+                    return vec![];
+                }
+                self.view.showcmd = text;
                 vec![Effect::Render]
             }
             FromNeovim::ModeChange(mode) => {
@@ -403,7 +386,7 @@ mod replay_tests {
         let seq = model.sent_keys.push(sent_key(14, false));
         model.reduce(FromNeovim::KeyProcessed {
             seq,
-            pending: PendingState::None,
+            pending: crate::neovim::protocol::PendingState::None,
         });
 
         assert!(model.reduce(FromNeovim::PassthroughKey { seq }).is_empty());
@@ -418,48 +401,16 @@ mod replay_tests {
         assert!(model.sent_keys.get(seq).is_none());
     }
 
-    fn processed(model: &mut Model, key: SentKey, pending: PendingState) -> Vec<Effect> {
-        let seq = model.sent_keys.push(key);
-        model.reduce(FromNeovim::KeyProcessed { seq, pending })
-    }
-
     #[test]
-    fn processed_key_is_shown_outside_insert_mode() {
+    fn showcmd_is_followed() {
         let mut model = enabled_model();
-        model.view.mode = Mode::Normal;
-        let effects = processed(&mut model, sent_key(32, false), PendingState::Motion);
-        assert_eq!(effects, vec![Effect::Render]);
-        assert_eq!(model.keypress.display_text(), "x");
-        assert_eq!(model.keypress.pending_type, PendingState::Motion);
-    }
-
-    #[test]
-    fn typed_text_in_insert_mode_is_not_shown() {
-        let mut model = enabled_model();
-        model.view.mode = Mode::Insert;
-        assert!(processed(&mut model, sent_key(32, false), PendingState::None).is_empty());
-        assert_eq!(model.keypress.display_text(), "");
-
-        // Ctrl keys are
-        processed(&mut model, sent_key(32, true), PendingState::InsertRegister);
-        assert_eq!(model.keypress.display_text(), "<C-x>");
-        // and so is the register name after <C-r>
-        processed(&mut model, sent_key(30, false), PendingState::None);
-        assert_eq!(model.keypress.display_text(), "<C-x>x");
-    }
-
-    #[test]
-    fn cmdline_keys_are_not_shown() {
-        let mut model = enabled_model();
-        model.view.mode = Mode::CmdLine;
-        let seq = model.sent_keys.push(sent_key(32, false));
-        let effects = model.reduce(FromNeovim::KeyProcessed {
-            seq,
-            pending: PendingState::CommandLine,
-        });
-        assert!(effects.is_empty());
-        assert!(model.sent_keys.get(seq).is_none());
-        assert_eq!(model.keypress.display_text(), "");
+        assert_eq!(
+            model.reduce(FromNeovim::ShowCmd("2d".into())),
+            vec![Effect::Render]
+        );
+        assert_eq!(model.view.showcmd, "2d");
+        // Unchanged: nothing to render
+        assert!(model.reduce(FromNeovim::ShowCmd("2d".into())).is_empty());
     }
 
     #[test]

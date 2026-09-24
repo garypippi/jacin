@@ -8,7 +8,8 @@ use std::collections::VecDeque;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use super::{FromNeovim, Mode, Neovim, PendingState, ReadStatus};
+use super::protocol::PendingState;
+use super::{FromNeovim, Mode, Neovim, ReadStatus};
 use crate::config::Config;
 use crate::model::Model;
 use crate::state::{Modifiers, SentKey};
@@ -699,6 +700,45 @@ fn key_typed_right_after_commit_is_kept() {
         "expected Commit 'ab'"
     );
     probe.wait_buffer("c");
+
+    probe.shutdown();
+}
+
+/// A prompt opened while the completion menu is shown (like a plugin's
+/// confirm()) shows its question and prompt instead of the menu.
+#[test]
+#[ignore]
+fn prompt_over_completion_menu_is_shown() {
+    let mut probe = Probe::spawn(true);
+
+    probe.keys(&[
+        "<C-o>",
+        ":",
+        "set completeopt=menuone,noselect \
+         | inoremap <lt>F2> <lt>Cmd>call confirm('Really?', \"&Yes\\n&No\")<lt>CR>\
+         | inoremap <lt>F3> <lt>Cmd>call complete(1, ['foo', 'bar'])<lt>CR>",
+        "<CR>",
+    ]);
+    probe.send("<F3>");
+    probe.wait("completion menu", |m| m.view.candidates.len() == 2);
+    // Nothing selected ('completeopt' noselect)
+    assert_eq!(probe.model.view.selected_candidate, None);
+
+    probe.send("<F2>");
+    probe.wait("confirm prompt", |m| {
+        m.view
+            .cmdline
+            .as_ref()
+            .is_some_and(|c| c.text.contains("(N)o"))
+    });
+    assert_eq!(
+        probe.model.view.transient_message.as_deref(),
+        Some("Really?")
+    );
+    assert!(probe.model.view.visible_candidates().is_empty());
+
+    probe.key("n");
+    probe.wait("prompt closed", |m| m.view.cmdline.is_none());
 
     probe.shutdown();
 }

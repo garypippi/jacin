@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use super::{BufferMirror, Screen};
 use crate::neovim::Mode;
 
-/// How long a transient message stays visible before auto-clearing
+/// How long a transient message stays visible before auto-clearing (counted
+/// from when the command line closes, if one is shown)
 pub const TRANSIENT_MESSAGE_DURATION: Duration = Duration::from_millis(2000);
 
 /// Active command line (from ext_cmdline)
@@ -34,11 +35,15 @@ pub struct NvimView {
     pub recording: String,
     /// Completion candidates
     pub candidates: Vec<String>,
-    /// Selected candidate index
-    pub selected_candidate: usize,
+    /// Selected candidate index (None: nothing selected)
+    pub selected_candidate: Option<usize>,
+    /// The candidates complete the command line
+    candidates_for_cmdline: bool,
     /// Active command line (None when not in command-line mode)
     pub cmdline: Option<Cmdline>,
-    /// Transient message shown in candidate area (e.g., command output)
+    /// Pending command keys ('showcmd')
+    pub showcmd: String,
+    /// Message (e.g. command output, a prompt's question)
     pub transient_message: Option<String>,
     /// When the transient message was set
     transient_message_at: Option<Instant>,
@@ -55,21 +60,36 @@ impl NvimView {
         self.recording.clear();
         self.clear_candidates();
         self.cmdline = None;
+        self.showcmd.clear();
         self.clear_transient_message();
     }
 
-    /// Update candidates (clears any transient message — candidates take priority)
-    pub fn set_candidates(&mut self, candidates: Vec<String>, selected: usize) {
+    pub fn set_candidates(
+        &mut self,
+        candidates: Vec<String>,
+        selected: Option<usize>,
+        cmdline: bool,
+    ) {
         self.candidates = candidates;
         self.selected_candidate = selected;
-        if !self.candidates.is_empty() {
-            self.clear_transient_message();
-        }
+        self.candidates_for_cmdline = cmdline;
     }
 
     pub fn clear_candidates(&mut self) {
         self.candidates.clear();
-        self.selected_candidate = 0;
+        self.selected_candidate = None;
+        self.candidates_for_cmdline = false;
+    }
+
+    /// Candidates to show: while the command line is shown, only its own
+    /// completion (a buffer's completion menu can't be used from there, e.g.
+    /// during a confirm() prompt)
+    pub fn visible_candidates(&self) -> &[String] {
+        if self.cmdline.is_some() && !self.candidates_for_cmdline {
+            &[]
+        } else {
+            &self.candidates
+        }
     }
 
     /// Show the command line: `prefix` is the prompt (input()) or firstc (:, /, ?),
@@ -100,6 +120,10 @@ impl NvimView {
     pub fn hide_cmdline(&mut self, level: u64) -> bool {
         if self.cmdline.as_ref().is_some_and(|c| c.level == level) {
             self.cmdline = None;
+            // The message stays for its full duration from now
+            if self.transient_message.is_some() {
+                self.transient_message_at = Some(Instant::now());
+            }
             true
         } else {
             false
@@ -117,8 +141,11 @@ impl NvimView {
     }
 
     /// Clear the transient message if it has expired. Returns true if cleared.
+    /// Kept while the command line is shown: it may be the question of a
+    /// prompt (confirm(), input()).
     pub fn expire_transient_message(&mut self) -> bool {
-        if let Some(at) = self.transient_message_at
+        if self.cmdline.is_none()
+            && let Some(at) = self.transient_message_at
             && at.elapsed() >= TRANSIENT_MESSAGE_DURATION
         {
             self.clear_transient_message();
@@ -140,21 +167,51 @@ mod tests {
     #[test]
     fn candidate_operations() {
         let mut view = NvimView::default();
-        view.set_candidates(vec!["a".into(), "b".into()], 1);
+        view.set_candidates(vec!["a".into(), "b".into()], Some(1), false);
         assert_eq!(view.candidates.len(), 2);
-        assert_eq!(view.selected_candidate, 1);
+        assert_eq!(view.selected_candidate, Some(1));
 
         view.clear_candidates();
         assert!(view.candidates.is_empty());
-        assert_eq!(view.selected_candidate, 0);
+        assert_eq!(view.selected_candidate, None);
     }
 
     #[test]
-    fn candidates_clear_transient_message() {
+    fn candidates_keep_the_message() {
         let mut view = NvimView::default();
         view.set_transient_message("msg".into());
-        view.set_candidates(vec!["a".into()], 0);
-        assert!(!view.has_transient_message());
+        view.set_candidates(vec!["a".into()], None, false);
+        assert!(view.has_transient_message());
+    }
+
+    #[test]
+    fn buffer_candidates_are_hidden_while_the_cmdline_is_shown() {
+        let mut view = NvimView::default();
+        view.set_candidates(vec!["a".into()], None, false);
+        view.show_cmdline("(Y)es, [N]o, : ", "", 0, 1);
+        assert!(view.visible_candidates().is_empty());
+        view.hide_cmdline(1);
+        assert_eq!(view.visible_candidates(), ["a"]);
+
+        view.show_cmdline(":", "e", 1, 1);
+        view.set_candidates(vec!["edit".into()], None, true);
+        assert_eq!(view.visible_candidates(), ["edit"]);
+    }
+
+    #[test]
+    fn message_stays_while_the_cmdline_is_shown() {
+        let expired = Instant::now() - TRANSIENT_MESSAGE_DURATION - Duration::from_millis(1);
+        let mut view = NvimView::default();
+        view.set_transient_message("Really?".into());
+        view.show_cmdline("(Y)es, [N]o, : ", "", 0, 1);
+        view.transient_message_at = Some(expired);
+        assert!(!view.expire_transient_message());
+
+        // Counted from when the command line closes
+        view.hide_cmdline(1);
+        assert!(!view.expire_transient_message());
+        view.transient_message_at = Some(expired);
+        assert!(view.expire_transient_message());
     }
 
     #[test]
@@ -176,14 +233,16 @@ mod tests {
             ..Default::default()
         };
         view.recording = "q".into();
-        view.set_candidates(vec!["a".into()], 0);
+        view.set_candidates(vec!["a".into()], Some(0), false);
         view.show_cmdline(":", "set", 3, 1);
+        view.showcmd = "2d".into();
 
         view.clear();
         assert_eq!(view.mode, Mode::Visual);
         assert!(view.recording.is_empty());
         assert!(view.candidates.is_empty());
         assert!(view.cmdline.is_none());
+        assert!(view.showcmd.is_empty());
     }
 
     #[test]

@@ -173,6 +173,8 @@ pub enum FromNeovim {
     CmdlineHide { level: u64 },
     /// Command output message (e.g., from :s/foo/bar/g)
     CmdlineMessage { text: String, cmdtype: String },
+    /// Pending command keys ('showcmd', from msg_showcmd; "" when none)
+    ShowCmd(String),
     /// Vim mode changed (mode_change redraw event or nvim_get_mode reply)
     ModeChange(Mode),
     /// Key `seq` should be passed through to the application via virtual
@@ -194,14 +196,19 @@ pub enum FromNeovim {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CandidateInfo {
     pub candidates: Vec<String>,
-    pub selected: usize,
+    /// None when no item is selected (e.g. 'completeopt' noselect)
+    pub selected: Option<usize>,
+    /// Completion of the command line rather than of the buffer
+    #[serde(default)]
+    pub cmdline: bool,
 }
 
 impl CandidateInfo {
-    pub fn new(candidates: Vec<String>, selected: usize) -> Self {
+    pub fn new(candidates: Vec<String>, selected: Option<usize>, cmdline: bool) -> Self {
         Self {
             candidates,
             selected,
+            cmdline,
         }
     }
 
@@ -254,13 +261,14 @@ mod tests {
     fn from_neovim_candidates_roundtrip() {
         let msg = FromNeovim::Candidates(CandidateInfo::new(
             vec!["漢字".into(), "感じ".into(), "幹事".into()],
-            1,
+            Some(1),
+            false,
         ));
         let rt = roundtrip_from_neovim(&msg);
         match rt {
             FromNeovim::Candidates(info) => {
                 assert_eq!(info.candidates.len(), 3);
-                assert_eq!(info.selected, 1);
+                assert_eq!(info.selected, Some(1));
             }
             _ => panic!("expected Candidates"),
         }
@@ -290,6 +298,7 @@ mod tests {
                 cmdtype: ":".into(),
             },
             FromNeovim::Recording("q".into()),
+            FromNeovim::ShowCmd("2d".into()),
         ] {
             let json = serde_json::to_string(&msg).unwrap();
             let rt: FromNeovim = serde_json::from_str(&json).unwrap();
@@ -302,6 +311,6 @@ mod tests {
     fn candidate_info_empty() {
         let info = CandidateInfo::empty();
         assert!(info.candidates.is_empty());
-        assert_eq!(info.selected, 0);
+        assert_eq!(info.selected, None);
     }
 }

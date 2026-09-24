@@ -25,13 +25,12 @@
 │                  Screen (grids), BufferMirror (buffer lines)   │
 │    SentKeys      keys sent to Neovim, awaiting KeyProcessed    │
 │    KeyboardState XKB context, modifiers                        │
-│    KeypressState accumulated key sequences, display timeout    │
 │    WaylandState  protocol handles, serial, virtual keyboard    │
 │                                                                │
 │  Calloop sources:                                              │
 │    WaylandSource, SIGINT/SIGTERM, SIGUSR1 ping (toggle),       │
 │    Neovim stdout (+ stdin while the pipe is full),             │
-│    repeat timer, keypress/animation timer                      │
+│    repeat timer, animation timer (REC blink, message expiry)   │
 └──────────┬──────────────────────────────────────┬──────────────┘
            │ Neovim (non-blocking calls)          │ PopupContent
            ▼                                      ▼
@@ -40,9 +39,9 @@
 │                          │  │                                  │
 │  mod.rs   Neovim: glue,  │  │  UnifiedPopup                    │
 │           request ids,   │  │    window grid + floats + cursor │
-│           startup        │  │    keypress display              │
-│  keys.rs  KeyProcessor   │  │    candidates + scrollbar        │
-│           (no I/O)       │  │    mode indicator                │
+│           startup        │  │    mode + column: cmdline or     │
+│  keys.rs  KeyProcessor   │  │    showcmd, message, candidates  │
+│           (no I/O)       │  │    + scrollbar                   │
 │  redraw.rs  redraw →     │  │                                  │
 │           FromNeovim     │  │  TextRenderer (fontdue + cache)  │
 │  rpc.rs   msgpack-rpc    │  │  Layout (layout.rs)              │
@@ -247,14 +246,19 @@ whenever the mode is the command line.
 ### Popup-Only Display
 
 - The app gets no preedit content; text appears in the app only on commit. An empty preedit is still sent whenever the IME is enabled, because applications such as Firefox only report the cursor rectangle in response to a preedit update, and the compositor otherwise places the popup at the previously focused field
-- UnifiedPopup renders Neovim's window grid (with floats such as nvim-cmp menus), keypress/mode, and candidates
+- UnifiedPopup renders Neovim's window grid (with floats such as nvim-cmp menus), then the mode with a column beside it: a header row (command line, else `showcmd`), a message row, and the candidates; the first present one shares the mode's row
+- While the command line is shown, only its own completion (`popupmenu_show` grid −1) is listed: a buffer's menu can't be used from a prompt such as `confirm()`, whose question and prompt must stay visible
+- A candidate is highlighted only when Neovim reports one selected (none with `'completeopt'` noselect)
+- A message stays while the command line is shown (it may be a prompt's question) and for 2 seconds after, or 2 seconds otherwise
+- Near the bottom of the screen the compositor places the popup above the cursor (`text_input_rectangle` y ≥ 0; y = −height below it). The layout is then mirrored — window at the bottom next to the cursor, the mode row above it, candidates upwards — so the text doesn't move when the height changes. Only the sign of y is used: the event may describe the previous size
+- The popup grows at once but shrinks only after 1 second without needing the height (the extra space away from the cursor), so candidates coming and going while typing don't resize it each time
 
 ### Wayland-Dependent vs Independent
 
 | Wayland-dependent | Wayland-independent (testable) |
 |---|---|
 | WaylandState (protocol ops, serial) | ImeState (pure state machine) |
-| KeyboardState (XKB keymap) | KeypressState (pure logic) |
+| KeyboardState (XKB keymap) | NvimView, Model (pure logic) |
 | SIGUSR1 signal handling | KeyProcessor, rpc codec, redraw parsing |
 | SHM buffer attach/commit | Config, TextRenderer, Layout |
 
@@ -281,5 +285,5 @@ paths, and the buffer keeps `buftype=nofile` so `:q` never hits E37.
 The protocol allows several `zwp_input_popup_surface_v2` surfaces, but the
 compositor places each one near the text cursor on its own, so a second
 surface (e.g. for candidates) cannot be positioned relative to the first. The
-window grid, keypress/mode row and candidates share one popup laid out by
+window grid, mode row and candidates share one popup laid out by
 `layout.rs`.

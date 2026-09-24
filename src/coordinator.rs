@@ -8,7 +8,7 @@ use calloop::{Interest, Mode as Trigger};
 use crate::State;
 use crate::model::Effect;
 use crate::neovim::{FromNeovim, Neovim, ReadStatus};
-use crate::ui::{MAX_GRID_ROWS, PopupContent};
+use crate::ui::{Header, MAX_GRID_ROWS, PopupContent};
 
 impl State {
     /// Common cleanup shared by toggle-off and deactivate:
@@ -22,7 +22,7 @@ impl State {
     fn release_ime_resources(&mut self) {
         self.repeat.cancel();
         self.repeat_timer_token = None;
-        self.keypress_timer_token = None;
+        self.animation_timer_token = None;
         self.hide_popup();
         self.wayland.release_keyboard();
         self.keyboard.reset_modifiers();
@@ -246,31 +246,25 @@ impl State {
             return;
         }
         let t = std::time::Instant::now();
+        let view = &self.model.view;
+        let header = match (&view.cmdline, view.showcmd.is_empty()) {
+            (Some(cmdline), _) => Some(Header::Cmdline {
+                text: cmdline.text.clone(),
+                cursor_byte: cmdline.cursor_byte,
+            }),
+            (None, false) => Some(Header::ShowCmd(view.showcmd.clone())),
+            (None, true) => None,
+        };
+        let candidates = view.visible_candidates().to_vec();
         let content = PopupContent {
-            mode: self.model.view.mode,
-            keypress_entries: if let Some(ref cmdline) = self.model.view.cmdline {
-                vec![cmdline.text.clone()]
-            } else if self.model.keypress.should_show() {
-                self.model
-                    .keypress
-                    .entries()
-                    .iter()
-                    .map(|e| e.text.clone())
-                    .collect()
-            } else {
-                Vec::new()
-            },
-            candidates: self.model.view.candidates.clone(),
-            selected: self.model.view.selected_candidate,
-            transient_message: if self.model.view.candidates.is_empty() {
-                self.model.view.transient_message.clone()
-            } else {
-                None
-            },
+            mode: view.mode,
+            header,
+            message: view.transient_message.clone(),
+            selected: view.selected_candidate.filter(|_| !candidates.is_empty()),
+            candidates,
             ime_enabled: self.model.ime.is_enabled(),
             recording: self.model.view.recording.clone(),
             rec_blink_on: self.animations.rec_blink.on,
-            cmdline_cursor_pos: self.model.view.cmdline.as_ref().map(|c| c.cursor_byte),
             window_view: {
                 let view = self.model.view.screen.window_view(MAX_GRID_ROWS);
                 match &view {
@@ -293,6 +287,13 @@ impl State {
             "[PERF] render_popup: {:.2}ms",
             t.elapsed().as_secs_f64() * 1000.0
         );
+    }
+
+    /// The popup keeps a height its content no longer needs (for a while)
+    pub(crate) fn popup_holds_height(&self) -> bool {
+        self.popup
+            .as_ref()
+            .is_some_and(|popup| popup.is_holding_height())
     }
 
     pub(crate) fn hide_popup(&mut self) {

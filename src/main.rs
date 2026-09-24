@@ -139,7 +139,7 @@ fn main() -> anyhow::Result<()> {
         ui_grid_size,
         popup,
         repeat_timer_token: None,
-        keypress_timer_token: None,
+        animation_timer_token: None,
         popup_dirty: false,
     };
 
@@ -222,19 +222,17 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Insert on-demand keypress display timeout timer
-        // Also drives REC blink and transient message expiry
+        // On-demand timer for the REC blink and transient message expiry
         let needs_blink =
             state.config.behavior.recording_blink && !state.model.view.recording.is_empty();
-        let needs_timer = state.model.keypress.should_show()
-            || needs_blink
-            || state.model.view.has_transient_message();
-        if needs_timer && state.keypress_timer_token.is_none() {
+        let needs_timer =
+            needs_blink || state.model.view.has_transient_message() || state.popup_holds_height();
+        if needs_timer && state.animation_timer_token.is_none() {
             match handle.insert_source(
                 Timer::from_duration(std::time::Duration::from_millis(100)),
                 |_, _, state| {
                     let now = std::time::Instant::now();
-                    let mut changed = state.model.keypress.cleanup_inactive();
+                    let mut changed = false;
 
                     // Advance all animations (currently: REC blink)
                     if state.config.behavior.recording_blink {
@@ -246,14 +244,20 @@ fn main() -> anyhow::Result<()> {
                     // Expire transient message
                     changed |= state.model.view.expire_transient_message();
 
+                    // Shrink the popup to its content
+                    changed |= state
+                        .popup
+                        .as_ref()
+                        .is_some_and(|popup| popup.hold_expired(now));
+
                     let needs_blink = state.config.behavior.recording_blink
                         && !state.model.view.recording.is_empty();
-                    let keep_running = state.model.keypress.should_show()
-                        || needs_blink
-                        || state.model.view.has_transient_message();
+                    let keep_running = needs_blink
+                        || state.model.view.has_transient_message()
+                        || state.popup_holds_height();
                     if !keep_running {
                         state.update_popup();
-                        state.keypress_timer_token = None;
+                        state.animation_timer_token = None;
                         TimeoutAction::Drop
                     } else {
                         if changed {
@@ -263,10 +267,10 @@ fn main() -> anyhow::Result<()> {
                     }
                 },
             ) {
-                Ok(token) => state.keypress_timer_token = Some(token),
+                Ok(token) => state.animation_timer_token = Some(token),
                 Err(e) => {
-                    log::error!("[TIMER] Failed to insert keypress timer: {e}");
-                    state.keypress_timer_token = None;
+                    log::error!("[TIMER] Failed to insert animation timer: {e}");
+                    state.animation_timer_token = None;
                 }
             }
         }
@@ -306,7 +310,7 @@ pub struct State {
     pub(crate) wayland: WaylandState,
     pub(crate) keyboard: KeyboardState,
     pub(crate) repeat: KeyRepeatState,
-    // IME model driven by Neovim messages (keypress display, NvimView)
+    // IME model driven by Neovim messages (NvimView, sent keys)
     pub(crate) model: Model,
     pub(crate) animations: Animations,
     pub(crate) pending_exit: bool,
@@ -318,11 +322,11 @@ pub struct State {
     pub(crate) nvim_write_token: Option<RegistrationToken>,
     // Neovim UI size fitted to the popup (re-applied on respawn)
     pub(crate) ui_grid_size: Option<(usize, usize)>,
-    // Unified popup window (Neovim window grid, keypress, candidates)
+    // Unified popup window (Neovim window grid, mode, candidates)
     pub(crate) popup: Option<UnifiedPopup>,
     // On-demand timer tokens (None = timer not running)
     pub(crate) repeat_timer_token: Option<RegistrationToken>,
-    pub(crate) keypress_timer_token: Option<RegistrationToken>,
+    pub(crate) animation_timer_token: Option<RegistrationToken>,
     // Popup redraw requested; rendered once at the end of the loop iteration
     pub(crate) popup_dirty: bool,
 }

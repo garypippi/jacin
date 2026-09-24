@@ -141,7 +141,7 @@ impl Dispatch<wl_buffer::WlBuffer, usize> for State {
 
 impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for State {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _popup_surface: &zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
         event: zwp_input_popup_surface_v2::Event,
         _data: &(),
@@ -155,8 +155,9 @@ impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for State 
             height,
         } = event
         {
-            // The compositor tells us where the text cursor is
-            // This is informational - positioning is handled by the compositor
+            // The text cursor relative to the popup: below it (y >= 0, at
+            // the bottom of the screen) or above it (y = -height). May
+            // describe the previous size, so only the side is used.
             log::debug!(
                 "[POPUP] Text input rectangle: x={}, y={}, {}x{}",
                 x,
@@ -164,6 +165,11 @@ impl Dispatch<zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2, ()> for State 
                 width,
                 height
             );
+            if let Some(ref mut popup) = state.popup
+                && popup.set_above(y >= 0)
+            {
+                state.update_popup();
+            }
         }
     }
 }

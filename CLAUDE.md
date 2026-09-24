@@ -29,7 +29,7 @@ src/
   dispatch.rs                # Wayland Dispatch impls, memmap_keymap
   input.rs                   # Key processing, handle_key, send_to_nvim
   keysym.rs                  # keysym_to_vim (pure conversion function)
-  model.rs                   # Model (ImeState + KeypressState + NvimView), reduce(FromNeovim) -> Vec<Effect>
+  model.rs                   # Model (ImeState + NvimView + SentKeys), reduce(FromNeovim) -> Vec<Effect>
   coordinator.rs             # apply_effects, IME toggle, popup coordination
   config.rs                  # Config file loading (TOML), keybind defaults
   state/
@@ -38,11 +38,10 @@ src/
     repeat.rs                # KeyRepeatState (key repeat timing/tracking)
     ime.rs                   # ImeState, ImeMode state machine
     sent_keys.rs             # SentKeys (keys awaiting KeyProcessed, for display and passthrough)
-    nvim_view.rs             # NvimView (vim mode, recording, cmdline, candidates, messages, screen, buffer)
+    nvim_view.rs             # NvimView (vim mode, recording, cmdline, showcmd, candidates, messages, screen, buffer)
     buffer.rs                # BufferMirror (buffer lines from nvim_buf_attach, committed on IME off)
     screen.rs                # Screen (ext_multigrid: grids by id, windows, viewport, floats, cursor, hl)
     grid.rs                  # Grid (cell storage for one grid)
-    keypress.rs              # KeypressState (accumulated keys, pending type, timeout)
     animation.rs             # AnimationState (blinking indicators, transient display)
   neovim/
     mod.rs                   # Neovim (public API): spawn, read/next_message, push_key, input, requests
@@ -55,7 +54,7 @@ src/
     redraw_grid.rs           # ext_linegrid/ext_multigrid redraw events → GridEvent (pure parsing)
     integration_tests.rs     # Headless nvim integration tests
   ui/
-    unified_window.rs        # Unified popup (window grid, keypress, candidates)
+    unified_window.rs        # Unified popup (window grid, mode + column: cmdline/showcmd, message, candidates)
     layout.rs                # Popup layout calculation and sizing
     text_render.rs           # Font rendering with fontdue, SHM utilities
 examples/

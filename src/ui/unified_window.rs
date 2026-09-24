@@ -1,8 +1,10 @@
-//! Unified popup window combining Neovim's window grid, keypress display,
-//! and candidates
+//! Unified popup window combining Neovim's window grid, the mode, and a
+//! column with the command line, messages and candidates
 //!
 //! Uses zwp_input_popup_surface_v2 which is automatically positioned near
 //! the text cursor by the compositor.
+
+use std::time::Instant;
 
 use memmap2::MmapMut;
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
@@ -14,12 +16,12 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 
 pub use super::layout::PopupContent;
 use super::layout::{
-    BG_COLOR, BORDER_COLOR, CURSOR_BG, ICON_SEPARATOR_GAP, ICON_SEPARATOR_WIDTH,
-    KEYPRESS_ENTRY_GAP, KEYPRESS_TEXT_COLOR, Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT,
-    MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP, MODE_RECORDING_COLOR, NUMBER_COLOR,
-    NUMBER_WIDTH, PADDING, REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB,
-    SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, SELECTED_BG, TEXT_COLOR, calculate_layout,
-    format_recording_label, mode_label, rgba, scrollbar_thumb_geometry,
+    BG_COLOR, BORDER_COLOR, CURSOR_BG, HEADER_TEXT_COLOR, Header, HeightHold, ICON_SEPARATOR_WIDTH,
+    Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT, MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP,
+    MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING, REC_CIRCLE_RADIUS,
+    REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT,
+    SELECTED_BG, TEXT_COLOR, calculate_layout, format_recording_label, mode_label, rgba,
+    scrollbar_thumb_geometry,
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
@@ -58,6 +60,10 @@ pub struct UnifiedPopup {
     renderer: TextRenderer,
     mono_renderer: TextRenderer,
     scroll_offset: usize,
+    /// The compositor placed the popup above the cursor (last known; kept
+    /// while hidden, the field usually stays where it is)
+    above: bool,
+    height_hold: HeightHold,
 }
 
 impl UnifiedPopup {
@@ -87,6 +93,8 @@ impl UnifiedPopup {
             renderer,
             mono_renderer,
             scroll_offset: 0,
+            above: false,
+            height_hold: HeightHold::default(),
         })
     }
 
@@ -120,7 +128,7 @@ impl UnifiedPopup {
         let cell_width = self.mono_renderer.measure_text(" ").max(1.0);
         let cols = ((MAX_POPUP_WIDTH as f32 - PADDING * 2.0) / cell_width).floor() as usize;
         let line_height = self.renderer.line_height().max(1.0);
-        // Minus padding, the keypress row and its separator
+        // Minus padding, the mode row and its separator
         let grid_height =
             MAX_POPUP_HEIGHT as f32 - PADDING * 2.0 - line_height - SECTION_SEPARATOR_HEIGHT;
         let rows = (grid_height / line_height).floor() as usize;
@@ -142,19 +150,25 @@ impl UnifiedPopup {
             ));
         }
 
-        // Adjust scroll offset to keep selection visible
-        if !content.candidates.is_empty() {
-            let visible_count = MAX_VISIBLE_CANDIDATES.min(content.candidates.len());
-            if content.selected < self.scroll_offset {
-                self.scroll_offset = content.selected;
-            } else if content.selected >= self.scroll_offset + visible_count {
-                self.scroll_offset = content.selected - visible_count + 1;
+        // Adjust scroll offset to keep the selection visible
+        let visible_count = MAX_VISIBLE_CANDIDATES.min(content.candidates.len());
+        match content.selected {
+            _ if content.candidates.is_empty() => self.scroll_offset = 0,
+            Some(selected) if selected < self.scroll_offset => self.scroll_offset = selected,
+            Some(selected) if selected >= self.scroll_offset + visible_count => {
+                self.scroll_offset = selected + 1 - visible_count;
             }
-        } else {
-            self.scroll_offset = 0;
+            _ => {}
         }
+        // The list may have shrunk
+        self.scroll_offset = self
+            .scroll_offset
+            .min(content.candidates.len() - visible_count);
 
-        let layout = calculate_layout(content, &mut self.renderer, &mut self.mono_renderer);
+        let layout = self.layout(content, Instant::now());
+        if (layout.width, layout.height) != (self.width, self.height) {
+            log::debug!("[POPUP] Size {}x{}", layout.width, layout.height);
+        }
         self.width = layout.width;
         self.height = layout.height;
 
@@ -162,7 +176,50 @@ impl UnifiedPopup {
         self.visible = true;
     }
 
+    /// Layout at the height `HeightHold` keeps
+    fn layout(&mut self, content: &PopupContent, now: Instant) -> Layout {
+        let layout = self.layout_at(content, 0);
+        let height = self.height_hold.height(layout.natural_height, now);
+        if height > layout.natural_height {
+            self.layout_at(content, height)
+        } else {
+            layout
+        }
+    }
+
+    fn layout_at(&mut self, content: &PopupContent, min_height: u32) -> Layout {
+        calculate_layout(
+            content,
+            self.above,
+            min_height,
+            &mut self.renderer,
+            &mut self.mono_renderer,
+        )
+    }
+
+    /// Record where the compositor placed the popup. Returns true if it
+    /// changed (the popup must be laid out again).
+    pub fn set_above(&mut self, above: bool) -> bool {
+        let changed = self.above != above;
+        if changed {
+            log::debug!("[POPUP] Placed {}", if above { "above" } else { "below" });
+            self.above = above;
+        }
+        changed
+    }
+
+    /// The popup is taller than its content (for a while)
+    pub fn is_holding_height(&self) -> bool {
+        self.visible && self.height_hold.is_holding()
+    }
+
+    /// The held height may be released (the popup must be laid out again)
+    pub fn hold_expired(&self, now: Instant) -> bool {
+        self.visible && self.height_hold.expired(now)
+    }
+
     pub fn hide(&mut self) {
+        self.height_hold = HeightHold::default();
         if self.visible {
             // First unmap the surface for immediate visual feedback, then
             // destroy both the popup surface role and wl_surface so the
@@ -228,38 +285,24 @@ impl UnifiedPopup {
         draw_border(&mut pixmap, self.width, self.height, rgba(BORDER_COLOR));
 
         if layout.has_window {
-            let window_rows = content
-                .window_view
-                .as_ref()
-                .map_or(1, |view| view.total_rows().max(1));
             if let Some(ref view) = content.window_view {
                 self.render_grid_section(&mut pixmap, view, content.mode, layout);
             }
 
-            // Draw separator below the window if more sections follow
-            if layout.has_keypress || layout.has_candidates || layout.has_transient_message {
-                let line_height = self.renderer.line_height();
-                // Pixel-align 1px lines (fractional positions trip tiny-skia's AA hairline path)
-                let sep_y = (layout.window_y + line_height * window_rows as f32).round();
-                if let Some(rect) =
-                    Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
-                {
-                    let mut paint = Paint::default();
-                    paint.set_color(rgba(BORDER_COLOR));
-                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-                }
-            }
+            // Separator between the window and the mode row (pixel-aligned:
+            // fractional positions trip tiny-skia's AA hairline path)
+            let sep_y = layout.separator_y.round();
+            fill_rect(
+                &mut pixmap,
+                PADDING,
+                sep_y,
+                self.width as f32 - PADDING,
+                1.0,
+                rgba(BORDER_COLOR),
+            );
         }
 
-        if layout.has_keypress {
-            self.render_keypress_section(&mut pixmap, content, layout);
-        }
-
-        if layout.has_candidates {
-            self.render_candidate_section(&mut pixmap, content, layout);
-        } else if layout.has_transient_message {
-            self.render_transient_message(&mut pixmap, content, layout);
-        }
+        self.render_status_section(&mut pixmap, content, layout);
 
         let dest = &mut self.pool_data[offset..offset + buffer_size];
         copy_pixmap_to_shm(&pixmap, dest);
@@ -422,34 +465,32 @@ impl UnifiedPopup {
         }
     }
 
-    /// Render keypress section with mode/REC icons and optional keypress text
-    fn render_keypress_section(
+    /// Render the mode/REC icons and the column right of them: header,
+    /// message and candidates
+    fn render_status_section(
         &mut self,
         pixmap: &mut Pixmap,
         content: &PopupContent,
         layout: &Layout,
     ) {
         let line_height = self.renderer.line_height();
-        let y_baseline = layout.keypress_y + line_height * 0.75;
+        let mode_y = layout.row_y(0, line_height);
+        let y_baseline = mode_y + line_height * 0.75;
 
         let (mode_text, mode_color) = mode_label(content.mode);
         let mode_x = PADDING;
         self.mono_renderer
             .draw_text(pixmap, mode_text, mode_x, y_baseline, rgba(mode_color));
 
-        let mode_text_width = self.mono_renderer.measure_text(mode_text);
-        let mut after_mode_x = mode_x + mode_text_width;
         if !content.recording.is_empty() {
-            let rec_x = after_mode_x + MODE_GAP;
+            let rec_x = mode_x + self.mono_renderer.measure_text(mode_text) + MODE_GAP;
 
-            // Draw red filled circle (hidden during blink-off phase)
-            let circle_cy = layout.keypress_y + line_height * 0.5;
-            let circle_cx = rec_x + REC_CIRCLE_RADIUS;
+            // Red filled circle (hidden during blink-off phase)
             if content.rec_blink_on {
                 draw_filled_circle(
                     pixmap,
-                    circle_cx,
-                    circle_cy,
+                    rec_x + REC_CIRCLE_RADIUS,
+                    mode_y + line_height * 0.5,
                     REC_CIRCLE_RADIUS,
                     rgba(MODE_RECORDING_COLOR),
                 );
@@ -464,199 +505,146 @@ impl UnifiedPopup {
                 y_baseline,
                 rgba(MODE_RECORDING_COLOR),
             );
-            after_mode_x = text_x + self.mono_renderer.measure_text(&rec_label);
         }
 
-        let sep_x = (after_mode_x + ICON_SEPARATOR_GAP).round();
-        if let Some(rect) =
-            Rect::from_xywh(sep_x, layout.keypress_y, ICON_SEPARATOR_WIDTH, line_height)
-        {
-            let mut paint = Paint::default();
-            paint.set_color(rgba(BORDER_COLOR));
-            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-        }
+        // Separator between the icons and the column, along the column
+        let column_height = (layout.rows.total as f32 * line_height).round();
+        fill_rect(
+            pixmap,
+            layout.separator_x,
+            layout.status_y.round(),
+            layout.separator_x + ICON_SEPARATOR_WIDTH,
+            column_height,
+            rgba(BORDER_COLOR),
+        );
 
-        // Draw keypress entries with gap between each (hidden when candidates are shown,
-        // matching calculate_layout which excludes keypress text width)
-        if !content.keypress_entries.is_empty() && !layout.has_candidates {
-            if let Some(cursor_byte) = content.cmdline_cursor_pos {
-                // Command-line mode: render single entry char-by-char with line cursor
-                let text = &content.keypress_entries[0];
-                let text_left = layout.keypress_icon_width;
-                let text_color = rgba(KEYPRESS_TEXT_COLOR);
-
-                let chars: Vec<char> = text.chars().collect();
-                let mut byte_to_char: Vec<usize> = Vec::with_capacity(text.len() + 1);
-                for (i, c) in chars.iter().enumerate() {
-                    for _ in 0..c.len_utf8() {
-                        byte_to_char.push(i);
-                    }
+        if let (Some(row), Some(header)) = (layout.rows.header, &content.header) {
+            let y = layout.row_y(row, line_height);
+            match header {
+                Header::Cmdline { text, cursor_byte } => {
+                    self.render_cmdline(pixmap, text, *cursor_byte, layout.column_x, y)
                 }
-                byte_to_char.push(chars.len());
-
-                let cursor_char = byte_to_char
-                    .get(cursor_byte)
-                    .copied()
-                    .unwrap_or(chars.len());
-
-                let mut char_x_positions: Vec<f32> = Vec::with_capacity(chars.len() + 1);
-                let mut x = text_left;
-                for c in &chars {
-                    char_x_positions.push(x);
-                    x += self.mono_renderer.measure_text(&c.to_string());
-                }
-                char_x_positions.push(x);
-
-                for (i, c) in chars.iter().enumerate() {
-                    let char_x = char_x_positions[i];
-                    self.mono_renderer.draw_text(
-                        pixmap,
-                        &c.to_string(),
-                        char_x,
-                        y_baseline,
-                        text_color,
-                    );
-                }
-
-                // Draw line cursor (2px vertical line)
-                let cursor_x = char_x_positions
-                    .get(cursor_char)
-                    .copied()
-                    .unwrap_or(text_left);
-                if let Some(rect) = Rect::from_xywh(cursor_x, layout.keypress_y, 2.0, line_height) {
-                    let mut paint = Paint::default();
-                    paint.set_color(text_color);
-                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-                }
-            } else {
-                // Normal keypress display: render entries with gaps
-                let mut text_x = layout.keypress_icon_width;
-                for (i, entry) in content.keypress_entries.iter().enumerate() {
-                    if i > 0 {
-                        text_x += KEYPRESS_ENTRY_GAP;
-                    }
-                    self.mono_renderer.draw_text(
-                        pixmap,
-                        entry,
-                        text_x,
-                        y_baseline,
-                        rgba(KEYPRESS_TEXT_COLOR),
-                    );
-                    text_x += self.mono_renderer.measure_text(entry);
-                }
+                Header::ShowCmd(text) => self.mono_renderer.draw_text(
+                    pixmap,
+                    text,
+                    layout.column_x,
+                    y + line_height * 0.75,
+                    rgba(HEADER_TEXT_COLOR),
+                ),
             }
         }
 
-        // Draw separator if candidates follow
-        if layout.has_candidates {
-            let sep_y = (layout.keypress_y + line_height).round();
-            if let Some(rect) =
-                Rect::from_xywh(PADDING, sep_y, self.width as f32 - PADDING * 2.0, 1.0)
-            {
-                let mut paint = Paint::default();
-                paint.set_color(rgba(BORDER_COLOR));
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
+        if let (Some(row), Some(message)) = (layout.rows.message, &content.message) {
+            let y_text = layout.row_y(row, line_height) + line_height * 0.75;
+            self.renderer
+                .draw_text(pixmap, message, layout.column_x, y_text, rgba(TEXT_COLOR));
+        }
+
+        if layout.rows.visible_candidates > 0 {
+            self.render_candidates(pixmap, content, layout);
         }
     }
 
-    /// Render candidate section with scrollbar
-    fn render_candidate_section(
+    /// Command line text with a line cursor at `cursor_byte`
+    fn render_cmdline(
         &mut self,
         pixmap: &mut Pixmap,
-        content: &PopupContent,
-        layout: &Layout,
+        text: &str,
+        cursor_byte: usize,
+        x: f32,
+        y: f32,
     ) {
-        let text_color = rgba(TEXT_COLOR);
-        let selected_bg = rgba(SELECTED_BG);
-        let number_color = rgba(NUMBER_COLOR);
-        let scrollbar_bg = rgba(SCROLLBAR_BG);
-        let scrollbar_thumb = rgba(SCROLLBAR_THUMB);
-
         let line_height = self.renderer.line_height();
-        let total_count = content.candidates.len();
+        let color = rgba(HEADER_TEXT_COLOR);
+        let mut cursor_x = None;
+        let mut char_x = x;
+        for (byte, c) in text.char_indices() {
+            if byte == cursor_byte {
+                cursor_x = Some(char_x);
+            }
+            let s = c.to_string();
+            self.mono_renderer
+                .draw_text(pixmap, &s, char_x, y + line_height * 0.75, color);
+            char_x += self.mono_renderer.measure_text(&s);
+        }
+        let cursor_x = cursor_x.unwrap_or(char_x);
+        fill_rect(pixmap, cursor_x, y, cursor_x + 2.0, line_height, color);
+    }
+
+    /// Candidates with the selection and a scrollbar (upwards from the mode
+    /// row when mirrored)
+    fn render_candidates(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
+        let line_height = self.renderer.line_height();
+        let visible_count = layout.rows.visible_candidates;
+        let first_y = layout.row_y(layout.rows.candidates, line_height);
+        let last_y = layout.row_y(layout.rows.candidates + visible_count - 1, line_height);
+        let candidates_y = first_y.min(last_y);
+        let scrollbar_x = self.width as f32 - SCROLLBAR_WIDTH - 2.0;
 
         for (visible_idx, candidate) in content
             .candidates
             .iter()
             .skip(self.scroll_offset)
-            .take(layout.visible_count)
+            .take(visible_count)
             .enumerate()
         {
             let actual_idx = self.scroll_offset + visible_idx;
-            let y_base = layout.candidates_y + (visible_idx as f32 * line_height);
+            let y_base = layout.row_y(layout.rows.candidates + visible_idx, line_height);
             let y_text = y_base + line_height * 0.75;
 
-            if actual_idx == content.selected {
-                let highlight_width = if layout.has_scrollbar {
-                    self.width as f32 - SCROLLBAR_WIDTH - 4.0
+            if content.selected == Some(actual_idx) {
+                let right = if layout.has_scrollbar {
+                    scrollbar_x - 2.0
                 } else {
                     self.width as f32
                 };
-                if let Some(rect) = Rect::from_xywh(0.0, y_base, highlight_width, line_height) {
-                    let mut paint = Paint::default();
-                    paint.set_color(selected_bg);
-                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-                }
+                let left = layout.separator_x + ICON_SEPARATOR_WIDTH;
+                fill_rect(pixmap, left, y_base, right, line_height, rgba(SELECTED_BG));
             }
 
             let number = format!("{}.", actual_idx + 1);
             self.renderer
-                .draw_text(pixmap, &number, PADDING, y_text, number_color);
-
+                .draw_text(pixmap, &number, layout.column_x, y_text, rgba(NUMBER_COLOR));
             self.renderer.draw_text(
                 pixmap,
                 candidate,
-                PADDING + NUMBER_WIDTH,
+                layout.column_x + NUMBER_WIDTH,
                 y_text,
-                text_color,
+                rgba(TEXT_COLOR),
             );
         }
 
         if layout.has_scrollbar {
-            let scrollbar_x = self.width as f32 - SCROLLBAR_WIDTH - 2.0;
-            let scrollbar_height = layout.visible_count as f32 * line_height;
-
-            if let Some(rect) = Rect::from_xywh(
+            let scrollbar_height = visible_count as f32 * line_height;
+            fill_rect(
+                pixmap,
                 scrollbar_x,
-                layout.candidates_y,
-                SCROLLBAR_WIDTH,
+                candidates_y,
+                scrollbar_x + SCROLLBAR_WIDTH,
                 scrollbar_height,
-            ) {
-                let mut paint = Paint::default();
-                paint.set_color(scrollbar_bg);
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
-
+                rgba(SCROLLBAR_BG),
+            );
             let thumb = scrollbar_thumb_geometry(
-                layout.visible_count,
-                total_count,
+                visible_count,
+                content.candidates.len(),
                 scrollbar_height,
                 self.scroll_offset,
-                layout.candidates_y,
+                candidates_y,
             );
-
-            if let Some(rect) = Rect::from_xywh(scrollbar_x, thumb.y, SCROLLBAR_WIDTH, thumb.height)
-            {
-                let mut paint = Paint::default();
-                paint.set_color(scrollbar_thumb);
-                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-            }
-        }
-    }
-
-    /// Render a transient message in the candidate area
-    fn render_transient_message(
-        &mut self,
-        pixmap: &mut Pixmap,
-        content: &PopupContent,
-        layout: &Layout,
-    ) {
-        if let Some(ref msg) = content.transient_message {
-            let line_height = self.renderer.line_height();
-            let y_text = layout.candidates_y + line_height * 0.75;
-            self.renderer
-                .draw_text(pixmap, msg, PADDING, y_text, rgba(TEXT_COLOR));
+            // The first candidate is at the bottom when mirrored
+            let thumb_y = if layout.above {
+                2.0 * candidates_y + scrollbar_height - thumb.y - thumb.height
+            } else {
+                thumb.y
+            };
+            fill_rect(
+                pixmap,
+                scrollbar_x,
+                thumb_y,
+                scrollbar_x + SCROLLBAR_WIDTH,
+                thumb.height,
+                rgba(SCROLLBAR_THUMB),
+            );
         }
     }
 

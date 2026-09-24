@@ -19,6 +19,8 @@ const MSG_KIND_BLOCKLIST: &[&str] = &[
 pub struct Redraw {
     /// Items of the shown popupmenu, for popupmenu_select
     popupmenu_items: Vec<String>,
+    /// The shown popupmenu completes the command line
+    popupmenu_cmdline: bool,
     /// Grid events of the current batch, sent as one message at `flush`
     grid_batch: Vec<GridEvent>,
 }
@@ -47,6 +49,7 @@ impl Redraw {
                         Some(FromNeovim::Candidates(CandidateInfo::empty()))
                     }
                     "msg_show" => msg_show(params),
+                    "msg_showcmd" => msg_showcmd(params),
                     "msg_clear" => {
                         log::debug!("[NVIM] msg_clear");
                         Some(FromNeovim::CmdlineMessage {
@@ -74,7 +77,7 @@ impl Redraw {
     }
 
     /// popupmenu_show: [items, selected, row, col, grid]
-    /// items: [[word, kind, menu, info], ...]
+    /// items: [[word, kind, menu, info], ...]; grid = -1 for the command line
     fn popupmenu_show(&mut self, params: &Value) -> FromNeovim {
         let arr = params.as_array().map(Vec::as_slice).unwrap_or_default();
         let words: Vec<String> = arr
@@ -83,12 +86,15 @@ impl Redraw {
             .map(|items| items.iter().map(item_text).collect())
             .unwrap_or_default();
         let selected = arr.get(1).and_then(Value::as_i64).unwrap_or(-1);
+        let cmdline = arr.get(4).and_then(Value::as_i64) == Some(-1);
         log::debug!(
-            "[NVIM] popupmenu_show: {} items, selected={}",
+            "[NVIM] popupmenu_show: {} items, selected={}, cmdline={}",
             words.len(),
-            selected
+            selected,
+            cmdline
         );
         self.popupmenu_items = words;
+        self.popupmenu_cmdline = cmdline;
         self.candidates(selected)
     }
 
@@ -103,14 +109,18 @@ impl Redraw {
         self.candidates(selected)
     }
 
-    /// Candidates from the cached items; selected = -1 (none) shows the first
+    /// Candidates from the cached items; selected = -1 means none
     fn candidates(&self, selected: i64) -> FromNeovim {
         let items = &self.popupmenu_items;
         if items.is_empty() {
             return FromNeovim::Candidates(CandidateInfo::empty());
         }
-        let selected = (selected.max(0) as usize).min(items.len() - 1);
-        FromNeovim::Candidates(CandidateInfo::new(items.clone(), selected))
+        let selected = usize::try_from(selected).ok().filter(|&i| i < items.len());
+        FromNeovim::Candidates(CandidateInfo::new(
+            items.clone(),
+            selected,
+            self.popupmenu_cmdline,
+        ))
     }
 }
 
@@ -192,6 +202,14 @@ fn mode_change(params: &Value) -> Option<FromNeovim> {
     let name = params.as_array()?.first()?.as_str()?;
     log::debug!("[NVIM] mode_change: {:?}", name);
     Mode::from_ui(name).map(FromNeovim::ModeChange)
+}
+
+/// msg_showcmd: [content]
+fn msg_showcmd(params: &Value) -> Option<FromNeovim> {
+    let content = params.as_array()?.first()?.as_array()?;
+    let text = chunks_text(content);
+    log::trace!("[NVIM] msg_showcmd: {:?}", text);
+    Some(FromNeovim::ShowCmd(text))
 }
 
 /// msg_show: [kind, content, replace_last]
@@ -316,15 +334,77 @@ mod tests {
         let both = vec!["漢字".to_string(), "感じ".to_string()];
         assert_eq!(
             shown,
-            vec![FromNeovim::Candidates(CandidateInfo::new(both.clone(), 0))]
+            vec![FromNeovim::Candidates(CandidateInfo::new(
+                both.clone(),
+                Some(0),
+                false
+            ))]
         );
         assert_eq!(
             redraw(&mut r, "popupmenu_select", vec![Value::from(1)]),
-            vec![FromNeovim::Candidates(CandidateInfo::new(both, 1))]
+            vec![FromNeovim::Candidates(CandidateInfo::new(
+                both.clone(),
+                Some(1),
+                false
+            ))]
+        );
+        // -1: nothing selected (noselect, or back to the typed text)
+        assert_eq!(
+            redraw(&mut r, "popupmenu_select", vec![Value::from(-1)]),
+            vec![FromNeovim::Candidates(CandidateInfo::new(
+                both, None, false
+            ))]
         );
         assert_eq!(
             redraw(&mut r, "popupmenu_hide", vec![]),
             vec![FromNeovim::Candidates(CandidateInfo::empty())]
+        );
+    }
+
+    #[test]
+    fn popupmenu_of_the_cmdline_is_marked() {
+        let mut r = Redraw::default();
+        let shown = redraw(
+            &mut r,
+            "popupmenu_show",
+            vec![
+                arr(vec![item("edit"), item("enew")]),
+                Value::from(-1),
+                Value::from(0),
+                Value::from(1),
+                Value::from(-1),
+            ],
+        );
+        let items = vec!["edit".to_string(), "enew".to_string()];
+        assert_eq!(
+            shown,
+            vec![FromNeovim::Candidates(CandidateInfo::new(
+                items.clone(),
+                None,
+                true
+            ))]
+        );
+        assert_eq!(
+            redraw(&mut r, "popupmenu_select", vec![Value::from(0)]),
+            vec![FromNeovim::Candidates(CandidateInfo::new(
+                items,
+                Some(0),
+                true
+            ))]
+        );
+    }
+
+    #[test]
+    fn msg_showcmd_text() {
+        let mut r = Redraw::default();
+        let content = arr(vec![arr(vec![Value::from(0), Value::from("2d")])]);
+        assert_eq!(
+            redraw(&mut r, "msg_showcmd", vec![content]),
+            vec![FromNeovim::ShowCmd("2d".into())]
+        );
+        assert_eq!(
+            redraw(&mut r, "msg_showcmd", vec![arr(vec![])]),
+            vec![FromNeovim::ShowCmd(String::new())]
         );
     }
 

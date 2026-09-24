@@ -369,6 +369,10 @@ impl KeyProcessor {
             Wait::BeforeLines(line_key) => {
                 if blocking {
                     self.answer_getchar(seq, key, out);
+                } else if mode == Mode::CmdLine {
+                    // The command line opened before mode_change arrived
+                    out.push(Cmd::Input(key.clone()));
+                    self.request(Some((seq, key)), Wait::AfterKey, Req::GetMode, out);
                 } else {
                     // The commit key commits the text, wherever the cursor
                     // is; BS and Enter edit where the cursor is
@@ -883,6 +887,21 @@ mod tests {
                 input("x"),
                 done(2, PendingState::None)
             ]
+        );
+    }
+
+    #[test]
+    fn line_key_in_a_command_line_opened_meanwhile_is_input() {
+        // <C-o>: was fire-and-forget in insert mode
+        let mut h = Harness::new(Mode::Insert);
+        assert_eq!(h.key("<CR>"), vec![get_mode()]);
+        assert_eq!(
+            h.mode(Mode::CmdLine, false),
+            vec![Cmd::SetMode(Mode::CmdLine), input("<CR>"), get_mode()]
+        );
+        assert_eq!(
+            h.mode(Mode::Insert, false),
+            vec![Cmd::SetMode(Mode::Insert), done(1, PendingState::None)]
         );
     }
 

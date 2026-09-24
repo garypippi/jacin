@@ -1,5 +1,7 @@
 //! Layout calculation and constants for the unified popup
 
+use std::time::{Duration, Instant};
+
 use crate::neovim::Mode;
 use crate::state::WindowView;
 
@@ -36,8 +38,8 @@ pub(crate) const MAX_POPUP_HEIGHT: u32 = 450;
 pub(crate) const ICON_SEPARATOR_WIDTH: f32 = 1.0;
 pub(crate) const ICON_SEPARATOR_GAP: f32 = 6.0;
 pub(crate) const MODE_GAP: f32 = 4.0;
-pub(crate) const KEYPRESS_ENTRY_GAP: f32 = 4.0;
-pub(crate) const KEYPRESS_TEXT_COLOR: Rgba = (166, 173, 186, 255);
+/// Command line / showcmd text
+pub(crate) const HEADER_TEXT_COLOR: Rgba = (166, 173, 186, 255);
 
 // Mode indicator colors
 pub(crate) const MODE_INSERT_COLOR: Rgba = (152, 195, 121, 255); // Green
@@ -51,24 +53,73 @@ pub(crate) const MODE_RECORDING_COLOR: Rgba = (224, 108, 117, 255); // Red
 #[derive(Default, Clone)]
 pub struct PopupContent {
     pub mode: Mode,
-    pub keypress_entries: Vec<String>,
+    /// First row of the column right of the mode
+    pub header: Option<Header>,
+    /// Message row (below the header)
+    pub message: Option<String>,
+    /// Candidates to show (below the message)
     pub candidates: Vec<String>,
-    pub selected: usize,
-    pub transient_message: Option<String>,
+    /// None: no candidate is selected
+    pub selected: Option<usize>,
     pub ime_enabled: bool,
     pub recording: String,
     pub rec_blink_on: bool,
-    pub cmdline_cursor_pos: Option<usize>,
     /// Rows of Neovim's window grid (None until Neovim drew a window)
     pub window_view: Option<WindowView>,
+}
+
+/// Header row of the column right of the mode
+#[derive(Debug, Clone, PartialEq)]
+pub enum Header {
+    /// Command line text with its cursor byte offset
+    Cmdline { text: String, cursor_byte: usize },
+    /// Pending command keys ('showcmd')
+    ShowCmd(String),
 }
 
 impl PopupContent {
     pub fn is_empty(&self) -> bool {
         !self.ime_enabled
-            && self.keypress_entries.is_empty()
+            && self.header.is_none()
+            && self.message.is_none()
             && self.candidates.is_empty()
-            && self.transient_message.is_none()
+    }
+}
+
+/// Rows of the column right of the mode, top to bottom: header, message,
+/// candidates. The first one shares the mode's row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColumnRows {
+    pub header: Option<usize>,
+    pub message: Option<usize>,
+    /// Row of the first visible candidate
+    pub candidates: usize,
+    pub visible_candidates: usize,
+    /// Rows taken (at least the mode's)
+    pub total: usize,
+}
+
+impl ColumnRows {
+    pub fn new(content: &PopupContent) -> Self {
+        let mut next = 0;
+        let mut take = |present: bool, rows: usize| {
+            let row = next;
+            if present {
+                next += rows;
+            }
+            present.then_some(row)
+        };
+        let header = take(content.header.is_some(), 1);
+        let message = take(content.message.is_some(), 1);
+        let visible_candidates = MAX_VISIBLE_CANDIDATES.min(content.candidates.len());
+        let candidates = take(true, visible_candidates).unwrap_or(0);
+        Self {
+            header,
+            message,
+            candidates,
+            visible_candidates,
+            total: next.max(1),
+        }
     }
 }
 
@@ -97,17 +148,77 @@ pub(crate) fn format_recording_label(reg: &str) -> String {
 pub(crate) struct Layout {
     pub width: u32,
     pub height: u32,
+    /// Height the content needs (`height` may be more, when held)
+    pub natural_height: u32,
+    /// Mirrored for a popup placed above the cursor: the window at the
+    /// bottom, the mode row above it, the column growing upwards
+    pub above: bool,
     pub has_window: bool,
-    pub has_keypress: bool,
-    pub has_candidates: bool,
-    pub has_transient_message: bool,
     pub window_y: f32,
-    pub keypress_y: f32,
-    pub candidates_y: f32,
-    pub visible_count: usize,
+    /// y of the separator between the window and the mode row
+    pub separator_y: f32,
+    /// Top of the block of the mode row and the column
+    pub status_y: f32,
+    /// x of the separator between the mode and the column
+    pub separator_x: f32,
+    /// Left edge of the column's text
+    pub column_x: f32,
+    pub rows: ColumnRows,
     pub has_scrollbar: bool,
-    /// Width of mode+REC icons in keypress row (text starts after this)
-    pub keypress_icon_width: f32,
+}
+
+impl Layout {
+    /// Top of column row `row` (row 0 is the mode's)
+    pub fn row_y(&self, row: usize, line_height: f32) -> f32 {
+        let slot = if self.above {
+            self.rows.total - 1 - row
+        } else {
+            row
+        };
+        self.status_y + slot as f32 * line_height
+    }
+}
+
+/// How long the popup keeps a height it no longer needs, so candidates
+/// coming and going while typing don't resize it each time
+pub(crate) const HEIGHT_HOLD: Duration = Duration::from_millis(1000);
+
+/// Popup height that grows at once and shrinks only after `HEIGHT_HOLD`
+/// without needing the height. Near the bottom of the screen the popup sits
+/// above the cursor, so each resize moves its top.
+#[derive(Debug, Default)]
+pub(crate) struct HeightHold {
+    held: u32,
+    /// When the popup may shrink to what its content needs
+    until: Option<Instant>,
+}
+
+impl HeightHold {
+    /// Height for content needing `natural`
+    pub fn height(&mut self, natural: u32, now: Instant) -> u32 {
+        if natural >= self.held {
+            self.held = natural;
+            self.until = None;
+            return natural;
+        }
+        match self.until {
+            None => self.until = Some(now + HEIGHT_HOLD),
+            Some(until) if now >= until => {
+                self.held = natural;
+                self.until = None;
+            }
+            Some(_) => {}
+        }
+        self.held
+    }
+
+    pub fn is_holding(&self) -> bool {
+        self.until.is_some()
+    }
+
+    pub fn expired(&self, now: Instant) -> bool {
+        self.until.is_some_and(|until| now >= until)
+    }
 }
 
 /// Scrollbar thumb geometry for candidate list.
@@ -139,53 +250,43 @@ pub(crate) fn scrollbar_thumb_geometry(
     }
 }
 
-/// Calculate layout dimensions and section positions.
+/// Calculate layout dimensions and section positions: mirrored if `above`,
+/// and at least `min_height` tall (the extra space away from the cursor).
 ///
-/// `mono_renderer` is used for measuring mode/REC icon text in the keypress row.
+/// `mono_renderer` measures the mode/REC icons, the header and the window grid.
 pub(crate) fn calculate_layout(
     content: &PopupContent,
+    above: bool,
+    min_height: u32,
     renderer: &mut TextRenderer,
     mono_renderer: &mut TextRenderer,
 ) -> Layout {
-    // Window row is always visible when IME is enabled to prevent
-    // layout jumps that cause visual confusion with the keypress row
+    // Both are always present while the IME is enabled, so the popup
+    // doesn't jump as content comes and goes
     let has_window = content.ime_enabled;
-    // Hide keypress text when candidates are shown, but keypress row itself
-    // is always visible when IME is enabled (shows mode/REC icons)
-    let has_keypress_text = !content.keypress_entries.is_empty() && content.candidates.is_empty();
-    let has_keypress = content.ime_enabled;
-    let has_candidates = !content.candidates.is_empty();
-    let has_transient_message =
-        content.candidates.is_empty() && content.transient_message.is_some();
+    let has_status = content.ime_enabled;
+    let rows = ColumnRows::new(content);
 
     let line_height = renderer.line_height();
-    let mut y = PADDING;
     let mut max_width: f32 = 0.0;
 
-    // Keypress row icon width: mode_label + [gap + circle + gap + @reg] + separator area
+    // Mode icons: mode_label + [gap + circle + gap + @reg]
     let (mode_text, _) = mode_label(content.mode);
-    let mode_text_width = mono_renderer.measure_text(mode_text);
-    let recording_width = if !content.recording.is_empty() {
+    let mut icons_width = mono_renderer.measure_text(mode_text);
+    if !content.recording.is_empty() {
         let rec_label = format_recording_label(&content.recording);
-        MODE_GAP
+        icons_width += MODE_GAP
             + REC_CIRCLE_RADIUS * 2.0
             + REC_CIRCLE_TEXT_GAP
-            + mono_renderer.measure_text(&rec_label)
-    } else {
-        0.0
-    };
-    let keypress_icon_width = PADDING
-        + mode_text_width
-        + recording_width
-        + ICON_SEPARATOR_GAP
-        + ICON_SEPARATOR_WIDTH
-        + ICON_SEPARATOR_GAP;
+            + mono_renderer.measure_text(&rec_label);
+    }
+    let separator_x = (PADDING + icons_width + ICON_SEPARATOR_GAP).round();
+    let column_x = separator_x + ICON_SEPARATOR_WIDTH + ICON_SEPARATOR_GAP;
 
-    // Window section (no icon area — starts at PADDING); one empty row
-    // until Neovim has drawn a window
-    let window_y = y;
+    // Window section; one empty row until Neovim has drawn a window
+    let mut window_height = 0.0;
     if has_window {
-        let rows = match content.window_view {
+        let window_rows = match content.window_view {
             Some(ref view) => {
                 let cell_width = mono_renderer.measure_text(" ");
                 let cols = view.total_columns();
@@ -194,86 +295,74 @@ pub(crate) fn calculate_layout(
             }
             None => 1,
         };
-        y += rows as f32 * line_height;
-        if has_keypress || has_candidates {
-            y += SECTION_SEPARATOR_HEIGHT;
-        }
+        window_height = window_rows as f32 * line_height;
     }
 
-    // Keypress section (always present when IME enabled)
-    let keypress_y = if has_keypress { y } else { 0.0 };
-    if has_keypress {
-        let mut keypress_width = keypress_icon_width;
-        if has_keypress_text {
-            for (i, entry) in content.keypress_entries.iter().enumerate() {
-                if i > 0 {
-                    keypress_width += KEYPRESS_ENTRY_GAP;
-                }
-                keypress_width += mono_renderer.measure_text(entry);
-            }
-        }
-        keypress_width += PADDING; // right padding
-        max_width = max_width.max(keypress_width);
-        y += line_height;
-        if has_candidates || has_transient_message {
-            y += SECTION_SEPARATOR_HEIGHT;
-        }
-    }
-
-    // Candidates section (or transient message)
-    let candidates_y = if has_candidates || has_transient_message {
-        y
-    } else {
-        0.0
-    };
-    let visible_count = if has_candidates {
-        MAX_VISIBLE_CANDIDATES.min(content.candidates.len())
-    } else {
-        0
-    };
+    // Mode row and the column beside it
     let has_scrollbar = content.candidates.len() > MAX_VISIBLE_CANDIDATES;
-
-    if has_candidates {
+    let mut status_height = 0.0;
+    if has_status {
+        let mut column_width: f32 = 0.0;
+        match &content.header {
+            Some(Header::Cmdline { text, .. }) | Some(Header::ShowCmd(text)) => {
+                column_width = column_width.max(mono_renderer.measure_text(text));
+            }
+            None => {}
+        }
+        if let Some(ref message) = content.message {
+            column_width = column_width.max(renderer.measure_text(message));
+        }
         let scrollbar_space = if has_scrollbar {
             SCROLLBAR_WIDTH + 4.0
         } else {
             0.0
         };
-
         for candidate in content.candidates.iter().take(MAX_VISIBLE_CANDIDATES) {
-            let text_width = renderer.measure_text(candidate);
-            max_width = max_width.max(text_width + NUMBER_WIDTH + PADDING * 2.0 + scrollbar_space);
+            let width = NUMBER_WIDTH + renderer.measure_text(candidate) + scrollbar_space;
+            column_width = column_width.max(width);
         }
-
-        y += visible_count as f32 * line_height;
-    } else if has_transient_message {
-        if let Some(ref msg) = content.transient_message {
-            let text_width = renderer.measure_text(msg);
-            max_width = max_width.max(text_width + PADDING * 2.0);
-        }
-        y += line_height;
+        max_width = max_width.max(column_x + column_width + PADDING);
+        status_height = rows.total as f32 * line_height;
     }
+    let separator = if has_window && has_status {
+        SECTION_SEPARATOR_HEIGHT
+    } else {
+        0.0
+    };
 
-    y += PADDING;
+    let natural = PADDING * 2.0 + window_height + separator + status_height;
+    let natural_height = (natural.ceil() as u32).clamp(30, MAX_POPUP_HEIGHT);
+    let height = natural_height.max(min_height.min(MAX_POPUP_HEIGHT));
+    let extra = (height - natural_height) as f32;
+
+    // Top to bottom: window, separator, status (below the cursor), or
+    // extra space, status, separator, window (above it)
+    let (window_y, separator_y, status_y) = if above {
+        let status_y = PADDING + extra;
+        let separator_y = status_y + status_height;
+        (separator_y + separator, separator_y, status_y)
+    } else {
+        let separator_y = PADDING + window_height;
+        (PADDING, separator_y, separator_y + separator)
+    };
 
     // Align width to 4 bytes for wl_shm
     let width = ((max_width.ceil() as u32) + 3) & !3;
     let width = width.clamp(100, MAX_POPUP_WIDTH);
-    let height = (y.ceil() as u32).clamp(30, MAX_POPUP_HEIGHT);
 
     Layout {
         width,
         height,
+        natural_height,
+        above,
         has_window,
-        has_keypress,
-        has_candidates,
-        has_transient_message,
         window_y,
-        keypress_y,
-        candidates_y,
-        visible_count,
+        separator_y,
+        status_y,
+        separator_x,
+        column_x,
+        rows,
         has_scrollbar,
-        keypress_icon_width,
     }
 }
 
@@ -312,6 +401,125 @@ mod tests {
         // With many items, thumb proportion would be tiny — clamped to 20
         let thumb = scrollbar_thumb_geometry(1, 100, 100.0, 0, 0.0);
         assert_eq!(thumb.height, 20.0);
+    }
+
+    // --- ColumnRows ---
+
+    fn content(header: bool, message: bool, candidates: usize) -> PopupContent {
+        PopupContent {
+            header: header.then(|| Header::ShowCmd("2d".into())),
+            message: message.then(|| "msg".into()),
+            candidates: (0..candidates).map(|i| i.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn column_is_one_row_when_empty() {
+        let rows = ColumnRows::new(&content(false, false, 0));
+        assert_eq!((rows.header, rows.message, rows.total), (None, None, 1));
+        assert_eq!(rows.visible_candidates, 0);
+    }
+
+    #[test]
+    fn candidates_start_on_the_mode_row() {
+        let rows = ColumnRows::new(&content(false, false, 3));
+        assert_eq!((rows.candidates, rows.visible_candidates), (0, 3));
+        assert_eq!(rows.total, 3);
+    }
+
+    #[test]
+    fn header_and_message_come_before_candidates() {
+        let rows = ColumnRows::new(&content(true, true, 2));
+        assert_eq!(rows.header, Some(0));
+        assert_eq!(rows.message, Some(1));
+        assert_eq!(rows.candidates, 2);
+        assert_eq!(rows.total, 4);
+
+        let rows = ColumnRows::new(&content(false, true, 2));
+        assert_eq!((rows.message, rows.candidates, rows.total), (Some(0), 1, 3));
+    }
+
+    #[test]
+    fn visible_candidates_are_capped() {
+        let rows = ColumnRows::new(&content(true, false, 20));
+        assert_eq!(rows.visible_candidates, MAX_VISIBLE_CANDIDATES);
+        assert_eq!(rows.total, 1 + MAX_VISIBLE_CANDIDATES);
+    }
+
+    // --- HeightHold ---
+
+    #[test]
+    fn height_grows_at_once_and_shrinks_after_the_hold() {
+        let t0 = Instant::now();
+        let mut hold = HeightHold::default();
+        assert_eq!(hold.height(57, t0), 57);
+        assert_eq!(hold.height(214, t0), 214);
+        assert!(!hold.is_holding());
+
+        // Candidates gone: kept
+        assert_eq!(hold.height(57, t0), 214);
+        assert!(hold.is_holding());
+        assert!(!hold.expired(t0 + HEIGHT_HOLD / 2));
+        assert_eq!(hold.height(57, t0 + HEIGHT_HOLD / 2), 214);
+
+        // Released after the hold
+        assert!(hold.expired(t0 + HEIGHT_HOLD));
+        assert_eq!(hold.height(57, t0 + HEIGHT_HOLD), 57);
+        assert!(!hold.is_holding());
+    }
+
+    #[test]
+    fn height_needed_again_restarts_the_hold() {
+        let t0 = Instant::now();
+        let mut hold = HeightHold::default();
+        hold.height(214, t0);
+        hold.height(57, t0);
+        // Candidates back before the hold ends
+        let t1 = t0 + HEIGHT_HOLD / 2;
+        assert_eq!(hold.height(214, t1), 214);
+        assert!(!hold.is_holding());
+        hold.height(57, t1);
+        assert_eq!(hold.height(57, t0 + HEIGHT_HOLD), 214);
+    }
+
+    // --- Layout::row_y ---
+
+    fn layout(above: bool, rows: ColumnRows) -> Layout {
+        Layout {
+            width: 100,
+            height: 100,
+            natural_height: 100,
+            above,
+            has_window: true,
+            window_y: 0.0,
+            separator_y: 0.0,
+            status_y: 10.0,
+            separator_x: 0.0,
+            column_x: 0.0,
+            rows,
+            has_scrollbar: false,
+        }
+    }
+
+    #[test]
+    fn rows_go_down_from_the_mode_row() {
+        let rows = ColumnRows::new(&content(true, false, 2));
+        let layout = layout(false, rows);
+        // Mode/header row, then candidates 1 and 2
+        assert_eq!(layout.row_y(0, 20.0), 10.0);
+        assert_eq!(layout.row_y(1, 20.0), 30.0);
+        assert_eq!(layout.row_y(2, 20.0), 50.0);
+    }
+
+    #[test]
+    fn rows_go_up_from_the_mode_row_when_mirrored() {
+        let rows = ColumnRows::new(&content(true, false, 2));
+        let layout = layout(true, rows);
+        // The mode row is the bottom one, next to the window
+        assert_eq!(layout.row_y(0, 20.0), 50.0);
+        assert_eq!(layout.row_y(1, 20.0), 30.0);
+        assert_eq!(layout.row_y(2, 20.0), 10.0);
     }
 
     // --- mode_label ---
