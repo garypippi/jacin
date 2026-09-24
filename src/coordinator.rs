@@ -7,7 +7,7 @@ use calloop::{Interest, Mode as Trigger};
 
 use crate::State;
 use crate::model::Effect;
-use crate::neovim::{CLEAR_BUFFER_KEYS, FromNeovim, Neovim, ReadStatus};
+use crate::neovim::{FromNeovim, Neovim, ReadStatus};
 use crate::ui::{MAX_GRID_ROWS, PopupContent};
 
 impl State {
@@ -197,13 +197,14 @@ impl State {
         }
     }
 
-    /// Input keys on jacin's behalf (after keys already queued)
-    pub(crate) fn nvim_input(&mut self, keys: &str) {
+    /// Reset Neovim to an empty buffer in normal mode, or insert mode if
+    /// `insert` (after keys already queued)
+    pub(crate) fn reset_nvim(&mut self, insert: bool) {
         let mode = self.model.view.mode;
         let Some(nvim) = self.nvim.as_mut() else {
             return;
         };
-        let events = nvim.input(keys, mode);
+        let events = nvim.reset(insert, mode);
         for event in events {
             self.handle_nvim_message(event);
         }
@@ -217,7 +218,7 @@ impl State {
                 self.model.sent_keys.remove(seq);
             }
         }
-        self.nvim_input(CLEAR_BUFFER_KEYS);
+        self.reset_nvim(false);
     }
 
     /// Request a popup redraw. Rendering is deferred to the end of the

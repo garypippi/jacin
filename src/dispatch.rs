@@ -269,18 +269,15 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
                             // (e.g., Alt leaked to the app before the grab started)
                             state.wayland.clear_modifiers();
 
-                            if state.model.ime.complete_enabling()
-                                || state.model.ime.is_fully_enabled()
-                            {
+                            let enabled_now = state.model.ime.complete_enabling();
+                            if enabled_now || state.model.ime.is_fully_enabled() {
                                 state.keyboard.mark_ready();
                                 state.wayland.refresh_cursor_rectangle();
-                                // The mode shown follows from Neovim's reply
-                                if state.config.behavior.startinsert {
-                                    log::debug!("[IME] Restoring insert mode");
-                                    state.nvim_input("<Esc>i");
-                                } else {
-                                    log::debug!("[IME] Restoring normal mode");
-                                    state.nvim_input("<Esc>");
+                                // A keymap sent again while enabled leaves
+                                // Neovim as it is
+                                if enabled_now {
+                                    // The mode shown follows from Neovim's reply
+                                    state.reset_nvim(state.config.behavior.startinsert);
                                 }
                                 state.update_popup();
                             }

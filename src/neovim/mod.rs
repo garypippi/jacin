@@ -24,7 +24,7 @@ use std::time::Duration;
 use rmpv::Value;
 
 use crate::config::Config;
-use keys::{Cmd, Ctx, Item, KeyProcessor, Reply, Req};
+use keys::{Buffer, Call, Cmd, Ctx, Item, KeyProcessor, Reply, Req};
 use process::NvimProcess;
 use redraw::Redraw;
 use rpc::{Message, Rpc};
@@ -33,13 +33,6 @@ pub use mode::Mode;
 pub use process::ReadStatus;
 pub use protocol::{FromNeovim, GridCell, GridEvent, HlAttr, PendingState};
 pub use rpc::DecodeError;
-
-/// Keys that return to normal mode and clear the buffer from any mode
-/// (sent with `Neovim::input`).
-/// After an insert-mode key that waits for an argument (<C-r>, <C-v>, <C-k>),
-/// the first <Esc> only cancels that key, so a second one is needed to leave
-/// insert mode before ggdG.
-pub const CLEAR_BUFFER_KEYS: &str = "<Esc><Esc>ggdG";
 
 /// Keys queued beyond this are dropped (Neovim is not keeping up)
 pub const MAX_QUEUED_KEYS: usize = 256;
@@ -52,8 +45,8 @@ const DEFAULT_UI_SIZE: (usize, usize) = (80, 24);
 enum Pending {
     /// Key processing; the reply goes to the KeyProcessor
     Key(Req),
-    /// nvim_input (only errors are logged)
-    Input,
+    /// nvim_input or a reset's call (only errors are logged)
+    Unanswered(&'static str),
     /// Part of the startup sequence; `Ready` follows the last one
     Init(&'static str),
     /// nvim_buf_attach (also part of startup when `init`)
@@ -71,11 +64,13 @@ pub struct Neovim {
     requests: HashMap<u32, Pending>,
     /// Startup requests not answered yet
     init_left: usize,
-    /// nvim_input requests not answered yet
-    inputs_in_flight: usize,
-    /// Key-processing requests held until the inputs before them are
-    /// answered
+    /// nvim_input and reset calls not answered yet
+    unanswered: usize,
+    /// Key-processing requests held until the inputs and calls before them
+    /// are answered
     held: VecDeque<Req>,
+    /// Handle of the attached buffer (from its line events)
+    main_buffer: Option<Value>,
 }
 
 impl Neovim {
@@ -91,8 +86,9 @@ impl Neovim {
             redraw: Redraw::default(),
             requests: HashMap::new(),
             init_left: 0,
-            inputs_in_flight: 0,
+            unanswered: 0,
             held: VecDeque::new(),
+            main_buffer: None,
         };
 
         for command in [
@@ -180,8 +176,12 @@ impl Neovim {
         match message {
             Message::Notification { method, params } => match method.as_str() {
                 "redraw" => self.redraw.handle(&params, &mut events),
-                "nvim_buf_lines_event" => events.extend(buf_lines_event(&params)),
+                "nvim_buf_lines_event" => {
+                    self.main_buffer = params.first().cloned();
+                    events.extend(buf_lines_event(&params));
+                }
                 "nvim_buf_detach_event" => {
+                    self.main_buffer = None;
                     // The attached buffer was wiped (e.g. :enew with
                     // bufhidden=wipe): follow the new current buffer
                     log::debug!("[NVIM] Buffer detached, re-attaching to current buffer");
@@ -215,9 +215,11 @@ impl Neovim {
         self.run(cmds)
     }
 
-    /// Input keys on jacin's behalf (not acknowledged), after queued keys
-    pub fn input(&mut self, keys: &str, mode: Mode) -> Vec<FromNeovim> {
-        let cmds = self.keys.push(Item::Input(keys.to_string()), &Ctx { mode });
+    /// Return to normal mode with an empty buffer and no floating windows,
+    /// then enter insert mode if `insert` (after queued keys, not
+    /// acknowledged)
+    pub fn reset(&mut self, insert: bool, mode: Mode) -> Vec<FromNeovim> {
+        let cmds = self.keys.push(Item::Reset { insert }, &Ctx { mode });
         self.run(cmds)
     }
 
@@ -289,12 +291,12 @@ impl Neovim {
                     self.init_done(events);
                 }
             }
-            Pending::Input => {
+            Pending::Unanswered(what) => {
                 if let Err(e) = result {
-                    log::warn!("[NVIM] nvim_input failed: {}", rpc::error_message(&e));
+                    log::warn!("[NVIM] {what} failed: {}", rpc::error_message(&e));
                 }
-                self.inputs_in_flight -= 1;
-                if self.inputs_in_flight == 0 {
+                self.unanswered -= 1;
+                if self.unanswered == 0 {
                     while let Some(req) = self.held.pop_front() {
                         self.send_key_request(req);
                     }
@@ -322,14 +324,21 @@ impl Neovim {
         for cmd in cmds {
             match cmd {
                 Cmd::Input(keys) => {
-                    self.inputs_in_flight += 1;
-                    self.request("nvim_input", vec![keys.into()], Pending::Input);
+                    self.unanswered += 1;
+                    let pending = Pending::Unanswered("nvim_input");
+                    self.request("nvim_input", vec![keys.into()], pending);
+                }
+                // Only made after a mode reply, so no input is unanswered
+                Cmd::Call(call) => {
+                    self.unanswered += 1;
+                    self.send_call(call);
                 }
                 // nvim_input only queues the keys, and nvim_get_mode (fast)
                 // answers right away: sent together, it would report the
                 // state before the keys. Waiting for nvim_input's answer
-                // lets Neovim's main loop process them first.
-                Cmd::Request(req) if self.inputs_in_flight > 0 => self.held.push_back(req),
+                // lets Neovim's main loop process them first; the same for
+                // calls, which (non-fast) wait for the main loop.
+                Cmd::Request(req) if self.unanswered > 0 => self.held.push_back(req),
                 Cmd::Request(req) => self.send_key_request(req),
                 Cmd::SetMode(mode) => events.push(FromNeovim::ModeChange(mode)),
                 Cmd::Emit(event) => events.push(event),
@@ -341,9 +350,9 @@ impl Neovim {
     fn send_key_request(&mut self, req: Req) {
         let (method, params) = match req {
             Req::GetMode => ("nvim_get_mode", vec![]),
-            Req::BufLines => (
+            Req::BufLines(buffer) => (
                 "nvim_buf_get_lines",
-                vec![0.into(), 0.into(), (-1).into(), false.into()],
+                vec![self.buffer(buffer), 0.into(), (-1).into(), false.into()],
             ),
             Req::RegRecording => (
                 "nvim_call_function",
@@ -351,6 +360,33 @@ impl Neovim {
             ),
         };
         self.request(method, params, Pending::Key(req));
+    }
+
+    fn send_call(&mut self, call: Call) {
+        let (method, params, what) = match call {
+            Call::CloseFloats => ("nvim_command", vec!["fclose!".into()], "fclose!"),
+            Call::ClearBuffer => (
+                "nvim_buf_set_lines",
+                vec![
+                    self.buffer(Buffer::Main),
+                    0.into(),
+                    (-1).into(),
+                    false.into(),
+                    Value::Array(vec![]),
+                ],
+                "nvim_buf_set_lines",
+            ),
+            Call::StartInsert => ("nvim_command", vec!["startinsert".into()], "startinsert"),
+        };
+        self.request(method, params, Pending::Unanswered(what));
+    }
+
+    /// The handle for a buffer argument (0: the current buffer)
+    fn buffer(&self, buffer: Buffer) -> Value {
+        match (buffer, &self.main_buffer) {
+            (Buffer::Main, Some(handle)) => handle.clone(),
+            _ => 0.into(),
+        }
     }
 
     fn init_request(&mut self, method: &str, params: Vec<Value>, what: &'static str) {
@@ -409,7 +445,7 @@ fn key_reply(req: Req, result: Result<Value, Value>) -> Reply {
                 blocking: field("blocking").and_then(Value::as_bool) == Some(true),
             }
         }
-        Req::BufLines => Reply::Lines(strings(&value)),
+        Req::BufLines(_) => Reply::Lines(strings(&value)),
         Req::RegRecording => Reply::Recording(value.as_str().unwrap_or("").to_string()),
     }
 }
@@ -476,7 +512,7 @@ mod tests {
     fn error_reply_carries_the_message() {
         let error = Value::Array(vec![Value::from(0), Value::from("E5555: boom")]);
         assert_eq!(
-            key_reply(Req::BufLines, Err(error)),
+            key_reply(Req::BufLines(Buffer::Current), Err(error)),
             Reply::Err("E5555: boom".into())
         );
     }

@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use super::{CLEAR_BUFFER_KEYS, FromNeovim, Mode, Neovim, PendingState, ReadStatus};
+use super::{FromNeovim, Mode, Neovim, PendingState, ReadStatus};
 use crate::config::Config;
 use crate::model::Model;
 use crate::state::{Modifiers, SentKey};
@@ -201,10 +201,19 @@ impl Probe {
         keys.iter().flat_map(|k| self.key(k)).collect()
     }
 
-    /// Input keys on jacin's behalf
-    fn input(&mut self, keys: &str) {
-        let events = self.nvim.input(keys, self.model.view.mode);
+    /// Reset Neovim like IME off (`insert: false`) or a commit / enabling
+    fn reset(&mut self, insert: bool) {
+        let events = self.nvim.reset(insert, self.model.view.mode);
         self.apply(events);
+    }
+
+    /// Reset, then wait until Neovim reports the mode it leaves
+    fn reset_and_wait(&mut self, insert: bool) {
+        self.reset(insert);
+        let mode = if insert { Mode::Insert } else { Mode::Normal };
+        self.wait(&format!("{mode:?} after reset"), |m| {
+            m.view.buffer.text().is_empty() && m.view.mode == mode
+        });
     }
 
     /// Whether a message matching `predicate` is among `msgs` (already
@@ -478,8 +487,7 @@ fn buffer_mirror_follows_enew() {
     probe.wait_buffer("x");
 
     // Toggle-off clears the buffer
-    probe.input(CLEAR_BUFFER_KEYS);
-    probe.wait_buffer("");
+    probe.reset_and_wait(false);
 
     probe.shutdown();
 }
@@ -488,29 +496,115 @@ fn buffer_mirror_follows_enew() {
 /// argument (the keys must not be inserted as text).
 #[test]
 #[ignore]
-fn clear_buffer_keys_work_after_pending_insert_keys() {
+fn reset_works_after_pending_insert_keys() {
     let mut probe = Probe::spawn(true);
 
     for pending_key in ["<C-r>", "<C-v>", "<C-k>"] {
         probe.keys(&["a", "b", "c", pending_key]);
-        probe.input(CLEAR_BUFFER_KEYS);
-        probe.wait_buffer("");
+        probe.reset_and_wait(false);
         // Back to insert mode for the next case, as re-enabling does
-        probe.key("i");
+        probe.reset_and_wait(true);
+    }
+    probe.key("x");
+    probe.wait_buffer("x");
+
+    probe.shutdown();
+}
+
+/// A reset gets back to an empty buffer from any mode.
+#[test]
+#[ignore]
+fn reset_works_from_any_mode() {
+    let mut probe = Probe::spawn(true);
+
+    let cases: &[&[&str]] = &[
+        // command line
+        &["a", "<Esc>", ":", "echo 1"],
+        // input() from insert mode: leaving it returns to insert mode
+        &["a", "<C-o>", ":", "call input('x: ')", "<CR>", "zz"],
+        // operator pending with a count
+        &["a", "<Esc>", "2", "d"],
+        &["a", "<Esc>", "v"],
+        // r waiting for its argument
+        &["a", "<Esc>", "r"],
+    ];
+    for keys in cases {
+        probe.keys(keys);
+        probe.reset_and_wait(true);
+        probe.key("x");
+        probe.wait_buffer("x");
+        probe.reset_and_wait(true);
     }
 
     probe.shutdown();
 }
 
-/// Keys input on jacin's behalf are not acknowledged, so the next key's
-/// wait ends only at its own `KeyProcessed`.
+/// A floating window with the cursor (like a plugin's prompt) is closed,
+/// and the main buffer is cleared rather than the float's.
 #[test]
 #[ignore]
-fn input_is_not_acknowledged() {
+fn reset_closes_a_focused_float() {
     let mut probe = Probe::spawn(true);
 
     probe.keys(&["a", "b"]);
-    probe.input("<Esc>ggdGi");
+    probe.wait_buffer("ab");
+    open_focused_float(&mut probe);
+    probe.keys(&["f", "o", "o"]);
+
+    probe.reset_and_wait(true);
+    probe.key("x");
+    probe.wait_buffer("x");
+
+    probe.shutdown();
+}
+
+/// The commit key commits the main buffer even while a floating window has
+/// the cursor, and the reset after it closes the float.
+#[test]
+#[ignore]
+fn commit_from_a_focused_float_commits_the_main_buffer() {
+    let mut probe = Probe::spawn(true);
+
+    probe.keys(&["a", "b"]);
+    probe.wait_buffer("ab");
+    open_focused_float(&mut probe);
+    probe.keys(&["f", "o", "o"]);
+
+    let msgs = probe.key("<C-CR>");
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, FromNeovim::Commit(text) if text == "ab")),
+        "expected Commit 'ab', got {msgs:?}"
+    );
+    probe.wait("reset after commit", |m| {
+        m.view.buffer.text().is_empty() && m.view.mode == Mode::Insert
+    });
+    probe.key("x");
+    probe.wait_buffer("x");
+
+    probe.shutdown();
+}
+
+/// Open a floating window with the cursor in it, in insert mode
+fn open_focused_float(probe: &mut Probe) {
+    probe.keys(&[
+        "<C-o>",
+        ":",
+        "call nvim_open_win(nvim_create_buf(0, 1), 1, #{relative: 'editor', row: 1, col: 1, width: 20, height: 1})",
+        "<CR>",
+    ]);
+    probe.wait("insert mode in the float", |m| m.view.mode == Mode::Insert);
+}
+
+/// A reset is not acknowledged, so the next key's wait ends only at its own
+/// `KeyProcessed`.
+#[test]
+#[ignore]
+fn reset_is_not_acknowledged() {
+    let mut probe = Probe::spawn(true);
+
+    probe.keys(&["a", "b"]);
+    probe.reset(true);
     let msgs = probe.key("c");
     let acks = msgs
         .iter()

@@ -124,8 +124,10 @@ after each one, so the key after `<CR>` is not taken for a command-line key.
 `nvim_get_mode` first: if Neovim is blocked in getchar() the key answers
 it. Otherwise one `nvim_buf_get_lines`: if the whole buffer is empty the
 key passes through to the app, otherwise BS/Enter go to Neovim and the
-commit key commits all lines joined with `\n`, then clears the buffer
-(`<Esc>ggdGi`) before any key typed after it.
+commit key commits all lines joined with `\n`, then resets (see Reset)
+before any key typed after it. BS/Enter read the current buffer (a
+focused floating window's, such as a plugin's prompt); the commit key reads
+the attached main buffer.
 
 Non-fast requests (`nvim_buf_get_lines`, `reg_recording()`) don't answer
 while Neovim is blocked in getchar(), so they are only sent after
@@ -139,11 +141,27 @@ keys, register names after `<C-r>`) with the modifiers recorded when it was
 pressed; a `PassthroughKey` resolves to the keycode and modifiers of its own
 key, even if later keys were pressed since.
 
-Keys jacin inputs on its own behalf (clearing the buffer on IME off,
-restoring the mode on re-activation) are queued as input items: they keep
-their place after queued keys, are not acknowledged, and only re-sync the
+### Reset
+
+IME off / Deactivate, a commit, and enabling (keymap received) reset
+Neovim: normal mode, no floating windows, an empty main buffer, then
+insert mode after a commit or when enabling with `startinsert`. A keymap
+sent again while enabled leaves Neovim as it is.
+
+A reset is an item in the key queue: it keeps its place after queued keys
+(a commit's reset goes ahead of them), is not acknowledged, and re-syncs the
 pending state and mode from `nvim_get_mode()`. IME off / Deactivate first
-drops keys that have not started.
+drops keys that have not started. It uses the API rather than keys like
+`<Esc>ggdG`, which depend on the user's mappings and on the main window
+having the cursor:
+
+1. `nvim_get_mode`; while blocked in getchar() input `<Esc>` (the argument
+   of getchar() is not mapped), otherwise `<C-\><C-n>` until normal mode —
+   at least once, as a count or operator may be pending. Up to 4 keys; if
+   still blocked, give up without the non-fast calls
+2. `:fclose!`, `nvim_buf_set_lines` on the main buffer, `:startinsert` —
+   each answered before the next request
+3. `nvim_get_mode` to re-sync
 
 ### nvim_ui_attach Redraw Events
 
@@ -216,7 +234,7 @@ whenever the mode is the command line.
 
 ### Neovim = Single Source of Truth
 
-- IME only observes Neovim (UI events, buffer events, `nvim_buf_get_lines`), never writes the buffer directly
+- IME only observes Neovim (UI events, buffer events, `nvim_buf_get_lines`); it writes the buffer directly only to empty it on a reset
 - `Screen` and `BufferMirror` are mirrors of Neovim — never edited locally
 - All text manipulation goes through `nvim_input` to preserve undo/redo/macros/plugins
 

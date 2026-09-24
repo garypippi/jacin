@@ -68,7 +68,7 @@ tests/fixtures/              # FromNeovim message sequences replayed through Mod
 - **ImeMode state machine**: Disabled → Enabling → Enabled (explicit states, not boolean flags)
 - **Single thread**: Neovim's stdout is a calloop source; messages are handled one at a time, each one's events reduced before the next; nothing waits for Neovim
 - **Typed Neovim protocol**: Serde-based `FromNeovim` messages into `Model::reduce`
-- **No Lua / autocmds**: jacin only calls the Neovim API (`nvim_input`, `nvim_get_mode`, `nvim_buf_get_lines`, `reg_recording()`); state comes from UI events and buffer events
+- **No Lua / autocmds**: jacin only calls the Neovim API (`nvim_input`, `nvim_get_mode`, `nvim_buf_get_lines`, `reg_recording()`; resets with `:fclose!`, `nvim_buf_set_lines`, `:startinsert`); state comes from UI events and buffer events
 - **Key queue**: `KeyProcessor` handles one key at a time; insert mode is fire-and-forget (`nvim_input`; display follows redraw/buffer events); other modes query `nvim_get_mode` after the key's `nvim_input` is answered; non-fast requests only after `nvim_get_mode` shows Neovim isn't blocked in getchar
 - **One mode**: `NvimView.mode` (`Mode` enum) from `mode_change` and `nvim_get_mode`, last arrival wins
 - **No plugin-specific handling**: decisions use only generic Vim state (mode, blocking)

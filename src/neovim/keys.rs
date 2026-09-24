@@ -13,16 +13,19 @@ use std::collections::VecDeque;
 use super::mode::Mode;
 use super::protocol::{FromNeovim, PendingState};
 
-/// Keys that clear the buffer after a commit and return to insert mode
-const COMMIT_RESET_KEYS: &str = "<Esc>ggdGi";
+/// Keys input by a reset to leave the current mode, before giving up
+const RESET_TRIES: u8 = 4;
 
 /// A queued unit of work
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     /// A user key, acknowledged with `KeyProcessed { seq }`
     Key { seq: u64, key: String },
-    /// Keys input on jacin's behalf (not acknowledged)
-    Input(String),
+    /// Return to normal mode, close floating windows and empty the main
+    /// buffer, then enter insert mode if `insert` (not acknowledged).
+    /// Done with the API rather than keys like `<Esc>ggdG`, which depend on
+    /// mappings and on the main window having the cursor.
+    Reset { insert: bool },
 }
 
 /// State owned by the model that key processing reads
@@ -35,6 +38,8 @@ pub struct Ctx {
 pub enum Cmd {
     /// `nvim_input` (reply ignored)
     Input(String),
+    /// Call whose reply is only checked for errors
+    Call(Call),
     /// Request whose reply is passed to `on_reply`
     Request(Req),
     /// Mode reported by `nvim_get_mode`, for the model
@@ -47,10 +52,29 @@ pub enum Cmd {
 pub enum Req {
     /// `nvim_get_mode`
     GetMode,
-    /// `nvim_buf_get_lines(0, 0, -1, false)`
-    BufLines,
+    /// `nvim_buf_get_lines(buf, 0, -1, false)`
+    BufLines(Buffer),
     /// `reg_recording()`
     RegRecording,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Buffer {
+    /// The buffer with the cursor (a floating window's while it has focus)
+    Current,
+    /// The attached buffer holding the text, mirrored in `BufferMirror`
+    Main,
+}
+
+/// Non-fast calls made by a reset, once Neovim is not blocked
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Call {
+    /// `:fclose!`
+    CloseFloats,
+    /// `nvim_buf_set_lines` emptying the main buffer
+    ClearBuffer,
+    /// `:startinsert`
+    StartInsert,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,13 +119,19 @@ enum Wait {
     InsertArgument,
     /// Mode after any other key
     AfterKey,
-    /// Mode after an `Item::Input`
-    InputDone,
+    /// Mode during a reset, before its calls. `tries` keys have been input
+    /// to leave the mode so far.
+    ResetLeave {
+        insert: bool,
+        tries: u8,
+    },
+    /// Mode after a reset's calls
+    ResetDone,
 }
 
 #[derive(Debug)]
 struct Current {
-    /// (seq, key) of a user key; None for `Item::Input`
+    /// (seq, key) of a user key; None for `Item::Reset`
     key: Option<(u64, String)>,
     wait: Wait,
 }
@@ -161,7 +191,7 @@ impl KeyProcessor {
             .drain(..)
             .filter_map(|item| match item {
                 Item::Key { seq, .. } => Some(seq),
-                Item::Input(_) => None,
+                Item::Reset { .. } => None,
             })
             .collect()
     }
@@ -179,10 +209,10 @@ impl KeyProcessor {
         while self.current.is_none() {
             match self.queue.pop_front() {
                 Some(Item::Key { seq, key }) => self.start_key(seq, key, mode, out),
-                Some(Item::Input(keys)) => {
-                    log::debug!("[KEYS] Input {keys:?}");
-                    out.push(Cmd::Input(keys));
-                    self.request(None, Wait::InputDone, Req::GetMode, out);
+                Some(Item::Reset { insert }) => {
+                    log::debug!("[KEYS] Reset (insert: {insert})");
+                    let wait = Wait::ResetLeave { insert, tries: 0 };
+                    self.request(None, wait, Req::GetMode, out);
                 }
                 None => break,
             }
@@ -296,10 +326,7 @@ impl KeyProcessor {
     fn resume(&mut self, current: Current, reply: Reply, mode: Mode, out: &mut Vec<Cmd>) {
         let Current { key, wait } = current;
         let Some((seq, key)) = key else {
-            match reply {
-                Reply::Mode { mode, blocking } => self.sync_pending(mode, blocking),
-                reply => log::warn!("[KEYS] Input: unexpected reply {reply:?}"),
-            }
+            self.resume_reset(wait, reply, out);
             return;
         };
 
@@ -343,8 +370,14 @@ impl KeyProcessor {
                 if blocking {
                     self.answer_getchar(seq, key, out);
                 } else {
+                    // The commit key commits the text, wherever the cursor
+                    // is; BS and Enter edit where the cursor is
+                    let buffer = match line_key {
+                        LineKey::Commit => Buffer::Main,
+                        LineKey::Backspace | LineKey::Enter => Buffer::Current,
+                    };
                     let wait = Wait::Lines(line_key);
-                    self.request(Some((seq, key)), wait, Req::BufLines, out);
+                    self.request(Some((seq, key)), wait, Req::BufLines(buffer), out);
                 }
                 return;
             }
@@ -394,7 +427,7 @@ impl KeyProcessor {
                     }
                 }
             }
-            Wait::Lines(_) | Wait::Recording | Wait::InputDone => {
+            Wait::Lines(_) | Wait::Recording | Wait::ResetLeave { .. } | Wait::ResetDone => {
                 log::warn!("[KEYS] #{seq}: unexpected mode reply while in {wait:?}");
             }
         }
@@ -413,16 +446,63 @@ impl KeyProcessor {
         match line_key {
             LineKey::Commit => {
                 out.push(Cmd::Emit(FromNeovim::Commit(lines.join("\n"))));
-                // Here rather than by the model, so keys typed after the
-                // commit key (already queued) are not cleared
-                out.push(Cmd::Input(COMMIT_RESET_KEYS.into()));
+                // Here rather than by the model, and ahead of the queue, so
+                // keys typed after the commit key (already queued) are not
+                // cleared
+                self.queue.push_front(Item::Reset { insert: true });
             }
             LineKey::Backspace => out.push(Cmd::Input("<BS>".into())),
             LineKey::Enter => out.push(Cmd::Input("<CR>".into())),
         }
     }
 
-    /// Pending state after jacin's own input
+    /// Continue a reset: leave the mode with keys until Neovim is in normal
+    /// mode and not blocked, then make the calls (non-fast, so they need
+    /// Neovim not blocked in getchar)
+    fn resume_reset(&mut self, wait: Wait, reply: Reply, out: &mut Vec<Cmd>) {
+        let Reply::Mode { mode, blocking } = reply else {
+            log::warn!("[KEYS] Reset: unexpected reply {reply:?} in {wait:?}");
+            return;
+        };
+        let Wait::ResetLeave { insert, tries } = wait else {
+            if wait != Wait::ResetDone {
+                log::warn!("[KEYS] Reset: unexpected mode reply in {wait:?}");
+            }
+            self.sync_pending(mode, blocking);
+            return;
+        };
+        // <C-\><C-n> at least once: normal mode may have a count or an
+        // operator pending
+        let left = !blocking && mode == Mode::Normal && tries > 0;
+        if !left {
+            if tries < RESET_TRIES {
+                // A key answering getchar() is not mapped; <C-\><C-n> leaves
+                // any other mode
+                let keys = if blocking { "<Esc>" } else { "<C-\\><C-n>" };
+                out.push(Cmd::Input(keys.into()));
+                let wait = Wait::ResetLeave {
+                    insert,
+                    tries: tries + 1,
+                };
+                self.request(None, wait, Req::GetMode, out);
+                return;
+            }
+            if blocking {
+                log::warn!("[KEYS] Reset: still blocked (mode {mode:?}), giving up");
+                self.sync_pending(mode, blocking);
+                return;
+            }
+            log::warn!("[KEYS] Reset: still in mode {mode:?}, resetting anyway");
+        }
+        out.push(Cmd::Call(Call::CloseFloats));
+        out.push(Cmd::Call(Call::ClearBuffer));
+        if insert {
+            out.push(Cmd::Call(Call::StartInsert));
+        }
+        self.request(None, Wait::ResetDone, Req::GetMode, out);
+    }
+
+    /// Pending state after a reset
     fn sync_pending(&mut self, mode: Mode, blocking: bool) {
         self.pending = if blocking {
             PendingState::Getchar
@@ -505,6 +585,10 @@ mod tests {
 
     fn input(keys: &str) -> Cmd {
         Cmd::Input(keys.into())
+    }
+
+    fn call(call: Call) -> Cmd {
+        Cmd::Call(call)
     }
 
     fn get_mode() -> Cmd {
@@ -724,12 +808,19 @@ mod tests {
 
     #[test]
     fn line_keys_pass_through_on_empty_buffer() {
-        for key in ["<BS>", "<CR>", COMMIT] {
+        for (key, buffer) in [
+            ("<BS>", Buffer::Current),
+            ("<CR>", Buffer::Current),
+            (COMMIT, Buffer::Main),
+        ] {
             let mut h = Harness::new(Mode::Insert);
             assert_eq!(h.key(key), vec![get_mode()]);
             assert_eq!(
                 h.mode(Mode::Insert, false),
-                vec![Cmd::SetMode(Mode::Insert), Cmd::Request(Req::BufLines)]
+                vec![
+                    Cmd::SetMode(Mode::Insert),
+                    Cmd::Request(Req::BufLines(buffer))
+                ]
             );
             assert_eq!(
                 h.reply(lines(&[""])),
@@ -767,10 +858,30 @@ mod tests {
             h.reply(lines(&["foo", "bar"])),
             vec![
                 Cmd::Emit(FromNeovim::Commit("foo\nbar".into())),
-                input(COMMIT_RESET_KEYS),
                 done(1, PendingState::None),
+                get_mode(),
+            ]
+        );
+        assert_eq!(
+            h.mode(Mode::Insert, false),
+            vec![Cmd::SetMode(Mode::Insert), input("<C-\\><C-n>"), get_mode()]
+        );
+        assert_eq!(
+            h.mode(Mode::Normal, false),
+            vec![
+                Cmd::SetMode(Mode::Normal),
+                call(Call::CloseFloats),
+                call(Call::ClearBuffer),
+                call(Call::StartInsert),
+                get_mode()
+            ]
+        );
+        assert_eq!(
+            h.mode(Mode::Insert, false),
+            vec![
+                Cmd::SetMode(Mode::Insert),
                 input("x"),
-                done(2, PendingState::None),
+                done(2, PendingState::None)
             ]
         );
     }
@@ -902,11 +1013,119 @@ mod tests {
         );
     }
 
+    fn reset(h: &mut Harness, insert: bool) -> Vec<Cmd> {
+        let cmds = h.kp.push(Item::Reset { insert }, &h.ctx());
+        h.apply(cmds)
+    }
+
+    fn reset_calls(insert: bool) -> Vec<Cmd> {
+        let mut cmds = vec![call(Call::CloseFloats), call(Call::ClearBuffer)];
+        if insert {
+            cmds.push(call(Call::StartInsert));
+        }
+        cmds.push(get_mode());
+        cmds
+    }
+
+    #[test]
+    fn reset_leaves_the_mode_then_calls() {
+        for insert in [false, true] {
+            let mut h = Harness::new(Mode::Visual);
+            assert_eq!(reset(&mut h, insert), vec![get_mode()]);
+            assert_eq!(
+                h.mode(Mode::Visual, false),
+                vec![Cmd::SetMode(Mode::Visual), input("<C-\\><C-n>"), get_mode()]
+            );
+            let mut expected = vec![Cmd::SetMode(Mode::Normal)];
+            expected.extend(reset_calls(insert));
+            assert_eq!(h.mode(Mode::Normal, false), expected);
+            let mode = if insert { Mode::Insert } else { Mode::Normal };
+            assert_eq!(h.mode(mode, false), vec![Cmd::SetMode(mode)]);
+            assert!(!h.kp.is_busy());
+        }
+    }
+
+    #[test]
+    fn reset_leaves_normal_mode_too() {
+        // A count or register may be pending in normal mode
+        let mut h = Harness::new(Mode::Normal);
+        reset(&mut h, false);
+        assert_eq!(
+            h.mode(Mode::Normal, false),
+            vec![Cmd::SetMode(Mode::Normal), input("<C-\\><C-n>"), get_mode()]
+        );
+    }
+
+    #[test]
+    fn reset_answers_getchar_with_escape() {
+        let mut h = Harness::new(Mode::Insert);
+        reset(&mut h, true);
+        // <C-r> waiting for a register name
+        assert_eq!(
+            h.mode(Mode::Insert, true),
+            vec![Cmd::SetMode(Mode::Insert), input("<Esc>"), get_mode()]
+        );
+        // Back in insert mode
+        assert_eq!(
+            h.mode(Mode::Insert, false),
+            vec![Cmd::SetMode(Mode::Insert), input("<C-\\><C-n>"), get_mode()]
+        );
+        let mut expected = vec![Cmd::SetMode(Mode::Normal)];
+        expected.extend(reset_calls(true));
+        assert_eq!(h.mode(Mode::Normal, false), expected);
+    }
+
+    #[test]
+    fn reset_gives_up_while_still_blocked() {
+        let mut h = Harness::new(Mode::Normal);
+        reset(&mut h, false);
+        for _ in 0..RESET_TRIES {
+            assert_eq!(
+                h.mode(Mode::Other, true),
+                vec![Cmd::SetMode(Mode::Other), input("<Esc>"), get_mode()]
+            );
+        }
+        // No non-fast call: it would not be answered
+        assert_eq!(h.mode(Mode::Other, true), vec![Cmd::SetMode(Mode::Other)]);
+        assert!(!h.kp.is_busy());
+        // The next key answers the getchar
+        assert_eq!(h.key("x"), vec![input("x"), get_mode()]);
+    }
+
+    #[test]
+    fn reset_calls_anyway_when_the_mode_stays() {
+        let mut h = Harness::new(Mode::Normal);
+        reset(&mut h, false);
+        for _ in 0..RESET_TRIES {
+            h.mode(Mode::Other, false);
+        }
+        let mut expected = vec![Cmd::SetMode(Mode::Other)];
+        expected.extend(reset_calls(false));
+        assert_eq!(h.mode(Mode::Other, false), expected);
+    }
+
+    #[test]
+    fn reset_is_not_acknowledged_and_runs_after_queued_keys() {
+        let mut h = Harness::new(Mode::Normal);
+        h.key("x");
+        assert!(reset(&mut h, true).is_empty());
+        assert_eq!(
+            h.mode(Mode::Normal, false),
+            vec![
+                Cmd::SetMode(Mode::Normal),
+                done(1, PendingState::None),
+                get_mode()
+            ]
+        );
+    }
+
     #[test]
     fn queued_key_starts_with_the_replied_mode() {
-        // The model still says Normal, but <Esc>i just replied Insert
+        // The model still says Normal, but the reset just replied Insert
         let mut h = Harness::new(Mode::Normal);
-        h.kp.push(Item::Input("<Esc>i".into()), &h.ctx());
+        reset(&mut h, true);
+        h.mode(Mode::Normal, false);
+        h.mode(Mode::Normal, false);
         h.key("a");
         let cmds = h.kp.on_reply(
             Reply::Mode {
@@ -926,33 +1145,11 @@ mod tests {
     }
 
     #[test]
-    fn input_item_is_not_acknowledged() {
-        let mut h = Harness::new(Mode::Insert);
-        let cmds = h.kp.push(Item::Input("<Esc><Esc>ggdG".into()), &h.ctx());
-        assert_eq!(cmds, vec![input("<Esc><Esc>ggdG"), get_mode()]);
-        assert_eq!(
-            h.mode(Mode::Normal, false),
-            vec![Cmd::SetMode(Mode::Normal)]
-        );
-        assert!(!h.kp.is_busy());
-    }
-
-    #[test]
-    fn input_item_syncs_pending() {
-        let mut h = Harness::new(Mode::Normal);
-        h.key("r");
-        h.mode(Mode::Replace, true);
-        h.kp.push(Item::Input("<Esc>".into()), &h.ctx());
-        h.mode(Mode::Normal, false);
-        assert_eq!(h.key("x"), vec![input("x"), get_mode()]);
-    }
-
-    #[test]
     fn discard_drops_only_unstarted_items() {
         let mut h = Harness::new(Mode::Normal);
         h.key("x");
         h.key("y");
-        h.kp.push(Item::Input("<Esc>i".into()), &h.ctx());
+        reset(&mut h, true);
         h.key("z");
         assert_eq!(h.kp.discard_queued(), vec![2, 3]);
         assert_eq!(
