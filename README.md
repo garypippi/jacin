@@ -71,6 +71,7 @@ The commands talk to the running jacin over a socket in `$XDG_RUNTIME_DIR`, one 
 - **Paste**: use Neovim's `<C-r>+` in insert mode (needs a Neovim clipboard provider such as `wl-clipboard`).
 - **Password fields**: keys go straight to the application while one is focused (see [Security](#security)).
 - **`:q`** quits the embedded Neovim and turns the IME off; the next toggle starts a new one.
+- **One window**: only the window with the cursor is shown, and only the main buffer is committed. Splits, tab pages and other buffers are closed or hidden again on each commit and when the IME is turned off.
 
 ## Configuration
 

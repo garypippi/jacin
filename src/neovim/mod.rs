@@ -365,6 +365,17 @@ impl Neovim {
     fn send_call(&mut self, call: Call) {
         let (method, params, what) = match call {
             Call::CloseFloats => ("nvim_command", vec!["fclose!".into()], "fclose!"),
+            // Other buffers are only hidden: they stay loaded for next time
+            Call::CloseOtherWindows => (
+                "nvim_command",
+                vec!["silent! tabonly! | silent! only!".into()],
+                "tabonly! | only!",
+            ),
+            Call::ShowMainBuffer => (
+                "nvim_win_set_buf",
+                vec![0.into(), self.buffer(Buffer::Main)],
+                "nvim_win_set_buf",
+            ),
             Call::ClearBuffer => (
                 "nvim_buf_set_lines",
                 vec![

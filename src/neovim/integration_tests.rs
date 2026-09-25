@@ -625,6 +625,40 @@ fn commit_from_a_focused_float_commits_the_main_buffer() {
     probe.shutdown();
 }
 
+/// A reset brings back one window showing the main buffer: jacin shows
+/// neither the tabline nor other windows.
+#[test]
+#[ignore]
+fn reset_closes_other_tabs_and_windows() {
+    let mut probe = Probe::spawn(true);
+
+    probe.keys(&["a", "b"]);
+    probe.wait_buffer("ab");
+    for command in ["tabnew", "new"] {
+        probe.keys(&["<Esc>", ":", command, "<CR>", "i", "x", "y"]);
+    }
+
+    let msgs = probe.key("<C-CR>");
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, FromNeovim::Commit(text) if text == "ab")),
+        "expected Commit 'ab', got {msgs:?}"
+    );
+    probe.wait("reset after commit", |m| {
+        m.view.buffer.text().is_empty() && m.view.mode == Mode::Insert
+    });
+
+    // Typing goes to the main buffer, in the only window
+    probe.key("z");
+    probe.wait_buffer("z");
+    probe.keys(&["<Esc>", ":", "echo tabpagenr('$') .. winnr('$')", "<CR>"]);
+    probe.wait("one tab page and one window", |m| {
+        m.view.transient_message.as_deref() == Some("11")
+    });
+
+    probe.shutdown();
+}
+
 /// Open a floating window with the cursor in it, in insert mode
 fn open_focused_float(probe: &mut Probe) {
     probe.keys(&[

@@ -143,8 +143,9 @@ key, even if later keys were pressed since.
 ### Reset
 
 IME off / Deactivate, a commit, and enabling (keymap received) reset
-Neovim: normal mode, no floating windows, an empty main buffer, then
-insert mode after a commit or when enabling with `startinsert`. A keymap
+Neovim to the state every session starts from: one tab page with one window
+showing the main buffer, no floating windows, the buffer empty, normal mode —
+then insert mode after a commit or when enabling with `startinsert`. A keymap
 sent again while enabled leaves Neovim as it is.
 
 A reset is an item in the key queue: it keeps its place after queued keys
@@ -158,8 +159,11 @@ having the cursor:
    of getchar() is not mapped), otherwise `<C-\><C-n>` until normal mode —
    at least once, as a count or operator may be pending. Up to 4 keys; if
    still blocked, give up without the non-fast calls
-2. `:fclose!`, `nvim_buf_set_lines` on the main buffer, `:startinsert` —
-   each answered before the next request
+2. `:fclose!`, `nvim_win_set_buf` to the main buffer, `:tabonly! | only!`,
+   `nvim_buf_set_lines` on the main buffer, `:startinsert` — each answered
+   before the next request. The main buffer is shown before the other
+   windows close: with `bufhidden=wipe` it would be wiped with its last
+   window. Other buffers are only hidden
 3. `nvim_get_mode` to re-sync
 
 ### nvim_ui_attach Redraw Events
@@ -282,6 +286,16 @@ file (inotify), parsing `msg_show`, a FIFO, or an autocmd calling back over
 RPC. A file leaves IME input on disk, the others race with the key flow or
 depend on fragile heuristics. The commit key (and IME off) are the only commit
 paths, and the buffer keeps `buftype=nofile` so `:q` never hits E37.
+
+### One window
+
+jacin draws neither the tabline nor the statusline, and shows only the
+window with the cursor, so tab pages and splits can't be told apart in the
+popup. The text is always the main buffer; splits, tab pages and other
+buffers are not supported as places to write it (text typed there is not
+committed), and every reset returns to one window on the main buffer.
+Showing several windows would mean drawing Neovim's whole screen at its
+full UI size, against a popup that fits the text next to the cursor.
 
 ### One unified popup
 

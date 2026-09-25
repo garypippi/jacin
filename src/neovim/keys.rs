@@ -71,6 +71,11 @@ pub enum Buffer {
 pub enum Call {
     /// `:fclose!`
     CloseFloats,
+    /// `nvim_win_set_buf` back to the main buffer (before closing the
+    /// other windows: the main buffer is unloaded when its last window closes)
+    ShowMainBuffer,
+    /// Close other tab pages and windows (jacin shows one window)
+    CloseOtherWindows,
     /// `nvim_buf_set_lines` emptying the main buffer
     ClearBuffer,
     /// `:startinsert`
@@ -499,6 +504,8 @@ impl KeyProcessor {
             log::warn!("[KEYS] Reset: still in mode {mode:?}, resetting anyway");
         }
         out.push(Cmd::Call(Call::CloseFloats));
+        out.push(Cmd::Call(Call::ShowMainBuffer));
+        out.push(Cmd::Call(Call::CloseOtherWindows));
         out.push(Cmd::Call(Call::ClearBuffer));
         if insert {
             out.push(Cmd::Call(Call::StartInsert));
@@ -875,6 +882,8 @@ mod tests {
             vec![
                 Cmd::SetMode(Mode::Normal),
                 call(Call::CloseFloats),
+                call(Call::ShowMainBuffer),
+                call(Call::CloseOtherWindows),
                 call(Call::ClearBuffer),
                 call(Call::StartInsert),
                 get_mode()
@@ -1038,7 +1047,12 @@ mod tests {
     }
 
     fn reset_calls(insert: bool) -> Vec<Cmd> {
-        let mut cmds = vec![call(Call::CloseFloats), call(Call::ClearBuffer)];
+        let mut cmds = vec![
+            call(Call::CloseFloats),
+            call(Call::ShowMainBuffer),
+            call(Call::CloseOtherWindows),
+            call(Call::ClearBuffer),
+        ];
         if insert {
             cmds.push(call(Call::StartInsert));
         }
