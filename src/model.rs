@@ -67,6 +67,7 @@ impl Model {
                 } else {
                     self.view
                         .set_candidates(info.candidates, info.selected, info.cmdline);
+                    self.view.set_candidates_anchor(info.anchor);
                 }
                 vec![Effect::Render]
             }

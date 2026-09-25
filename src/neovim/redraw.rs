@@ -3,7 +3,7 @@
 use rmpv::Value;
 
 use super::mode::Mode;
-use super::protocol::{CandidateInfo, FromNeovim, GridEvent};
+use super::protocol::{CandidateInfo, FromNeovim, GridEvent, PumAnchor};
 use super::redraw_grid::parse_grid_event;
 
 /// msg_show kinds that are not shown
@@ -21,6 +21,7 @@ pub struct Redraw {
     popupmenu_items: Vec<String>,
     /// The shown popupmenu completes the command line
     popupmenu_cmdline: bool,
+    popupmenu_anchor: Option<PumAnchor>,
     /// Grid events of the current batch, sent as one message at `flush`
     grid_batch: Vec<GridEvent>,
 }
@@ -87,6 +88,15 @@ impl Redraw {
             .unwrap_or_default();
         let selected = arr.get(1).and_then(Value::as_i64).unwrap_or(-1);
         let cmdline = arr.get(4).and_then(Value::as_i64) == Some(-1);
+        let size = |i: usize| arr.get(i).and_then(Value::as_u64);
+        let anchor = match (size(4), size(2), size(3)) {
+            (Some(grid), Some(row), Some(col)) => Some(PumAnchor {
+                grid,
+                row: row as usize,
+                col: col as usize,
+            }),
+            _ => None,
+        };
         log::debug!(
             "[NVIM] popupmenu_show: {} items, selected={}, cmdline={}",
             words.len(),
@@ -95,6 +105,7 @@ impl Redraw {
         );
         self.popupmenu_items = words;
         self.popupmenu_cmdline = cmdline;
+        self.popupmenu_anchor = anchor;
         self.candidates(selected)
     }
 
@@ -116,11 +127,10 @@ impl Redraw {
             return FromNeovim::Candidates(CandidateInfo::empty());
         }
         let selected = usize::try_from(selected).ok().filter(|&i| i < items.len());
-        FromNeovim::Candidates(CandidateInfo::new(
-            items.clone(),
-            selected,
-            self.popupmenu_cmdline,
-        ))
+        FromNeovim::Candidates(
+            CandidateInfo::new(items.clone(), selected, self.popupmenu_cmdline)
+                .at(self.popupmenu_anchor),
+        )
     }
 }
 
@@ -326,34 +336,35 @@ mod tests {
             vec![
                 arr(vec![item("漢字"), item("感じ")]),
                 Value::from(0),
-                Value::from(0),
-                Value::from(0),
-                Value::from(0),
+                Value::from(1),
+                Value::from(3),
+                Value::from(2),
             ],
         );
         let both = vec!["漢字".to_string(), "感じ".to_string()];
+        let anchor = Some(PumAnchor {
+            grid: 2,
+            row: 1,
+            col: 3,
+        });
         assert_eq!(
             shown,
-            vec![FromNeovim::Candidates(CandidateInfo::new(
-                both.clone(),
-                Some(0),
-                false
-            ))]
+            vec![FromNeovim::Candidates(
+                CandidateInfo::new(both.clone(), Some(0), false).at(anchor)
+            )]
         );
         assert_eq!(
             redraw(&mut r, "popupmenu_select", vec![Value::from(1)]),
-            vec![FromNeovim::Candidates(CandidateInfo::new(
-                both.clone(),
-                Some(1),
-                false
-            ))]
+            vec![FromNeovim::Candidates(
+                CandidateInfo::new(both.clone(), Some(1), false).at(anchor)
+            )]
         );
         // -1: nothing selected (noselect, or back to the typed text)
         assert_eq!(
             redraw(&mut r, "popupmenu_select", vec![Value::from(-1)]),
-            vec![FromNeovim::Candidates(CandidateInfo::new(
-                both, None, false
-            ))]
+            vec![FromNeovim::Candidates(
+                CandidateInfo::new(both, None, false).at(anchor)
+            )]
         );
         assert_eq!(
             redraw(&mut r, "popupmenu_hide", vec![]),

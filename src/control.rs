@@ -2,7 +2,7 @@
 //!
 //! The IME is turned on from outside because jacin holds no keyboard grab
 //! while it is off, so it cannot see a toggle key itself. One line is sent
-//! (`toggle`) and one line comes back (`on` / `off`).
+//! (`toggle`) and one line comes back (`on` / `off`, or `error: ...`).
 
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -21,6 +21,8 @@ pub enum Command {
     On,
     Off,
     Status,
+    /// Switch between the small popup and the whole Neovim screen
+    Focus,
 }
 
 impl Command {
@@ -30,6 +32,7 @@ impl Command {
             "on" => Some(Self::On),
             "off" => Some(Self::Off),
             "status" => Some(Self::Status),
+            "focus" => Some(Self::Focus),
             _ => None,
         }
     }
@@ -40,6 +43,7 @@ impl Command {
             Self::On => "on",
             Self::Off => "off",
             Self::Status => "status",
+            Self::Focus => "focus",
         }
     }
 
@@ -49,10 +53,15 @@ impl Command {
             Self::Toggle => !enabled,
             Self::On => true,
             Self::Off => false,
-            Self::Status => enabled,
+            Self::Status | Self::Focus => enabled,
         }
     }
 }
+
+/// A reply starting with this is printed as an error by the client
+pub const ERROR_PREFIX: &str = "error: ";
+
+pub const FOCUS_UNSET: &str = "error: focus mode needs [focus] columns and lines in the config";
 
 pub fn reply(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
@@ -120,10 +129,21 @@ mod tests {
 
     #[test]
     fn commands_round_trip() {
-        for command in [Command::Toggle, Command::On, Command::Off, Command::Status] {
+        for command in [
+            Command::Toggle,
+            Command::On,
+            Command::Off,
+            Command::Status,
+            Command::Focus,
+        ] {
             assert_eq!(Command::parse(command.as_str()), Some(command));
         }
         assert_eq!(Command::parse("enable"), None);
+    }
+
+    #[test]
+    fn focus_unset_is_an_error() {
+        assert!(FOCUS_UNSET.starts_with(ERROR_PREFIX));
     }
 
     #[test]

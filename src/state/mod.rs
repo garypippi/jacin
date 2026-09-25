@@ -18,6 +18,6 @@ pub use ime::ImeState;
 pub use keyboard::{KeyboardState, Modifiers};
 pub use nvim_view::NvimView;
 pub use repeat::KeyRepeatState;
-pub use screen::{Screen, StyledCell, WindowView};
+pub use screen::{FloatView, Screen, StyledCell, WindowView};
 pub use sent_keys::{SentKey, SentKeys};
 pub use wayland::{WaylandState, is_sensitive};

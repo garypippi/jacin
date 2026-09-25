@@ -15,19 +15,49 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 
 pub use super::layout::PopupContent;
 use super::layout::{
-    Header, Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT, MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES,
-    MODE_STRIP_WIDTH, MODE_STRIP_X, PADDING, REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP,
-    SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, TEXT_X, calculate_layout, format_recording_label,
-    mode_color, rgba, scrollbar_thumb_geometry,
+    FOCUS_PANEL_ROWS, Header, Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT, MAX_POPUP_WIDTH,
+    MAX_VISIBLE_CANDIDATES, MODE_STRIP_WIDTH, MODE_STRIP_X, PADDING, REC_CIRCLE_RADIUS,
+    REC_CIRCLE_TEXT_GAP, SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, TEXT_X, calculate_layout,
+    format_recording_label, mode_color, rgba, scrollbar_thumb_geometry,
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use super::theme::Theme;
 use crate::State;
+use crate::config;
 use crate::neovim::Mode;
 use crate::state::{StyledCell, WindowView};
 
-/// Pool size: two ARGB buffers of the maximum popup size (double buffering)
-const POOL_SIZE: usize = (MAX_POPUP_WIDTH * MAX_POPUP_HEIGHT * 4 * 2) as usize;
+/// Bytes for two ARGB buffers of `size` (double buffering)
+fn pool_size((width, height): (u32, u32)) -> usize {
+    (width * height * 4 * 2) as usize
+}
+
+/// Neovim UI size (columns, rows) for the text window: the text right of
+/// the mode strip at the maximum popup size. Rows exceed the visible window
+/// grid to leave room below the cursor for floats (nvim-cmp opens a menu
+/// below only when `lines - cursor_row > min(10, entries)`). Floats are
+/// clamped to `lines` by their owners, so they still fit the popup.
+fn normal_ui_size(cell_width: f32, line_height: f32) -> (usize, usize) {
+    let cols = ((MAX_POPUP_WIDTH as f32 - TEXT_X - PADDING) / cell_width).floor() as usize;
+    // Minus padding and a panel row with its separator
+    let grid_height =
+        MAX_POPUP_HEIGHT as f32 - PADDING * 2.0 - line_height - SECTION_SEPARATOR_HEIGHT;
+    let rows = (grid_height / line_height).floor() as usize;
+    (cols.max(20), rows.max(MAX_GRID_ROWS + 1))
+}
+
+/// Largest popup (width, height) in focus mode: the screen of `cols` x
+/// `rows` cells with the panel below it, and at least the normal maximum
+fn focus_popup_size((cols, rows): (usize, usize), cell_width: f32, line_height: f32) -> (u32, u32) {
+    let width = TEXT_X + cols as f32 * cell_width + PADDING;
+    let height =
+        PADDING * 2.0 + (rows + FOCUS_PANEL_ROWS) as f32 * line_height + SECTION_SEPARATOR_HEIGHT;
+    // Aligned like the layout's width
+    (
+        ((width.ceil() as u32 + 3) & !3).max(MAX_POPUP_WIDTH),
+        (height.ceil() as u32).max(MAX_POPUP_HEIGHT),
+    )
+}
 
 /// Double buffer state
 struct Buffer {
@@ -50,6 +80,10 @@ pub struct UnifiedPopup {
     input_method: zwp_input_method_v2::ZwpInputMethodV2,
     pool: wl_shm_pool::WlShmPool,
     pool_data: MmapMut,
+    /// Neovim UI sizes (columns, rows): normal, focus mode
+    ui_sizes: ((usize, usize), Option<(usize, usize)>),
+    /// Largest popup in focus mode (the pool holds it too)
+    focus_max: Option<(u32, u32)>,
     buffers: [Option<Buffer>; 2],
     current_buffer: usize,
     width: u32,
@@ -70,11 +104,21 @@ impl UnifiedPopup {
         shm: &wl_shm::WlShm,
         qh: &QueueHandle<State>,
         renderer: TextRenderer,
-        mono_renderer: TextRenderer,
+        mut mono_renderer: TextRenderer,
+        focus: &config::Focus,
     ) -> Option<Self> {
         let surfaces = Self::create_surfaces(compositor, input_method, qh);
 
-        let (pool, pool_data) = create_shm_pool(shm, qh, POOL_SIZE, "ime-unified-popup")?;
+        let cell_width = mono_renderer.measure_text(" ").max(1.0);
+        let line_height = renderer.line_height().max(1.0);
+        let normal = normal_ui_size(cell_width, line_height);
+        let focus = focus
+            .size()
+            .map(|(cols, rows)| (cols.clamp(20, 500), rows.clamp(MAX_GRID_ROWS + 1, 200)));
+        let focus_max = focus.map(|focus| focus_popup_size(focus, cell_width, line_height));
+        let pool_bytes =
+            pool_size((MAX_POPUP_WIDTH, MAX_POPUP_HEIGHT)).max(focus_max.map_or(0, pool_size));
+        let (pool, pool_data) = create_shm_pool(shm, qh, pool_bytes, "ime-unified-popup")?;
 
         Some(Self {
             surfaces: Some(surfaces),
@@ -82,6 +126,8 @@ impl UnifiedPopup {
             input_method: input_method.clone(),
             pool,
             pool_data,
+            ui_sizes: (normal, focus),
+            focus_max,
             buffers: [None, None],
             current_buffer: 0,
             width: 200,
@@ -115,20 +161,18 @@ impl UnifiedPopup {
         }
     }
 
-    /// Neovim UI size (columns, rows): the text right of the mode strip at
-    /// the maximum popup size. Rows exceed the visible window grid to leave room below
-    /// the cursor for floats (nvim-cmp opens a menu below only when
-    /// `lines - cursor_row > min(10, entries)`). Floats are clamped to
-    /// `lines` by their owners, so they still fit the popup.
-    pub fn grid_ui_size(&mut self) -> (usize, usize) {
-        let cell_width = self.mono_renderer.measure_text(" ").max(1.0);
-        let cols = ((MAX_POPUP_WIDTH as f32 - TEXT_X - PADDING) / cell_width).floor() as usize;
-        let line_height = self.renderer.line_height().max(1.0);
-        // Minus padding and a panel row with its separator
-        let grid_height =
-            MAX_POPUP_HEIGHT as f32 - PADDING * 2.0 - line_height - SECTION_SEPARATOR_HEIGHT;
-        let rows = (grid_height / line_height).floor() as usize;
-        (cols.max(20), rows.max(MAX_GRID_ROWS + 1))
+    /// Neovim UI size (columns, rows) for the text window, or for the
+    /// whole screen in focus mode
+    pub fn ui_size(&self, focus: bool) -> (usize, usize) {
+        match self.ui_sizes.1 {
+            Some(size) if focus => size,
+            _ => self.ui_sizes.0,
+        }
+    }
+
+    /// Focus mode needs its size in the config
+    pub fn has_focus_size(&self) -> bool {
+        self.ui_sizes.1.is_some()
     }
 
     pub fn update(&mut self, content: &PopupContent, qh: &QueueHandle<State>) {
@@ -161,9 +205,14 @@ impl UnifiedPopup {
             .scroll_offset
             .min(content.candidates.len() - visible_count);
 
+        let max_size = match self.focus_max {
+            Some(max) if content.focus => max,
+            _ => (MAX_POPUP_WIDTH, MAX_POPUP_HEIGHT),
+        };
         let layout = calculate_layout(
             content,
             self.above,
+            max_size,
             &mut self.renderer,
             &mut self.mono_renderer,
         );
@@ -228,7 +277,7 @@ impl UnifiedPopup {
     fn render(&mut self, content: &PopupContent, layout: &Layout, qh: &QueueHandle<State>) {
         let _perf_start = std::time::Instant::now();
         let buffer_size = (self.width * self.height * 4) as usize;
-        if buffer_size * 2 > POOL_SIZE {
+        if buffer_size * 2 > self.pool_data.len() {
             log::warn!(
                 "[POPUP] Buffer too large ({}x{}), skipping render",
                 self.width,

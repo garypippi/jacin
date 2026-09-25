@@ -223,6 +223,60 @@ impl Screen {
         Some(view)
     }
 
+    /// The whole screen as Neovim lays it out: the global grid (statusline,
+    /// tabline) with the shown windows over it, and floats on top
+    pub fn screen_view(&self) -> Option<WindowView> {
+        let global = self.grid(1)?;
+        let mut rows: Vec<Vec<StyledCell>> = (0..global.height())
+            .map(|row| self.styled_row(global, row))
+            .collect();
+        for (&id, win) in self.windows.iter().filter(|(_, w)| !w.hidden) {
+            let (Some(Placement::Normal { row, col }), Some(grid)) = (win.placement, self.grid(id))
+            else {
+                continue;
+            };
+            for r in 0..grid.height() {
+                let Some(dest) = rows.get_mut(row + r) else {
+                    break;
+                };
+                for (c, cell) in self.styled_row(grid, r).into_iter().enumerate() {
+                    if let Some(slot) = dest.get_mut(col + c) {
+                        *slot = cell;
+                    }
+                }
+            }
+        }
+
+        let (row, col) = match self.window(self.cursor.grid).and_then(|w| w.placement) {
+            Some(Placement::Normal { row, col }) => (row, col),
+            Some(Placement::Float { row, col, .. }) => (row, col),
+            None => (0, 0),
+        };
+        Some(WindowView {
+            rows,
+            cursor: (row + self.cursor.row, col + self.cursor.col),
+            cursor_visible: true,
+            cursor_on_float: matches!(
+                self.window(self.cursor.grid).and_then(|w| w.placement),
+                Some(Placement::Float { .. })
+            ),
+            floats: self.float_views(1, 0),
+        })
+    }
+
+    /// Screen position of a cell of `grid` (None: a window not shown)
+    pub fn screen_position(&self, grid: u64, row: usize, col: usize) -> Option<(usize, usize)> {
+        if grid == 1 {
+            return Some((row, col));
+        }
+        let win = self.window(grid).filter(|w| !w.hidden)?;
+        match win.placement? {
+            Placement::Normal { row: r, col: c } | Placement::Float { row: r, col: c, .. } => {
+                Some((r + row, c + col))
+            }
+        }
+    }
+
     /// Screen (row, col) of the window grid's origin (0, 0 if unknown)
     fn window_origin(&self, window_grid: u64) -> (usize, usize) {
         match self.window(window_grid).and_then(|w| w.placement) {
@@ -475,6 +529,46 @@ mod tests {
         screen.apply(GridEvent::Destroy { grid: 5 });
         assert!(screen.window(5).is_none());
         assert!(screen.grid(5).is_none());
+    }
+
+    #[test]
+    fn screen_view_lays_windows_over_the_global_grid() {
+        let mut screen = Screen::default();
+        screen.apply(resize(1, 7, 3));
+        screen.apply(line(1, 2, "status"));
+        for (grid, col, text) in [(2, 0, "ab"), (3, 4, "cd")] {
+            screen.apply(resize(grid, 3, 2));
+            screen.apply(line(grid, 0, text));
+            screen.apply(GridEvent::WinPos {
+                grid,
+                row: 0,
+                col,
+                width: 3,
+                height: 2,
+            });
+        }
+        screen.apply(GridEvent::CursorGoto {
+            grid: 3,
+            row: 1,
+            col: 2,
+        });
+        add_float(&mut screen, 5, 1, 1, "f", 50);
+
+        let view = screen.screen_view().unwrap();
+        // line() puts the whole text in one cell
+        assert_eq!(texts(&view), ["ab   cd  ", "       ", "status      "]);
+        assert_eq!(view.cursor, (1, 6));
+        assert!(!view.cursor_on_float);
+        assert_eq!((view.floats[0].row, view.floats[0].col), (1, 1));
+
+        assert_eq!(screen.screen_position(3, 1, 1), Some((1, 5)));
+        assert_eq!(screen.screen_position(5, 0, 0), Some((1, 1)));
+        assert_eq!(screen.screen_position(1, 2, 3), Some((2, 3)));
+
+        // Windows of another tab are hidden
+        screen.apply(GridEvent::WinHide { grid: 3 });
+        assert_eq!(texts(&screen.screen_view().unwrap())[0], "ab      ");
+        assert_eq!(screen.screen_position(3, 0, 0), None);
     }
 
     fn window(lines: &[(&str, bool)], line_count: usize, cursor: (usize, usize)) -> Screen {

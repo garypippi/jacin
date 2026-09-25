@@ -8,6 +8,7 @@ pub struct Config {
     pub behavior: Behavior,
     pub font: FontConfig,
     pub appearance: Appearance,
+    pub focus: Focus,
     #[serde(skip)]
     pub clean: bool,
 }
@@ -37,6 +38,22 @@ pub struct Appearance {
 impl Default for Appearance {
     fn default() -> Self {
         Self { opacity: 1.0 }
+    }
+}
+
+/// Size of the whole Neovim screen in focus mode (`jacin focus`), in
+/// Neovim's `columns` and `lines`. No default: focus mode is available only
+/// with both set, as the size that fits depends on the monitor and font.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Focus {
+    pub columns: Option<usize>,
+    pub lines: Option<usize>,
+}
+
+impl Focus {
+    pub fn size(&self) -> Option<(usize, usize)> {
+        self.columns.zip(self.lines)
     }
 }
 
@@ -99,6 +116,12 @@ impl Config {
         match toml::from_str(&contents) {
             Ok(config) => {
                 log::info!("[CONFIG] Loaded from {}", path.display());
+                let config: Self = config;
+                if config.focus.size().is_none()
+                    && (config.focus.columns.is_some() || config.focus.lines.is_some())
+                {
+                    log::warn!("[CONFIG] [focus] needs both columns and lines; focus mode is off");
+                }
                 config
             }
             Err(e) => {
@@ -140,6 +163,7 @@ mod tests {
         assert!(config.font.mono_family.is_none());
         assert!(config.font.size.is_none());
         assert_eq!(config.appearance.opacity, 1.0);
+        assert!(config.focus.size().is_none());
         assert!(config.behavior.stash_register.is_none());
     }
 
@@ -153,6 +177,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.behavior.stash_register, Some('j'));
+    }
+
+    #[test]
+    fn focus_size() {
+        let config: Config = toml::from_str(
+            r#"
+            [focus]
+            columns = 100
+            lines = 30
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.focus.size(), Some((100, 30)));
+    }
+
+    #[test]
+    fn focus_size_needs_both() {
+        let config: Config = toml::from_str(
+            r#"
+            [focus]
+            columns = 100
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.focus.size(), None);
     }
 
     #[test]

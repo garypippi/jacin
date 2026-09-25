@@ -1,7 +1,7 @@
 //! Layout calculation and constants for the unified popup
 
 use crate::neovim::Mode;
-use crate::state::WindowView;
+use crate::state::{FloatView, StyledCell, WindowView};
 
 use super::text_render::TextRenderer;
 use super::theme::Theme;
@@ -19,9 +19,13 @@ pub(crate) const SCROLLBAR_WIDTH: f32 = 8.0;
 pub(crate) const SECTION_SEPARATOR_HEIGHT: f32 = 1.0;
 /// Maximum window-grid rows shown in the popup
 pub(crate) const MAX_GRID_ROWS: usize = 8;
-/// Popup size limits (the SHM pool holds two buffers of the maximum size)
+/// Popup size limits (the SHM pool holds two buffers of the maximum size);
+/// focus mode has its own, from the screen size
 pub(crate) const MAX_POPUP_WIDTH: u32 = 580;
 pub(crate) const MAX_POPUP_HEIGHT: u32 = 450;
+/// Panel rows focus mode leaves room for below the screen: recording,
+/// header and message (the candidates are drawn on the screen)
+pub(crate) const FOCUS_PANEL_ROWS: usize = 3;
 
 /// Mode strip along the left edge of the text
 pub(crate) const MODE_STRIP_X: f32 = 3.0;
@@ -53,6 +57,8 @@ pub struct PopupContent {
     /// Rows of Neovim's window grid (None until Neovim drew a window)
     pub window_view: Option<WindowView>,
     pub theme: Theme,
+    /// The window view is the whole screen (focus mode)
+    pub focus: bool,
 }
 
 /// Header row of the panel
@@ -198,9 +204,11 @@ pub(crate) fn scrollbar_thumb_geometry(
 /// Calculate layout dimensions and section positions (mirrored if `above`).
 ///
 /// `mono_renderer` measures the recording label, the header and the window grid.
+/// The popup is at most `max_size` (width, height).
 pub(crate) fn calculate_layout(
     content: &PopupContent,
     above: bool,
+    max_size: (u32, u32),
     renderer: &mut TextRenderer,
     mono_renderer: &mut TextRenderer,
 ) -> Layout {
@@ -267,7 +275,7 @@ pub(crate) fn calculate_layout(
     };
 
     let natural = PADDING * 2.0 + text_height + separator + panel_height;
-    let height = (natural.ceil() as u32).clamp(30, MAX_POPUP_HEIGHT);
+    let height = (natural.ceil() as u32).clamp(30, max_size.1);
 
     // Top to bottom: text, separator, panel (below the cursor), or
     // panel, separator, text (above it)
@@ -281,7 +289,7 @@ pub(crate) fn calculate_layout(
 
     // Align width to 4 bytes for wl_shm
     let width = ((max_width.ceil() as u32) + 3) & !3;
-    let width = width.clamp(100, MAX_POPUP_WIDTH);
+    let width = width.clamp(100, max_size.0);
 
     Layout {
         width,
@@ -297,9 +305,182 @@ pub(crate) fn calculate_layout(
     }
 }
 
+/// zindex of the popup menu (Neovim draws its own at 100)
+const PUM_ZINDEX: u64 = 100;
+
+/// The completion menu as a float next to the completed word at screen
+/// `at` (row, col), on a screen of `size` (rows, cols): below the word,
+/// above it when it doesn't fit below. Like Neovim's own menu, with a
+/// scrollbar column when not every item fits.
+pub(crate) fn popupmenu_float(
+    items: &[String],
+    selected: Option<usize>,
+    at: (usize, usize),
+    size: (usize, usize),
+    theme: &Theme,
+) -> Option<FloatView> {
+    let (rows, cols) = size;
+    let visible = MAX_VISIBLE_CANDIDATES.min(items.len());
+    if visible == 0 || cols == 0 {
+        return None;
+    }
+    let first = selected
+        .map_or(0, |s| (s + 1).saturating_sub(visible))
+        .min(items.len() - visible);
+    let has_scrollbar = items.len() > visible;
+
+    // A space on either side of the widest item (all items: no jitter while scrolling)
+    let text_width = items.iter().map(|i| display_width(i)).max().unwrap_or(0);
+    let width = (text_width + 2 + usize::from(has_scrollbar)).min(cols);
+    let text_cols = width - usize::from(has_scrollbar);
+    let col = at.1.saturating_sub(1).min(cols - width);
+    let below = at.0 + 1;
+    let row = if below + visible > rows && at.0 >= visible {
+        at.0 - visible
+    } else {
+        below
+    };
+
+    let (thumb_top, thumb_len) = if has_scrollbar {
+        let len = (visible * visible / items.len()).max(1);
+        let top = first * (visible - len) / (items.len() - visible);
+        (top, len)
+    } else {
+        (0, 0)
+    };
+    let rows = items[first..first + visible]
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let pair = if selected == Some(first + i) {
+                theme.pmenu_sel
+            } else {
+                theme.pmenu
+            };
+            let cell = |text: &str, bg: Rgba| StyledCell {
+                text: text.into(),
+                fg: Some(rgb(pair.fg)),
+                bg: Some(rgb(bg)),
+                reverse: false,
+                underline: false,
+            };
+            let mut cells = vec![cell(" ", pair.bg)];
+            for c in item.chars() {
+                let wide = is_wide(c);
+                if cells.len() + 1 + usize::from(wide) > text_cols {
+                    break;
+                }
+                cells.push(cell(&c.to_string(), pair.bg));
+                if wide {
+                    cells.push(cell("", pair.bg));
+                }
+            }
+            cells.resize_with(text_cols, || cell(" ", pair.bg));
+            if has_scrollbar {
+                let on_thumb = (thumb_top..thumb_top + thumb_len).contains(&i);
+                cells.push(cell(
+                    " ",
+                    if on_thumb {
+                        theme.thumb
+                    } else {
+                        theme.scrollbar
+                    },
+                ));
+            }
+            cells
+        })
+        .collect();
+    Some(FloatView {
+        row,
+        col,
+        rows,
+        zindex: PUM_ZINDEX,
+    })
+}
+
+fn rgb(c: Rgba) -> u32 {
+    (c.0 as u32) << 16 | (c.1 as u32) << 8 | c.2 as u32
+}
+
+/// Screen cells of `text`
+fn display_width(text: &str) -> usize {
+    text.chars().map(|c| 1 + usize::from(is_wide(c))).sum()
+}
+
+/// Double-width in a terminal grid (East Asian Wide/Fullwidth, roughly)
+fn is_wide(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pum(items: &[&str], selected: Option<usize>, at: (usize, usize)) -> FloatView {
+        let items: Vec<String> = items.iter().map(|s| s.to_string()).collect();
+        popupmenu_float(&items, selected, at, (20, 12), &Theme::default()).unwrap()
+    }
+
+    fn pum_texts(float: &FloatView) -> Vec<String> {
+        float
+            .rows
+            .iter()
+            .map(|r| r.iter().map(|c| c.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn popupmenu_goes_below_the_word_with_wide_chars_in_two_cells() {
+        let float = pum(&["漢字", "ab"], Some(1), (3, 5));
+        assert_eq!((float.row, float.col), (4, 4));
+        assert_eq!(pum_texts(&float), [" 漢字 ", " ab   "]);
+        assert_eq!(float.rows[0].len(), 6);
+        let sel = Theme::default().pmenu_sel.bg;
+        assert_eq!(float.rows[1][0].bg, Some(rgb(sel)));
+        assert_ne!(float.rows[0][0].bg, Some(rgb(sel)));
+    }
+
+    #[test]
+    fn popupmenu_goes_above_when_it_does_not_fit_below() {
+        let float = pum(&["a", "b", "c"], None, (18, 0));
+        assert_eq!((float.row, float.col), (15, 0));
+    }
+
+    #[test]
+    fn popupmenu_stays_on_the_screen_horizontally() {
+        let float = pum(&["abcdef"], None, (0, 10));
+        assert_eq!(float.col, 12 - 8);
+    }
+
+    #[test]
+    fn popupmenu_scrolls_to_the_selection_with_a_scrollbar() {
+        let items: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let items: Vec<&str> = items.iter().map(String::as_str).collect();
+        let float = pum(&items, Some(12), (0, 1));
+        assert_eq!(float.rows.len(), MAX_VISIBLE_CANDIDATES);
+        // The last cell is the scrollbar
+        assert_eq!(pum_texts(&float)[0], " 4   ");
+        assert_eq!(pum_texts(&float)[MAX_VISIBLE_CANDIDATES - 1], " 12  ");
+        let last = |r: usize| float.rows[r].last().unwrap().bg;
+        let theme = Theme::default();
+        assert!(float.rows.iter().all(|r| r.len() == 5));
+        assert!((0..MAX_VISIBLE_CANDIDATES).any(|r| last(r) == Some(rgb(theme.thumb))));
+        assert!((0..MAX_VISIBLE_CANDIDATES).any(|r| last(r) == Some(rgb(theme.scrollbar))));
+    }
 
     // --- scrollbar_thumb_geometry ---
 

@@ -208,6 +208,18 @@ pub struct CandidateInfo {
     /// Completion of the command line rather than of the buffer
     #[serde(default)]
     pub cmdline: bool,
+    /// Where Neovim would draw the menu: the completed word's first cell
+    /// (None for the command line)
+    #[serde(default)]
+    pub anchor: Option<PumAnchor>,
+}
+
+/// Grid position the popup menu belongs to (`popupmenu_show` row, col, grid)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PumAnchor {
+    pub grid: u64,
+    pub row: usize,
+    pub col: usize,
 }
 
 impl CandidateInfo {
@@ -216,7 +228,12 @@ impl CandidateInfo {
             candidates,
             selected,
             cmdline,
+            anchor: None,
         }
+    }
+
+    pub fn at(self, anchor: Option<PumAnchor>) -> Self {
+        Self { anchor, ..self }
     }
 
     pub fn empty() -> Self {

@@ -7,7 +7,7 @@ use calloop::{Interest, Mode as Trigger};
 use crate::State;
 use crate::model::Effect;
 use crate::neovim::{FromNeovim, Neovim, ReadStatus};
-use crate::ui::{Header, MAX_GRID_ROWS, PopupContent, Theme};
+use crate::ui::{Header, MAX_GRID_ROWS, PopupContent, Theme, popupmenu_float};
 
 impl State {
     /// Common cleanup shared by toggle-off and deactivate:
@@ -97,9 +97,31 @@ impl State {
         }
     }
 
+    /// Neovim UI size fitted to the popup, so long lines wrap at the popup
+    /// width and Neovim scrolls the window itself; the whole screen's size
+    /// in focus mode
+    fn ui_size(&self) -> Option<(usize, usize)> {
+        self.popup.as_ref().map(|popup| popup.ui_size(self.focus))
+    }
+
+    pub(crate) fn has_focus_size(&self) -> bool {
+        self.popup
+            .as_ref()
+            .is_some_and(|popup| popup.has_focus_size())
+    }
+
+    /// Switch focus mode: Neovim's UI takes the size of the shown screen
+    pub(crate) fn set_focus(&mut self, focus: bool) {
+        self.focus = focus;
+        if let (Some(size), Some(nvim)) = (self.ui_size(), self.nvim.as_mut()) {
+            nvim.resize_ui(size);
+        }
+        self.update_popup();
+    }
+
     /// Spawn Neovim and watch its stdout. Returns false if it failed.
     pub(crate) fn start_nvim(&mut self) -> bool {
-        let nvim = match Neovim::spawn(&self.config, self.ui_grid_size) {
+        let nvim = match Neovim::spawn(&self.config, self.ui_size()) {
             Ok(nvim) => nvim,
             Err(e) => {
                 log::error!("[NVIM] Failed to spawn Neovim: {e}");
@@ -270,31 +292,56 @@ impl State {
             (None, false) => Some(Header::ShowCmd(view.visible_showcmd().to_owned())),
             (None, true) => None,
         };
-        let candidates = view.visible_candidates().to_vec();
+        let theme = Theme::from_screen(&view.screen, self.config.appearance.opacity);
+        let mut candidates = view.visible_candidates().to_vec();
+        let mut selected = view.selected_candidate.filter(|_| !candidates.is_empty());
+        let screen = &view.screen;
+        let mut window_view = if self.focus {
+            screen.screen_view()
+        } else {
+            screen.window_view(MAX_GRID_ROWS)
+        };
+        match &window_view {
+            Some(v) => log::debug!(
+                "[POPUP] window grid: {} rows, cursor={:?} (visible={}, float={})",
+                v.rows.len(),
+                v.cursor,
+                v.cursor_visible,
+                v.cursor_on_float
+            ),
+            None => log::debug!("[POPUP] no window grid yet"),
+        }
+        // The whole screen is large: the menu goes next to the word, as
+        // Neovim would draw it, instead of the panel far from the cursor
+        if self.focus
+            && let (Some(v), Some(anchor), Some(global)) =
+                (window_view.as_mut(), view.candidates_anchor, screen.grid(1))
+            && let Some(at) = screen.screen_position(anchor.grid, anchor.row, anchor.col)
+            && let Some(float) = popupmenu_float(
+                &candidates,
+                selected,
+                at,
+                (global.height(), global.width()),
+                &theme,
+            )
+        {
+            v.floats.push(float);
+            v.floats.sort_by_key(|f| f.zindex);
+            candidates.clear();
+            selected = None;
+        }
         let content = PopupContent {
             mode: view.mode,
             header,
             message: view.transient_message.clone(),
-            selected: view.selected_candidate.filter(|_| !candidates.is_empty()),
+            selected,
             candidates,
             ime_enabled: self.model.ime.is_enabled(),
             recording: self.model.view.recording.clone(),
             rec_blink_on: self.animations.rec_blink.on,
-            theme: Theme::from_screen(&self.model.view.screen, self.config.appearance.opacity),
-            window_view: {
-                let view = self.model.view.screen.window_view(MAX_GRID_ROWS);
-                match &view {
-                    Some(v) => log::debug!(
-                        "[POPUP] window grid: {} rows, cursor={:?} (visible={}, float={})",
-                        v.rows.len(),
-                        v.cursor,
-                        v.cursor_visible,
-                        v.cursor_on_float
-                    ),
-                    None => log::debug!("[POPUP] no window grid yet"),
-                }
-                view
-            },
+            theme,
+            window_view,
+            focus: self.focus,
         };
         if let Some(ref mut popup) = self.popup {
             let qh = self.wayland.qh.clone();

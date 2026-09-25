@@ -57,6 +57,7 @@ jacin toggle   # Turn the IME on or off, and print the new state (on/off)
 jacin on       # Turn the IME on
 jacin off      # Turn the IME off
 jacin status   # Print whether the IME is on (for status bars)
+jacin focus    # Switch between the popup and focus mode, and print the new one (focus/popup)
 ```
 
 The commands talk to the running jacin over a socket in `$XDG_RUNTIME_DIR`, one per Wayland display. If no text field is focused when the IME is turned on, it takes effect on the next one.
@@ -73,6 +74,7 @@ The commands talk to the running jacin over a socket in `$XDG_RUNTIME_DIR`, one 
 - **Password fields**: keys go straight to the application while one is focused (see [Security](#security)).
 - **`:q`** quits the embedded Neovim and turns the IME off; the next toggle starts a new one.
 - **One window**: only the window with the cursor is shown, and only the main buffer is committed. Splits, tab pages and other buffers are closed or hidden again on each commit and when the IME is turned off.
+- **Focus mode**: `jacin focus` shows the whole Neovim screen in a larger popup — splits, tab pages, statusline and tabline — so you can open a note beside the text (`:vsplit memo.md`). The completion menu appears next to the cursor instead of in the panel. The commit still inserts only the main buffer, and the layout is reset as above. Focus mode stays on until `jacin focus` is run again, also across toggles. It needs its size in the config (`[focus]` below).
 
 ## Configuration
 
@@ -94,9 +96,13 @@ size = 16.0                    # Font size in pixels
 
 [appearance]
 opacity = 1.0             # Opacity of the popup background, 0.0 (transparent) to 1.0
+
+[focus]
+columns = 100             # Size of the screen in focus mode, in Neovim columns
+lines = 30                # and lines. Both required for focus mode; no default
 ```
 
-All fields are optional; omitted ones use the defaults noted in the comments (`keybinds`, `behavior` and `appearance` values above are the defaults, except `stash_register`).
+All fields are optional; omitted ones use the defaults noted in the comments (`keybinds`, `behavior` and `appearance` values above are the defaults, except `stash_register`; `focus` values are examples). Focus mode is available only with `[focus]` `columns` and `lines` set, since the size that fits depends on your monitor and font.
 
 ### Neovim configuration for jacin
 

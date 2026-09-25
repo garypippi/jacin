@@ -35,7 +35,8 @@ const USAGE: &str = "\
 Usage: jacin [--clean]     Run the IME (--clean: Neovim without user config/plugins)
        jacin toggle        Turn the IME on or off
        jacin on | off      Turn the IME on / off
-       jacin status        Print whether the IME is on";
+       jacin status        Print whether the IME is on
+       jacin focus         Show the whole Neovim screen, or back to the popup";
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -61,6 +62,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(command) = command {
         match control::send(command) {
             Ok(reply) => {
+                if let Some(error) = reply.strip_prefix(control::ERROR_PREFIX) {
+                    eprintln!("jacin: {error}");
+                    std::process::exit(1);
+                }
                 println!("{reply}");
                 return Ok(());
             }
@@ -132,8 +137,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     // The popup surface is automatically positioned near the cursor by the compositor
-    let mut popup = if let (Some(renderer), Some(mono)) = (text_renderer, mono_renderer) {
-        match UnifiedPopup::new(&compositor, &input_method, &shm, &qh, renderer, mono) {
+    let popup = if let (Some(renderer), Some(mono)) = (text_renderer, mono_renderer) {
+        match UnifiedPopup::new(
+            &compositor,
+            &input_method,
+            &shm,
+            &qh,
+            renderer,
+            mono,
+            &config.focus,
+        ) {
             Some(win) => {
                 log::info!("Unified popup window created (using input popup surface)");
                 Some(win)
@@ -147,11 +160,14 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Size Neovim's UI to what the popup can show, so long lines wrap at
-    // the popup width and Neovim scrolls the window itself
-    let ui_grid_size = popup.as_mut().map(|popup| popup.grid_ui_size());
-    if let Some((cols, rows)) = ui_grid_size {
-        log::info!("[IME] UI grid size: {}x{}", cols, rows);
+    if let Some(ref popup) = popup {
+        let (cols, rows) = popup.ui_size(false);
+        if popup.has_focus_size() {
+            let (focus_cols, focus_rows) = popup.ui_size(true);
+            log::info!("[IME] UI grid size: {cols}x{rows} (focus: {focus_cols}x{focus_rows})");
+        } else {
+            log::info!("[IME] UI grid size: {cols}x{rows} (focus mode not configured)");
+        }
     }
 
     let mut event_loop: EventLoop<'static, State> = EventLoop::try_new()?;
@@ -172,11 +188,11 @@ fn main() -> anyhow::Result<()> {
         config: config.clone(),
         nvim: None,
         nvim_write_token: None,
-        ui_grid_size,
         popup,
         repeat_timer_token: None,
         animation_timer_token: None,
         popup_dirty: false,
+        focus: false,
     };
 
     state.loop_signal = Some(event_loop.get_signal());
@@ -210,12 +226,19 @@ fn main() -> anyhow::Result<()> {
                             continue;
                         };
                         let enabled = state.model.ime.is_enabled();
-                        let enabled = match command {
-                            control::Command::Status => enabled,
-                            _ => state.set_ime_enabled(command.target(enabled)),
+                        let reply = match command {
+                            control::Command::Status => control::reply(enabled),
+                            control::Command::Focus if !state.has_focus_size() => {
+                                control::FOCUS_UNSET
+                            }
+                            control::Command::Focus => {
+                                state.set_focus(!state.focus);
+                                if state.focus { "focus" } else { "popup" }
+                            }
+                            _ => control::reply(state.set_ime_enabled(command.target(enabled))),
                         };
-                        log::debug!("[CONTROL] {command:?} -> {}", control::reply(enabled));
-                        let _ = writeln!(stream, "{}", control::reply(enabled));
+                        log::debug!("[CONTROL] {command:?} -> {reply}");
+                        let _ = writeln!(stream, "{reply}");
                     }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                     Err(e) => {
@@ -354,8 +377,6 @@ pub struct State {
     pub(crate) nvim: Option<Neovim>,
     // Source flushing requests to Neovim's stdin (only while the pipe is full)
     pub(crate) nvim_write_token: Option<RegistrationToken>,
-    // Neovim UI size fitted to the popup (re-applied on respawn)
-    pub(crate) ui_grid_size: Option<(usize, usize)>,
     // Unified popup window (Neovim window grid, mode, candidates)
     pub(crate) popup: Option<UnifiedPopup>,
     // On-demand timer tokens (None = timer not running)
@@ -363,4 +384,7 @@ pub struct State {
     pub(crate) animation_timer_token: Option<RegistrationToken>,
     // Popup redraw requested; rendered once at the end of the loop iteration
     pub(crate) popup_dirty: bool,
+    /// Show the whole Neovim screen (splits, tabs, statusline) instead of
+    /// the text window
+    pub(crate) focus: bool,
 }

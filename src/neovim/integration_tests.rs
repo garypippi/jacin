@@ -429,6 +429,21 @@ fn resized_ui_wraps_long_line_in_window_view() {
     probe.shutdown();
 }
 
+/// Focus mode resizes the UI: the whole screen takes the new size
+#[test]
+#[ignore]
+fn resize_ui_resizes_the_screen() {
+    let mut probe = Probe::spawn_with(true, Some((20, 9)));
+    probe.nvim.resize_ui((30, 12));
+    probe.wait("resized screen", |m| {
+        m.view
+            .screen
+            .screen_view()
+            .is_some_and(|view| view.rows.len() == 12 && view.rows.iter().all(|r| r.len() == 30))
+    });
+    probe.shutdown();
+}
+
 /// A float opened with focus (e.g. a dictionary registration window) is
 /// overlaid on the text window, with the cursor drawn in it.
 #[test]

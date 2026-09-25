@@ -31,7 +31,7 @@ use rpc::{Message, Rpc};
 
 pub use mode::Mode;
 pub use process::ReadStatus;
-pub use protocol::{FromNeovim, GridCell, GridEvent, HlAttr};
+pub use protocol::{FromNeovim, GridCell, GridEvent, HlAttr, PumAnchor};
 pub use rpc::DecodeError;
 
 /// Keys queued beyond this are dropped (Neovim is not keeping up)
@@ -135,6 +135,15 @@ impl Neovim {
             nvim.init_request("nvim_command", vec!["startinsert".into()], "startinsert");
         }
         Ok(nvim)
+    }
+
+    /// Resize the UI to `(columns, rows)`; Neovim redraws every grid
+    pub fn resize_ui(&mut self, (width, height): (usize, usize)) {
+        self.request(
+            "nvim_ui_try_resize",
+            vec![width.into(), height.into()],
+            Pending::Other("nvim_ui_try_resize"),
+        );
     }
 
     pub fn read_fd(&self) -> BorrowedFd<'_> {

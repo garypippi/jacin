@@ -7,8 +7,8 @@
 use std::time::{Duration, Instant};
 
 use super::{BufferMirror, Screen};
-use crate::neovim::Mode;
 use crate::neovim::protocol::PendingState;
+use crate::neovim::{Mode, PumAnchor};
 
 /// How long a transient message stays visible before auto-clearing (counted
 /// from when the command line closes, if one is shown)
@@ -40,6 +40,8 @@ pub struct NvimView {
     pub selected_candidate: Option<usize>,
     /// The candidates complete the command line
     candidates_for_cmdline: bool,
+    /// Where Neovim would draw the menu (None for the command line)
+    pub candidates_anchor: Option<PumAnchor>,
     /// Active command line (None when not in command-line mode)
     pub cmdline: Option<Cmdline>,
     /// Pending command keys ('showcmd')
@@ -79,10 +81,15 @@ impl NvimView {
         self.candidates_for_cmdline = cmdline;
     }
 
+    pub fn set_candidates_anchor(&mut self, anchor: Option<PumAnchor>) {
+        self.candidates_anchor = anchor;
+    }
+
     pub fn clear_candidates(&mut self) {
         self.candidates.clear();
         self.selected_candidate = None;
         self.candidates_for_cmdline = false;
+        self.candidates_anchor = None;
     }
 
     /// Pending command keys to show: only while Neovim waits for more keys
