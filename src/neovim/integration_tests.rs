@@ -45,8 +45,12 @@ impl Probe {
 
     /// Like `spawn`, with the UI sized cols x rows.
     fn spawn_with(startinsert: bool, ui_size: Option<(usize, usize)>) -> Self {
-        let nvim = Neovim::spawn(&clean_config_with_startinsert(startinsert), ui_size)
-            .expect("failed to spawn neovim");
+        Self::spawn_config(&clean_config_with_startinsert(startinsert), ui_size)
+    }
+
+    /// Like `spawn_with`, with a given config.
+    fn spawn_config(config: &Config, ui_size: Option<(usize, usize)>) -> Self {
+        let nvim = Neovim::spawn(config, ui_size).expect("failed to spawn neovim");
         let mut model = Model::new();
         model.ime.start_enabling();
         model.ime.complete_enabling();
@@ -204,7 +208,14 @@ impl Probe {
 
     /// Reset Neovim like IME off (`insert: false`) or a commit / enabling
     fn reset(&mut self, insert: bool) {
-        let events = self.nvim.reset(insert, self.model.view.mode);
+        let events = self.nvim.reset(insert, false, self.model.view.mode);
+        self.apply(events);
+    }
+
+    /// Reset like a focus change: the text thrown away goes to the stash
+    /// register, if one is set
+    fn reset_with_stash(&mut self) {
+        let events = self.nvim.reset(false, true, self.model.view.mode);
         self.apply(events);
     }
 
@@ -470,6 +481,47 @@ fn g_jacin_is_set_for_user_config() {
         }),
         "expected `:echo g:jacin` to print 1"
     );
+
+    probe.shutdown();
+}
+
+/// Text thrown away by a focus change is kept in the stash register; an
+/// empty buffer thrown away later doesn't overwrite it
+#[test]
+#[ignore]
+fn reset_with_stash_keeps_the_text_in_the_stash_register() {
+    let mut config = clean_config_with_startinsert(true);
+    config.behavior.stash_register = Some('j');
+    let mut probe = Probe::spawn_config(&config, None);
+    probe.keys(&["a", "<CR>", "b"]);
+    probe.wait_buffer("a\nb");
+
+    probe.reset_with_stash();
+    probe.wait("empty normal mode", |m| {
+        m.view.buffer.text().is_empty() && m.view.mode == Mode::Normal
+    });
+    probe.reset_with_stash();
+    probe.reset_and_wait(true);
+
+    probe.keys(&["<C-r>", "j"]);
+    probe.wait_buffer("a\nb");
+
+    probe.shutdown();
+}
+
+/// Without a stash register, text thrown away by a focus change is not kept
+#[test]
+#[ignore]
+fn reset_with_stash_without_a_stash_register_keeps_nothing() {
+    let mut probe = Probe::spawn(true);
+    probe.keys(&["a"]);
+    probe.wait_buffer("a");
+
+    probe.reset_with_stash();
+    probe.reset_and_wait(true);
+
+    probe.keys(&["<C-r>", "j", "b"]);
+    probe.wait_buffer("b");
 
     probe.shutdown();
 }

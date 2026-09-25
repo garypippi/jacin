@@ -68,6 +68,7 @@ The commands talk to the running jacin over a socket in `$XDG_RUNTIME_DIR`, one 
 - **Toggle off**: whatever is left in the buffer is committed first.
 - **New lines**: `<CR>` inserts a newline in the buffer; the commit inserts all lines joined with `\n`. In terminals a committed newline acts like Enter.
 - **Empty buffer**: `<CR>`, `<BS>` and the commit key go to the application, so you can submit a form or delete text without turning the IME off.
+- **Leaving a text field**: moving focus elsewhere (another window, workspace or field) clears the buffer without committing it. With `stash_register = "j"` in the config, the text is kept in register `j`, so `<C-r>j` in insert mode (or `"jp`) puts it back.
 - **Paste**: use Neovim's `<C-r>+` in insert mode (needs a Neovim clipboard provider such as `wl-clipboard`).
 - **Password fields**: keys go straight to the application while one is focused (see [Security](#security)).
 - **`:q`** quits the embedded Neovim and turns the IME off; the next toggle starts a new one.
@@ -84,6 +85,7 @@ commit = "<C-CR>"         # Commit the buffer (all lines) to the application
 [behavior]
 startinsert = true        # true: start in insert mode, false: start in normal mode
 recording_blink = true    # Blink the REC indicator while recording a macro
+stash_register = "j"      # Keep text lost to a focus change in this register (a letter). Default: none
 
 [font]
 family = "Noto Sans CJK JP"   # Proportional font (candidates/messages). Default: fontconfig auto
@@ -94,7 +96,7 @@ size = 16.0                    # Font size in pixels
 opacity = 1.0             # Opacity of the popup background, 0.0 (transparent) to 1.0
 ```
 
-All fields are optional; omitted ones use the defaults noted in the comments (`keybinds`, `behavior` and `appearance` values above are the defaults).
+All fields are optional; omitted ones use the defaults noted in the comments (`keybinds`, `behavior` and `appearance` values above are the defaults, except `stash_register`).
 
 ### Neovim configuration for jacin
 

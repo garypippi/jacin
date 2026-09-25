@@ -60,8 +60,9 @@ impl State {
             }
             self.reset_ime_state();
             // Clear Neovim buffer (must clear here, not rely on Deactivate —
-            // rapid re-enable can happen before Deactivate fires)
-            self.clear_nvim_buffer();
+            // rapid re-enable can happen before Deactivate fires); with no
+            // field to commit to, the text goes to the stash register
+            self.clear_nvim_buffer(!self.wayland.active);
             self.model.ime.disable();
         }
         self.model.ime.is_enabled()
@@ -206,25 +207,31 @@ impl State {
     /// Reset Neovim to an empty buffer in normal mode, or insert mode if
     /// `insert` (after keys already queued)
     pub(crate) fn reset_nvim(&mut self, insert: bool) {
+        self.reset_nvim_with(insert, false);
+    }
+
+    fn reset_nvim_with(&mut self, insert: bool, stash: bool) {
         let mode = self.model.view.mode;
         let Some(nvim) = self.nvim.as_mut() else {
             return;
         };
-        let events = nvim.reset(insert, mode);
+        let events = nvim.reset(insert, stash, mode);
         for event in events {
             self.handle_nvim_message(event);
         }
     }
 
     /// Clear Neovim's buffer, dropping keys not processed yet (they were
-    /// typed for the text being thrown away)
-    pub(crate) fn clear_nvim_buffer(&mut self) {
+    /// typed for the text being thrown away). With `stash` (the text was not
+    /// committed, e.g. focus moved away), it goes to the stash register
+    /// (`stash_register` in the config), if one is set.
+    pub(crate) fn clear_nvim_buffer(&mut self, stash: bool) {
         if let Some(nvim) = self.nvim.as_mut() {
             for seq in nvim.discard_queued_keys() {
                 self.model.sent_keys.remove(seq);
             }
         }
-        self.reset_nvim(false);
+        self.reset_nvim_with(false, stash);
     }
 
     /// Request a popup redraw. Rendering is deferred to the end of the

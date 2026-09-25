@@ -224,8 +224,9 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                         // Clear local state (don't send Wayland protocol requests
                         // while deactivated — compositor clears preedit automatically)
                         state.reset_ime_state();
-                        // Clear Neovim buffer to reset state for next activation
-                        state.clear_nvim_buffer();
+                        // Clear Neovim buffer to reset state for next
+                        // activation; the text goes to the stash register
+                        state.clear_nvim_buffer(true);
                     }
                 }
 
@@ -261,7 +262,9 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                         // text was being written
                         if state.wayland.keyboard_grab.is_some() {
                             state.reset_ime_state();
-                            state.clear_nvim_buffer();
+                            // Not kept: it may be a password typed before
+                            // the field said so (registers go to shada)
+                            state.clear_nvim_buffer(false);
                         }
                     } else if (pending_activate || was_sensitive)
                         && state.wayland.keyboard_grab.is_none()

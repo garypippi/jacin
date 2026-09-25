@@ -69,14 +69,14 @@ tests/fixtures/              # FromNeovim message sequences replayed through Mod
 - **ImeMode state machine**: Disabled → Enabling → Enabled (explicit states, not boolean flags)
 - **Single thread**: Neovim's stdout is a calloop source; messages are handled one at a time, each one's events reduced before the next; nothing waits for Neovim
 - **Typed Neovim protocol**: Serde-based `FromNeovim` messages into `Model::reduce`
-- **No Lua / autocmds**: jacin only calls the Neovim API (`nvim_input`, `nvim_get_mode`, `nvim_buf_get_lines`, `reg_recording()`; resets with `:fclose!`, `nvim_buf_set_lines`, `:startinsert`); state comes from UI events and buffer events
+- **No Lua / autocmds**: jacin only calls the Neovim API (`nvim_input`, `nvim_get_mode`, `nvim_buf_get_lines`, `reg_recording()`; resets with `:fclose!`, `nvim_buf_set_lines`, `:startinsert`, and `setreg()` to the configured stash register for text thrown away by a focus change); state comes from UI events and buffer events
 - **Key queue**: `KeyProcessor` handles one key at a time; insert mode is fire-and-forget (`nvim_input`; display follows redraw/buffer events); other modes query `nvim_get_mode` after the key's `nvim_input` is answered; non-fast requests only after `nvim_get_mode` shows Neovim isn't blocked in getchar
 - **One mode**: `NvimView.mode` (`Mode` enum) from `mode_change` and `nvim_get_mode`, last arrival wins
 - **No plugin-specific handling**: decisions use only generic Vim state (mode, blocking)
 - **nvim_ui_attach extensions**: `ext_cmdline`, `ext_popupmenu`, `ext_messages`, `ext_multigrid`, `mode_change` — Neovim's UI protocol drives command-line, completion, messages, mode, and the window display
 - **Display**: popup renders the window grid from ext_multigrid events (`Screen`/`WindowView`); the app gets no preedit; Neovim is started with `g:jacin = 1` for user config
 - **Multiline**: `<CR>` is a native newline; commit key joins all lines with `\n`; IME off commits the `nvim_buf_attach` mirror (`BufferMirror`); `<CR>`/`<BS>`/commit pass through only when the whole buffer is empty
-- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, font, startinsert, recording_blink, popup opacity (unknown keys are ignored)
+- **Config**: TOML at `~/.config/jacin/config.toml` — commit keybind, font, startinsert, recording_blink, stash_register, popup opacity (unknown keys are ignored)
 - **Colors**: the popup follows the colorscheme (`default_colors_set`, `hl_group_set`); built-in One Dark-like colors only where Neovim sets none
 
 ## Architecture

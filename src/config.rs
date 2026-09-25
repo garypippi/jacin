@@ -50,6 +50,10 @@ pub struct Behavior {
     /// If true, the REC indicator dot blinks while recording a macro.
     /// Default: true.
     pub recording_blink: bool,
+    /// Register that keeps the text thrown away without a commit (focus
+    /// moved away), e.g. "j". A letter; uppercase appends.
+    /// Default: none (the text is lost).
+    pub stash_register: Option<char>,
 }
 
 impl Default for Behavior {
@@ -57,6 +61,7 @@ impl Default for Behavior {
         Self {
             startinsert: true,
             recording_blink: true,
+            stash_register: None,
         }
     }
 }
@@ -135,6 +140,19 @@ mod tests {
         assert!(config.font.mono_family.is_none());
         assert!(config.font.size.is_none());
         assert_eq!(config.appearance.opacity, 1.0);
+        assert!(config.behavior.stash_register.is_none());
+    }
+
+    #[test]
+    fn stash_register() {
+        let config: Config = toml::from_str(
+            r#"
+            [behavior]
+            stash_register = "j"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.behavior.stash_register, Some('j'));
     }
 
     #[test]

@@ -71,6 +71,8 @@ pub struct Neovim {
     held: VecDeque<Req>,
     /// Handle of the attached buffer (from its line events)
     main_buffer: Option<Value>,
+    /// Register for the text a reset throws away (`stash`)
+    stash_register: Option<char>,
 }
 
 impl Neovim {
@@ -89,6 +91,7 @@ impl Neovim {
             unanswered: 0,
             held: VecDeque::new(),
             main_buffer: None,
+            stash_register: stash_register(config),
         };
 
         for command in [
@@ -218,9 +221,11 @@ impl Neovim {
 
     /// Return to normal mode with an empty buffer and no floating windows,
     /// then enter insert mode if `insert` (after queued keys, not
-    /// acknowledged)
-    pub fn reset(&mut self, insert: bool, mode: Mode) -> Vec<FromNeovim> {
-        let cmds = self.keys.push(Item::Reset { insert }, &Ctx { mode });
+    /// acknowledged). With `stash`, the text thrown away goes to the stash
+    /// register, if one is set.
+    pub fn reset(&mut self, insert: bool, stash: bool, mode: Mode) -> Vec<FromNeovim> {
+        let stash = stash && self.stash_register.is_some();
+        let cmds = self.keys.push(Item::Reset { insert, stash }, &Ctx { mode });
         self.run(cmds)
     }
 
@@ -372,6 +377,17 @@ impl Neovim {
                 vec!["silent! tabonly! | silent! only!".into()],
                 "tabonly! | only!",
             ),
+            Call::StashBuffer => {
+                let Some(register) = self.stash_register else {
+                    return;
+                };
+                // Charwise, so `<C-r>` inserts it without a trailing
+                // newline; an empty buffer doesn't overwrite the register
+                let command = format!(
+                    "if getline(1, '$') != [''] | call setreg('{register}', getline(1, '$'), 'v') | endif"
+                );
+                ("nvim_command", vec![command.into()], "setreg")
+            }
             Call::ShowMainBuffer => (
                 "nvim_win_set_buf",
                 vec![0.into(), self.buffer(Buffer::Main)],
@@ -472,6 +488,17 @@ fn strings(value: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The configured stash register, if it is a letter (a named register;
+/// others are read-only or change on their own)
+fn stash_register(config: &Config) -> Option<char> {
+    let register = config.behavior.stash_register?;
+    if !register.is_ascii_alphabetic() {
+        log::warn!("[CONFIG] stash_register {register:?} is not a letter (a-z, A-Z): ignored");
+        return None;
+    }
+    Some(register)
 }
 
 /// nvim_buf_lines_event: [buf, changedtick, firstline, lastline, linedata, more]

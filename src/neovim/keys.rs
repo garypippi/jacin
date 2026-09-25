@@ -24,8 +24,9 @@ pub enum Item {
     /// Return to normal mode, close floating windows and empty the main
     /// buffer, then enter insert mode if `insert` (not acknowledged).
     /// Done with the API rather than keys like `<Esc>ggdG`, which depend on
-    /// mappings and on the main window having the cursor.
-    Reset { insert: bool },
+    /// mappings and on the main window having the cursor. With `stash`, the
+    /// text thrown away goes to the stash register first.
+    Reset { insert: bool, stash: bool },
 }
 
 /// State owned by the model that key processing reads
@@ -76,6 +77,9 @@ pub enum Call {
     ShowMainBuffer,
     /// Close other tab pages and windows (jacin shows one window)
     CloseOtherWindows,
+    /// Copy the main buffer to the stash register unless it is empty (the
+    /// main buffer is shown)
+    StashBuffer,
     /// `nvim_buf_set_lines` emptying the main buffer
     ClearBuffer,
     /// `:startinsert`
@@ -128,6 +132,7 @@ enum Wait {
     /// to leave the mode so far.
     ResetLeave {
         insert: bool,
+        stash: bool,
         tries: u8,
     },
     /// Mode after a reset's calls
@@ -214,9 +219,13 @@ impl KeyProcessor {
         while self.current.is_none() {
             match self.queue.pop_front() {
                 Some(Item::Key { seq, key }) => self.start_key(seq, key, mode, out),
-                Some(Item::Reset { insert }) => {
-                    log::debug!("[KEYS] Reset (insert: {insert})");
-                    let wait = Wait::ResetLeave { insert, tries: 0 };
+                Some(Item::Reset { insert, stash }) => {
+                    log::debug!("[KEYS] Reset (insert: {insert}, stash: {stash})");
+                    let wait = Wait::ResetLeave {
+                        insert,
+                        stash,
+                        tries: 0,
+                    };
                     self.request(None, wait, Req::GetMode, out);
                 }
                 None => break,
@@ -458,7 +467,10 @@ impl KeyProcessor {
                 // Here rather than by the model, and ahead of the queue, so
                 // keys typed after the commit key (already queued) are not
                 // cleared
-                self.queue.push_front(Item::Reset { insert: true });
+                self.queue.push_front(Item::Reset {
+                    insert: true,
+                    stash: false,
+                });
             }
             LineKey::Backspace => out.push(Cmd::Input("<BS>".into())),
             LineKey::Enter => out.push(Cmd::Input("<CR>".into())),
@@ -473,7 +485,12 @@ impl KeyProcessor {
             log::warn!("[KEYS] Reset: unexpected reply {reply:?} in {wait:?}");
             return;
         };
-        let Wait::ResetLeave { insert, tries } = wait else {
+        let Wait::ResetLeave {
+            insert,
+            stash,
+            tries,
+        } = wait
+        else {
             if wait != Wait::ResetDone {
                 log::warn!("[KEYS] Reset: unexpected mode reply in {wait:?}");
             }
@@ -491,6 +508,7 @@ impl KeyProcessor {
                 out.push(Cmd::Input(keys.into()));
                 let wait = Wait::ResetLeave {
                     insert,
+                    stash,
                     tries: tries + 1,
                 };
                 self.request(None, wait, Req::GetMode, out);
@@ -505,6 +523,9 @@ impl KeyProcessor {
         }
         out.push(Cmd::Call(Call::CloseFloats));
         out.push(Cmd::Call(Call::ShowMainBuffer));
+        if stash {
+            out.push(Cmd::Call(Call::StashBuffer));
+        }
         out.push(Cmd::Call(Call::CloseOtherWindows));
         out.push(Cmd::Call(Call::ClearBuffer));
         if insert {
@@ -1042,7 +1063,13 @@ mod tests {
     }
 
     fn reset(h: &mut Harness, insert: bool) -> Vec<Cmd> {
-        let cmds = h.kp.push(Item::Reset { insert }, &h.ctx());
+        let cmds = h.kp.push(
+            Item::Reset {
+                insert,
+                stash: false,
+            },
+            &h.ctx(),
+        );
         h.apply(cmds)
     }
 
@@ -1058,6 +1085,35 @@ mod tests {
         }
         cmds.push(get_mode());
         cmds
+    }
+
+    #[test]
+    fn reset_with_stash_copies_the_main_buffer_before_clearing_it() {
+        let mut h = Harness::new(Mode::Normal);
+        let cmds = h.kp.push(
+            Item::Reset {
+                insert: false,
+                stash: true,
+            },
+            &h.ctx(),
+        );
+        assert_eq!(h.apply(cmds), vec![get_mode()]);
+        assert_eq!(
+            h.mode(Mode::Normal, false),
+            vec![Cmd::SetMode(Mode::Normal), input("<C-\\><C-n>"), get_mode()]
+        );
+        assert_eq!(
+            h.mode(Mode::Normal, false),
+            vec![
+                Cmd::SetMode(Mode::Normal),
+                call(Call::CloseFloats),
+                call(Call::ShowMainBuffer),
+                call(Call::StashBuffer),
+                call(Call::CloseOtherWindows),
+                call(Call::ClearBuffer),
+                get_mode(),
+            ]
+        );
     }
 
     #[test]
