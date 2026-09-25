@@ -277,11 +277,13 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
 
                             let enabled_now = state.model.ime.complete_enabling();
                             if enabled_now || state.model.ime.is_fully_enabled() {
-                                state.keyboard.mark_ready();
                                 state.wayland.refresh_cursor_rectangle();
                                 // A keymap sent again while enabled leaves
-                                // Neovim as it is
+                                // Neovim and the keys as they are (Hyprland
+                                // sends one just before the first key after
+                                // a focus change)
                                 if enabled_now {
+                                    state.keyboard.mark_ready();
                                     // The mode shown follows from Neovim's reply
                                     state.reset_nvim(state.config.behavior.startinsert);
                                 }
