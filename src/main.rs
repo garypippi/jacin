@@ -1,9 +1,8 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{ErrorKind, Write};
 
 use calloop::{
-    EventLoop, LoopHandle, LoopSignal, RegistrationToken,
-    ping::make_ping,
+    EventLoop, Interest, LoopHandle, LoopSignal, Mode as Trigger, PostAction, RegistrationToken,
+    generic::Generic,
     signals::{Signal, Signals},
     timer::{TimeoutAction, Timer},
 };
@@ -17,6 +16,7 @@ use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manage
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1;
 
 mod config;
+mod control;
 mod coordinator;
 mod dispatch;
 mod input;
@@ -31,13 +31,50 @@ use neovim::Neovim;
 use state::{Animations, KeyRepeatState, KeyboardState, WaylandState};
 use ui::{TextRenderer, UnifiedPopup};
 
+const USAGE: &str = "\
+Usage: jacin [--clean]     Run the IME (--clean: Neovim without user config/plugins)
+       jacin toggle        Turn the IME on or off
+       jacin on | off      Turn the IME on / off
+       jacin status        Print whether the IME is on";
+
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let mut config = config::Config::load();
-    if std::env::args().any(|a| a == "--clean") {
-        config.clean = true;
+    let mut clean = false;
+    let mut command = None;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--clean" => clean = true,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            _ => match control::Command::parse(&arg) {
+                Some(c) if command.is_none() => command = Some(c),
+                _ => {
+                    eprintln!("jacin: unexpected argument '{arg}'\n\n{USAGE}");
+                    std::process::exit(2);
+                }
+            },
+        }
     }
+    if let Some(command) = command {
+        match control::send(command) {
+            Ok(reply) => {
+                println!("{reply}");
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("jacin: {e:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let (control_listener, control_path) = control::listen()?;
+
+    let mut config = config::Config::load();
+    config.clean = clean;
 
     let conn = Connection::connect_to_env()?;
     log::info!("Connected to Wayland display");
@@ -132,7 +169,6 @@ fn main() -> anyhow::Result<()> {
         model: Model::new(),
         animations: Animations::new(),
         pending_exit: false,
-        toggle_flag: Arc::new(AtomicBool::new(false)),
         config: config.clone(),
         nvim: None,
         nvim_write_token: None,
@@ -162,24 +198,35 @@ fn main() -> anyhow::Result<()> {
             }
         })?;
 
-    // Set up SIGUSR1 for IME toggle (triggered by: pkill -SIGUSR1 jacin)
-    // Use a ping to wake up the event loop when signal arrives
-    let (ping, ping_source) = make_ping()?;
-    let toggle_flag_clone = state.toggle_flag.clone();
-
-    // Register signal handler that sets flag AND pings the event loop
-    let ping_clone = ping.clone();
-    unsafe {
-        signal_hook::low_level::register(signal_hook::consts::SIGUSR1, move || {
-            toggle_flag_clone.store(true, Ordering::SeqCst);
-            ping_clone.ping();
-        })?;
-    }
-
-    // Add ping source to event loop (just to wake it up, we handle toggle in the callback)
-    event_loop
-        .handle()
-        .insert_source(ping_source, |_, _, _| {})?;
+    // `jacin toggle` and friends
+    event_loop.handle().insert_source(
+        Generic::new(control_listener, Interest::READ, Trigger::Level),
+        |_, listener, state| {
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let Some(command) = control::read_command(&stream) else {
+                            log::warn!("[CONTROL] Unreadable command");
+                            continue;
+                        };
+                        let enabled = state.model.ime.is_enabled();
+                        let enabled = match command {
+                            control::Command::Status => enabled,
+                            _ => state.set_ime_enabled(command.target(enabled)),
+                        };
+                        log::debug!("[CONTROL] {command:?} -> {}", control::reply(enabled));
+                        let _ = writeln!(stream, "{}", control::reply(enabled));
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => {
+                        log::error!("[CONTROL] accept failed: {e}");
+                        break;
+                    }
+                }
+            }
+            Ok(PostAction::Continue)
+        },
+    )?;
 
     // Small delay to let any pending key events (like Enter from "cargo run") clear
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -189,10 +236,6 @@ fn main() -> anyhow::Result<()> {
 
     let handle = event_loop.handle();
     event_loop.run(None, &mut state, |state| {
-        if state.toggle_flag.swap(false, Ordering::SeqCst) {
-            state.handle_ime_toggle();
-        }
-
         // Insert on-demand repeat timer when a key is held
         if state.repeat.has_key() && state.repeat_timer_token.is_none() {
             match handle.insert_source(
@@ -288,6 +331,7 @@ fn main() -> anyhow::Result<()> {
         window.destroy();
     }
 
+    let _ = std::fs::remove_file(&control_path);
     log::info!("Goodbye!");
 
     // Force clean exit to avoid any stuck keyboard state
@@ -305,7 +349,6 @@ pub struct State {
     pub(crate) model: Model,
     pub(crate) animations: Animations,
     pub(crate) pending_exit: bool,
-    pub(crate) toggle_flag: Arc<AtomicBool>,
     // Config (needed for Neovim respawn after :q)
     pub(crate) config: config::Config,
     pub(crate) nvim: Option<Neovim>,

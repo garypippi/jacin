@@ -32,28 +32,34 @@ This puts `jacin` in `~/.cargo/bin`.
 
 ## Setup
 
-Only one IME can bind `zwp_input_method_v2` at a time, so stop fcitx5, ibus, etc. first. Then start jacin with your session and bind a key that sends it `SIGUSR1` to toggle the IME.
+Only one IME can bind `zwp_input_method_v2` at a time, so stop fcitx5, ibus, etc. first. Then start jacin with your session and bind a key to `jacin toggle`.
 
 Hyprland (`hyprland.lua`):
 
 ```lua
 hl.exec_cmd("jacin")
-hl.bind("ALT + grave", hl.dsp.exec_cmd("pkill -USR1 jacin"))
+hl.bind("ALT + grave", hl.dsp.exec_cmd("jacin toggle"))
 ```
 
 Hyprland (`hyprland.conf`):
 
 ```ini
 exec-once = jacin
-bind = ALT, grave, exec, pkill -USR1 jacin
+bind = ALT, grave, exec, jacin toggle
 ```
 
-Command-line options:
+Commands:
 
 ```sh
-jacin          # Use your Neovim config and plugins
-jacin --clean  # Start Neovim without user config/plugins
+jacin          # Run the IME with your Neovim config and plugins
+jacin --clean  # Run the IME with Neovim without user config/plugins
+jacin toggle   # Turn the IME on or off, and print the new state (on/off)
+jacin on       # Turn the IME on
+jacin off      # Turn the IME off
+jacin status   # Print whether the IME is on (for status bars)
 ```
+
+The commands talk to the running jacin over a socket in `$XDG_RUNTIME_DIR`, one per Wayland display. If no text field is focused when the IME is turned on, it takes effect on the next one.
 
 ## Usage
 

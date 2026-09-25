@@ -28,7 +28,7 @@
 │    WaylandState  protocol handles, serial, virtual keyboard    │
 │                                                                │
 │  Calloop sources:                                              │
-│    WaylandSource, SIGINT/SIGTERM, SIGUSR1 ping (toggle),       │
+│    WaylandSource, SIGINT/SIGTERM, control socket (toggle),     │
 │    Neovim stdout (+ stdin while the pipe is full),             │
 │    repeat timer, animation timer (REC blink, message expiry)   │
 └──────────┬──────────────────────────────────────┬──────────────┘
@@ -189,13 +189,15 @@ then kills it.
 ### ImeMode (Axis 1)
 
 ```
-              SIGUSR1             keymap event
+           jacin on/toggle        keymap event
  Disabled ──────────> Enabling ──────────────> Enabled         
      ^                                             │
      │        disable() (toggle-off, Neovim exit)  │
      └─────────────────────────────────────────────┘
 ```
 
+- `jacin toggle|on|off|status` reach the running jacin over a UNIX socket (`$XDG_RUNTIME_DIR/jacin-$WAYLAND_DISPLAY.sock`, one line each way); a second jacin refuses to start while it answers
+- Enabling with no text field focused (or in a password field) takes no grab; the grab is taken on the next Activate
 - Commit keeps the IME enabled (the buffer is cleared and insert mode restored)
 - Deactivate/Activate cycle: Enabled → release grab → re-grab → Enabling → keymap → Enabled (state restored)
 - Activate/Deactivate are deferred to the `Done` event and processed together (deactivate first), so a window switch becomes a single release + re-grab
@@ -259,7 +261,7 @@ whenever the mode is the command line.
 |---|---|
 | WaylandState (protocol ops, serial) | ImeState (pure state machine) |
 | KeyboardState (XKB keymap) | NvimView, Model (pure logic) |
-| SIGUSR1 signal handling | KeyProcessor, rpc codec, redraw parsing |
+| Control socket | KeyProcessor, rpc codec, redraw parsing |
 | SHM buffer attach/commit | Config, TextRenderer, Layout |
 
 ## 5. Multiline

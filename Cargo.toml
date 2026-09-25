@@ -42,9 +42,6 @@ yeslogic-fontconfig-sys = "5"
 # Buffer management
 memmap2 = "0.9"
 
-# Signal handling
-signal-hook = "0.3"
-
 # Logging
 log = "0.4"
 env_logger = "0.11"

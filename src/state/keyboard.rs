@@ -39,6 +39,9 @@ pub struct KeyboardState {
     /// Whether this is a reactivation (skip debounce)
     pub is_reactivation: bool,
     pub mods: Modifiers,
+    /// Keys pressed since the grab started (a release of any other key
+    /// belongs to the application)
+    pressed_keys: HashSet<u32>,
 }
 
 impl KeyboardState {
@@ -56,6 +59,7 @@ impl KeyboardState {
             keymap_hash: None,
             is_reactivation: false,
             mods: Modifiers::default(),
+            pressed_keys: HashSet::new(),
         }
     }
 
@@ -158,8 +162,20 @@ impl KeyboardState {
         Some((keysym, utf8))
     }
 
-    /// Reset modifier state (call when releasing keyboard grab)
+    /// Record a key press or release from the grab. Returns false for a
+    /// release whose press came before the grab.
+    pub fn track_key(&mut self, key: u32, pressed: bool) -> bool {
+        if pressed {
+            self.pressed_keys.insert(key);
+            true
+        } else {
+            self.pressed_keys.remove(&key)
+        }
+    }
+
+    /// Reset modifier and pressed-key state (call when releasing keyboard grab)
     pub fn reset_modifiers(&mut self) {
+        self.pressed_keys.clear();
         self.ctrl_pressed = false;
         self.alt_pressed = false;
         self.mods = Modifiers::default();
@@ -168,6 +184,14 @@ impl KeyboardState {
     pub fn set_repeat_info(&mut self, rate: i32, delay: i32) {
         self.repeat_rate = rate;
         self.repeat_delay = delay;
+    }
+
+    /// Whether a key is a modifier (Shift, Control, Alt, Super, AltGr, ...)
+    pub fn is_modifier(&self, key: u32) -> bool {
+        self.xkb_state.as_ref().is_some_and(|state| {
+            let keycode = xkb::Keycode::new(key + 8);
+            is_modifier_keysym(state.key_get_one_sym(keycode).raw())
+        })
     }
 
     /// Check if a key should repeat according to XKB keymap
@@ -179,8 +203,35 @@ impl KeyboardState {
     }
 }
 
+/// Modifier keysyms: Shift_L..Hyper_R, the ISO level/group shifts and
+/// locks, Mode_switch
+fn is_modifier_keysym(raw: u32) -> bool {
+    matches!(raw, 0xffe1..=0xffee | 0xfe01..=0xfe13 | 0xff7e)
+}
+
 impl Default for KeyboardState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modifier_keysyms() {
+        for sym in [
+            xkb::Keysym::Alt_L,
+            xkb::Keysym::Control_R,
+            xkb::Keysym::Super_L,
+            xkb::Keysym::Shift_L,
+            xkb::Keysym::ISO_Level3_Shift,
+        ] {
+            assert!(is_modifier_keysym(sym.raw()), "{sym:?}");
+        }
+        for sym in [xkb::Keysym::Return, xkb::Keysym::q, xkb::Keysym::Escape] {
+            assert!(!is_modifier_keysym(sym.raw()), "{sym:?}");
+        }
     }
 }

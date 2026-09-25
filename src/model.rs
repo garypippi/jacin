@@ -16,9 +16,6 @@ pub enum Effect {
     CommitString(String),
     /// Forward a key to the application
     PassthroughKey(SentKey),
-    /// Drop a pending IME toggle request (Alt in the commit key <A-;>
-    /// also triggers SIGUSR1 — don't let it re-enable after commit)
-    CancelToggle,
     /// Neovim exited: release grab, drop backend
     NvimExited,
 }
@@ -53,11 +50,7 @@ impl Model {
             }
             FromNeovim::Commit(text) => {
                 self.view.clear_candidates();
-                vec![
-                    Effect::CommitString(text),
-                    Effect::CancelToggle,
-                    Effect::Render,
-                ]
+                vec![Effect::CommitString(text), Effect::Render]
             }
             FromNeovim::Candidates(info) => {
                 if !enabled {
@@ -291,11 +284,7 @@ mod replay_tests {
         let effects = model.reduce(FromNeovim::Commit("確定".into()));
         assert_eq!(
             effects,
-            vec![
-                Effect::CommitString("確定".into()),
-                Effect::CancelToggle,
-                Effect::Render,
-            ]
+            vec![Effect::CommitString("確定".into()), Effect::Render,]
         );
     }
 

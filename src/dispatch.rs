@@ -341,7 +341,17 @@ impl Dispatch<zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2, (
             } => {
                 log::debug!("[GRAB] Key event: key={}, state={:?}", key, key_state);
                 if let WEnum::Value(ks) = key_state {
-                    if ks == wl_keyboard::KeyState::Pressed {
+                    let pressed = ks == wl_keyboard::KeyState::Pressed;
+                    if !state.keyboard.track_key(key, pressed) {
+                        if state.keyboard.is_modifier(key) {
+                            // A release alone would be a modifier tap
+                            state.wayland.clear_modifiers();
+                        } else {
+                            state.wayland.send_virtual_release(key);
+                        }
+                        return;
+                    }
+                    if pressed {
                         if state.keyboard.key_repeats(key) {
                             state.repeat.start(key);
                         }

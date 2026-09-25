@@ -159,6 +159,20 @@ impl WaylandState {
         self.input_method.commit(self.serial);
     }
 
+    /// Release a key the application saw pressed before the grab started
+    /// (e.g. Enter that ran `jacin toggle` in a terminal): its release comes
+    /// to the grab, and without it the application keeps repeating the key.
+    pub fn send_virtual_release(&self, keycode: u32) {
+        if !self.virtual_keyboard_ready {
+            log::warn!("[VK] Cannot release key {keycode} — keymap not set");
+            return;
+        }
+        if let Some(ref vk) = self.virtual_keyboard {
+            vk.key(0, keycode, 0); // 0 = released
+            log::debug!("[VK] Released key pressed before the grab: keycode={keycode}");
+        }
+    }
+
     /// Send a key event via the virtual keyboard (for passthrough).
     /// Sends modifiers, key press, key release, then clears modifiers.
     pub fn send_virtual_key(&self, key: SentKey) {

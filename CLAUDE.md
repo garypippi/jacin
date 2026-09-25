@@ -32,6 +32,7 @@ src/
   model.rs                   # Model (ImeState + NvimView + SentKeys), reduce(FromNeovim) -> Vec<Effect>
   coordinator.rs             # apply_effects, IME toggle, popup coordination
   config.rs                  # Config file loading (TOML), keybind defaults
+  control.rs                 # Control socket: jacin toggle/on/off/status
   state/
     wayland.rs               # WaylandState (protocol handles, serial, virtual keyboard)
     keyboard.rs              # KeyboardState (XKB, modifiers, debouncing, repeat params)

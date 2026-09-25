@@ -1,5 +1,4 @@
 use std::os::fd::OwnedFd;
-use std::sync::atomic::Ordering;
 
 use calloop::PostAction;
 use calloop::generic::Generic;
@@ -28,32 +27,35 @@ impl State {
         self.keyboard.reset_modifiers();
     }
 
-    pub(crate) fn handle_ime_toggle(&mut self) {
+    /// Turn the IME on or off (control socket). Returns whether it is on.
+    pub(crate) fn set_ime_enabled(&mut self, enable: bool) -> bool {
         let was_enabled = self.model.ime.is_enabled();
-        log::info!("[IME] Toggle: was_enabled = {}", was_enabled);
+        log::info!("[IME] Set enabled: {was_enabled} -> {enable}");
 
-        if !was_enabled {
+        if enable && !was_enabled {
             // Respawn Neovim if it exited (e.g., after :q)
             if self.nvim.is_none() && !self.start_nvim() {
-                return;
+                return false;
             }
-            if self.wayland.active && self.wayland.sensitive {
+            self.model.ime.start_enabling();
+            if !self.wayland.active {
+                // Takes effect when a text field is focused (Activate)
+                log::debug!("[IME] Enabled with no text field focused");
+            } else if self.wayland.sensitive {
                 // Takes effect once focus leaves the password field
                 log::info!("[IME] Enabled in a password field: keys go to the application");
-                self.model.ime.start_enabling();
-            } else if self.wayland.active && self.wayland.keyboard_grab.is_none() {
+            } else if self.wayland.keyboard_grab.is_none() {
                 log::debug!("[IME] Grabbing keyboard");
                 self.wayland.grab_keyboard();
                 self.keyboard.pending_keymap = true;
-                self.model.ime.start_enabling();
             }
-        } else {
+        } else if !enable && was_enabled {
             // Disable IME - commit the buffer BEFORE releasing keyboard
             // (must match Commit handler order: commit first, then release)
             log::debug!("[IME] Releasing keyboard");
             // Whole buffer from the line-event mirror (no RPC: Neovim may be
             // blocked in getchar)
-            if !self.model.view.buffer.is_empty() {
+            if self.wayland.active && !self.model.view.buffer.is_empty() {
                 self.wayland.commit_string(&self.model.view.buffer.text());
             }
             self.reset_ime_state();
@@ -62,6 +64,7 @@ impl State {
             self.clear_nvim_buffer();
             self.model.ime.disable();
         }
+        self.model.ime.is_enabled()
     }
 
     pub(crate) fn handle_nvim_message(&mut self, msg: FromNeovim) {
@@ -85,7 +88,6 @@ impl State {
                 Effect::Render => self.update_popup(),
                 Effect::CommitString(text) => self.wayland.commit_string(&text),
                 Effect::PassthroughKey(key) => self.wayland.send_virtual_key(key),
-                Effect::CancelToggle => self.toggle_flag.store(false, Ordering::SeqCst),
                 Effect::NvimExited => {
                     self.release_ime_resources();
                     self.nvim = None;
