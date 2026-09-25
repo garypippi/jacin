@@ -20,4 +20,4 @@ pub use nvim_view::NvimView;
 pub use repeat::KeyRepeatState;
 pub use screen::{Screen, StyledCell, WindowView};
 pub use sent_keys::{SentKey, SentKeys};
-pub use wayland::WaylandState;
+pub use wayland::{WaylandState, is_sensitive};

@@ -17,6 +17,7 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
 };
 
 use crate::State;
+use crate::state::is_sensitive;
 
 // Dispatch for registry (required by registry_queue_init)
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
@@ -204,6 +205,9 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 log::info!("IME deactivated");
                 state.wayland.pending_deactivate = true;
             }
+            zwp_input_method_v2::Event::ContentType { hint, purpose } => {
+                state.wayland.pending_content_type = Some((hint, purpose));
+            }
             zwp_input_method_v2::Event::Done => {
                 // Serial must equal the number of Done events received
                 // (required by the commit request protocol)
@@ -211,6 +215,7 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
 
                 let pending_deactivate = std::mem::take(&mut state.wayland.pending_deactivate);
                 let pending_activate = std::mem::take(&mut state.wayland.pending_activate);
+                let content_type = state.wayland.pending_content_type.take();
 
                 // Process deactivate first (like fcitx5)
                 if pending_deactivate {
@@ -227,7 +232,40 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
                 // Then process activate
                 if pending_activate {
                     state.wayland.active = true;
-                    if state.model.ime.is_enabled() && state.wayland.keyboard_grab.is_none() {
+                }
+
+                // The content type that comes with a deactivation is the old
+                // field's; a new field starts as not sensitive
+                let was_sensitive = state.wayland.sensitive;
+                if pending_activate {
+                    state.wayland.sensitive = false;
+                }
+                if state.wayland.active
+                    && let Some(content_type) = content_type
+                {
+                    state.wayland.sensitive = is_sensitive(content_type);
+                    if pending_activate || state.wayland.sensitive != was_sensitive {
+                        log::debug!(
+                            "[IME] Content type: {content_type:?} (sensitive={})",
+                            state.wayland.sensitive
+                        );
+                    }
+                }
+
+                if state.wayland.active && state.model.ime.is_enabled() {
+                    if state.wayland.sensitive {
+                        if pending_activate || !was_sensitive {
+                            log::info!("[IME] Password field: keys go to the application");
+                        }
+                        // A field that turned into a password field while
+                        // text was being written
+                        if state.wayland.keyboard_grab.is_some() {
+                            state.reset_ime_state();
+                            state.clear_nvim_buffer();
+                        }
+                    } else if (pending_activate || was_sensitive)
+                        && state.wayland.keyboard_grab.is_none()
+                    {
                         log::debug!("[IME] Re-grabbing keyboard after activation");
                         state.wayland.grab_keyboard();
                         state.keyboard.pending_keymap = true;

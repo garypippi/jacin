@@ -4,7 +4,10 @@
 
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
-use wayland_client::QueueHandle;
+use wayland_client::{QueueHandle, WEnum};
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_v3::{
+    ContentHint, ContentPurpose,
+};
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2,
     zwp_input_method_v2::ZwpInputMethodV2,
@@ -35,6 +38,28 @@ pub struct WaylandState {
     pub pending_activate: bool,
     /// Pending deactivate flag (set in Deactivate, processed in Done)
     pub pending_deactivate: bool,
+    /// Content type received since the last Done
+    pub pending_content_type: Option<ContentType>,
+    /// Whether the focused text field takes a password: keys then go to
+    /// the application without passing through jacin or Neovim
+    pub sensitive: bool,
+}
+
+pub type ContentType = (WEnum<ContentHint>, WEnum<ContentPurpose>);
+
+/// A password or PIN field, or one the application marks as sensitive
+pub fn is_sensitive((hint, purpose): ContentType) -> bool {
+    let secret = ContentHint::SensitiveData | ContentHint::HiddenText;
+    let secret_hint = match hint {
+        WEnum::Value(hint) => hint.intersects(secret),
+        // Hints this version doesn't know alongside the ones it does
+        WEnum::Unknown(bits) => bits & secret.bits() != 0,
+    };
+    secret_hint
+        || matches!(
+            purpose,
+            WEnum::Value(ContentPurpose::Password | ContentPurpose::Pin)
+        )
 }
 
 impl WaylandState {
@@ -50,6 +75,8 @@ impl WaylandState {
             virtual_keymap_hash: 0,
             pending_activate: false,
             pending_deactivate: false,
+            pending_content_type: None,
+            sensitive: false,
         }
     }
 
@@ -179,4 +206,50 @@ fn create_keymap_memfd(keymap_str: &str) -> Option<OwnedFd> {
     file.write_all(&[0]).ok()?; // null terminator
     file.seek(std::io::SeekFrom::Start(0)).ok()?;
     Some(OwnedFd::from(file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn content(hint: ContentHint, purpose: ContentPurpose) -> ContentType {
+        (WEnum::Value(hint), WEnum::Value(purpose))
+    }
+
+    #[test]
+    fn password_fields_are_sensitive() {
+        // What Firefox and Chromium send for <input type="password">
+        assert!(is_sensitive(content(
+            ContentHint::HiddenText | ContentHint::SensitiveData,
+            ContentPurpose::Password
+        )));
+        assert!(is_sensitive(content(
+            ContentHint::None,
+            ContentPurpose::Pin
+        )));
+        assert!(is_sensitive(content(
+            ContentHint::SensitiveData,
+            ContentPurpose::Normal
+        )));
+        assert!(is_sensitive((
+            WEnum::Unknown(ContentHint::HiddenText.bits() | 0x8000),
+            WEnum::Value(ContentPurpose::Normal)
+        )));
+    }
+
+    #[test]
+    fn other_fields_are_not_sensitive() {
+        for purpose in [
+            ContentPurpose::Normal,
+            ContentPurpose::Url,
+            ContentPurpose::Terminal,
+        ] {
+            assert!(!is_sensitive(content(ContentHint::None, purpose)));
+        }
+        assert!(!is_sensitive(content(
+            ContentHint::AutoCapitalization,
+            ContentPurpose::Normal
+        )));
+        assert!(!is_sensitive((WEnum::Unknown(0x8000), WEnum::Unknown(99))));
+    }
 }

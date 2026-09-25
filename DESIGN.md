@@ -199,6 +199,7 @@ then kills it.
 - Commit keeps the IME enabled (the buffer is cleared and insert mode restored)
 - Deactivate/Activate cycle: Enabled → release grab → re-grab → Enabling → keymap → Enabled (state restored)
 - Activate/Deactivate are deferred to the `Done` event and processed together (deactivate first), so a window switch becomes a single release + re-grab
+- Password fields: when the `content_type` applied on `Done` has purpose `password`/`pin` or hint `sensitive_data`/`hidden_text`, the grab is released (as on Deactivate) and not taken while the field stays so; the IME stays enabled and re-grabs once the field or its content type changes. The content type that comes with a Deactivate is the old field's and is ignored. The popup is shown only while the grab is held
 
 ### Vim mode (Axis 2, observed)
 

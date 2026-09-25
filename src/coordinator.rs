@@ -37,7 +37,11 @@ impl State {
             if self.nvim.is_none() && !self.start_nvim() {
                 return;
             }
-            if self.wayland.active && self.wayland.keyboard_grab.is_none() {
+            if self.wayland.active && self.wayland.sensitive {
+                // Takes effect once focus leaves the password field
+                log::info!("[IME] Enabled in a password field: keys go to the application");
+                self.model.ime.start_enabling();
+            } else if self.wayland.active && self.wayland.keyboard_grab.is_none() {
                 log::debug!("[IME] Grabbing keyboard");
                 self.wayland.grab_keyboard();
                 self.keyboard.pending_keymap = true;
@@ -241,7 +245,9 @@ impl State {
         // the buffer triggers mode changes and redraws) — without this guard,
         // each notification would rebuild PopupContent and potentially
         // recreate/destroy surfaces.
-        if !self.model.ime.is_enabled() {
+        // Without the grab (no text field, or a password field) keys don't
+        // pass through jacin, so there is nothing to show
+        if !self.model.ime.is_enabled() || self.wayland.keyboard_grab.is_none() {
             self.hide_popup();
             return;
         }

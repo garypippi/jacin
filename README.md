@@ -88,6 +88,8 @@ RUST_LOG=debug ./target/release/jacin
 
 jacin grabs your keyboard via the Wayland input method protocol. While the keyboard is grabbed, **all keystrokes pass through jacin and the embedded Neovim instance** before reaching the focused application. This is inherent to how IMEs work, but be aware that any Neovim plugin loaded in the embedded instance can observe your input. Use `--clean` to run without user config/plugins if needed.
 
+Password fields are the exception: when the focused field reports itself as a password or PIN field (or marks its content as sensitive/hidden), jacin releases the keyboard grab and hides the popup, so keys go straight to the application and never reach Neovim. The IME stays on and comes back when focus leaves the field. Fields that don't report this, such as a `sudo` prompt in a terminal, can't be detected: turn the IME off for those.
+
 ## License
 
 MIT
