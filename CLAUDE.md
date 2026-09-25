@@ -54,7 +54,7 @@ src/
     redraw_grid.rs           # ext_linegrid/ext_multigrid redraw events → GridEvent (pure parsing)
     integration_tests.rs     # Headless nvim integration tests
   ui/
-    unified_window.rs        # Unified popup (window grid, mode + column: cmdline/showcmd, message, candidates)
+    unified_window.rs        # Unified popup (mode + window grid; panel when needed: cmdline/showcmd, message, candidates)
     layout.rs                # Popup layout calculation and sizing
     text_render.rs           # Font rendering with fontdue, SHM utilities
 examples/

@@ -1,10 +1,9 @@
-//! Unified popup window combining Neovim's window grid, the mode, and a
-//! column with the command line, messages and candidates
+//! Unified popup window: Neovim's window grid with a mode-colored strip
+//! beside it, and a panel with recording, the command line, messages and
+//! candidates shown when needed
 //!
 //! Uses zwp_input_popup_surface_v2 which is automatically positioned near
 //! the text cursor by the compositor.
-
-use std::time::Instant;
 
 use memmap2::MmapMut;
 use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
@@ -16,12 +15,11 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 
 pub use super::layout::PopupContent;
 use super::layout::{
-    BG_COLOR, BORDER_COLOR, CURSOR_BG, HEADER_TEXT_COLOR, Header, HeightHold, ICON_SEPARATOR_WIDTH,
-    Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT, MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_GAP,
-    MODE_RECORDING_COLOR, NUMBER_COLOR, NUMBER_WIDTH, PADDING, REC_CIRCLE_RADIUS,
-    REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG, SCROLLBAR_THUMB, SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT,
-    SELECTED_BG, TEXT_COLOR, calculate_layout, format_recording_label, mode_label, rgba,
-    scrollbar_thumb_geometry,
+    BG_COLOR, BORDER_COLOR, CURSOR_BG, HEADER_TEXT_COLOR, Header, Layout, MAX_GRID_ROWS,
+    MAX_POPUP_HEIGHT, MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_RECORDING_COLOR,
+    MODE_STRIP_WIDTH, MODE_STRIP_X, PADDING, REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG,
+    SCROLLBAR_THUMB, SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, SELECTED_BG, TEXT_COLOR, TEXT_X,
+    calculate_layout, format_recording_label, mode_color, rgba, scrollbar_thumb_geometry,
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
 use crate::State;
@@ -63,7 +61,6 @@ pub struct UnifiedPopup {
     /// The compositor placed the popup above the cursor (last known; kept
     /// while hidden, the field usually stays where it is)
     above: bool,
-    height_hold: HeightHold,
 }
 
 impl UnifiedPopup {
@@ -94,7 +91,6 @@ impl UnifiedPopup {
             mono_renderer,
             scroll_offset: 0,
             above: false,
-            height_hold: HeightHold::default(),
         })
     }
 
@@ -119,16 +115,16 @@ impl UnifiedPopup {
         }
     }
 
-    /// Neovim UI size (columns, rows): the window section at the maximum
-    /// popup size. Rows exceed the visible window grid to leave room below
+    /// Neovim UI size (columns, rows): the text right of the mode strip at
+    /// the maximum popup size. Rows exceed the visible window grid to leave room below
     /// the cursor for floats (nvim-cmp opens a menu below only when
     /// `lines - cursor_row > min(10, entries)`). Floats are clamped to
     /// `lines` by their owners, so they still fit the popup.
     pub fn grid_ui_size(&mut self) -> (usize, usize) {
         let cell_width = self.mono_renderer.measure_text(" ").max(1.0);
-        let cols = ((MAX_POPUP_WIDTH as f32 - PADDING * 2.0) / cell_width).floor() as usize;
+        let cols = ((MAX_POPUP_WIDTH as f32 - TEXT_X - PADDING) / cell_width).floor() as usize;
         let line_height = self.renderer.line_height().max(1.0);
-        // Minus padding, the mode row and its separator
+        // Minus padding and a panel row with its separator
         let grid_height =
             MAX_POPUP_HEIGHT as f32 - PADDING * 2.0 - line_height - SECTION_SEPARATOR_HEIGHT;
         let rows = (grid_height / line_height).floor() as usize;
@@ -165,7 +161,12 @@ impl UnifiedPopup {
             .scroll_offset
             .min(content.candidates.len() - visible_count);
 
-        let layout = self.layout(content, Instant::now());
+        let layout = calculate_layout(
+            content,
+            self.above,
+            &mut self.renderer,
+            &mut self.mono_renderer,
+        );
         if (layout.width, layout.height) != (self.width, self.height) {
             log::debug!("[POPUP] Size {}x{}", layout.width, layout.height);
         }
@@ -174,27 +175,6 @@ impl UnifiedPopup {
 
         self.render(content, &layout, qh);
         self.visible = true;
-    }
-
-    /// Layout at the height `HeightHold` keeps
-    fn layout(&mut self, content: &PopupContent, now: Instant) -> Layout {
-        let layout = self.layout_at(content, 0);
-        let height = self.height_hold.height(layout.natural_height, now);
-        if height > layout.natural_height {
-            self.layout_at(content, height)
-        } else {
-            layout
-        }
-    }
-
-    fn layout_at(&mut self, content: &PopupContent, min_height: u32) -> Layout {
-        calculate_layout(
-            content,
-            self.above,
-            min_height,
-            &mut self.renderer,
-            &mut self.mono_renderer,
-        )
     }
 
     /// Record where the compositor placed the popup. Returns true if it
@@ -208,18 +188,7 @@ impl UnifiedPopup {
         changed
     }
 
-    /// The popup is taller than its content (for a while)
-    pub fn is_holding_height(&self) -> bool {
-        self.visible && self.height_hold.is_holding()
-    }
-
-    /// The held height may be released (the popup must be laid out again)
-    pub fn hold_expired(&self, now: Instant) -> bool {
-        self.visible && self.height_hold.expired(now)
-    }
-
     pub fn hide(&mut self) {
-        self.height_hold = HeightHold::default();
         if self.visible {
             // First unmap the surface for immediate visual feedback, then
             // destroy both the popup surface role and wl_surface so the
@@ -284,25 +253,27 @@ impl UnifiedPopup {
 
         draw_border(&mut pixmap, self.width, self.height, rgba(BORDER_COLOR));
 
-        if layout.has_window {
+        if layout.has_text {
+            self.render_mode(&mut pixmap, content, layout);
             if let Some(ref view) = content.window_view {
                 self.render_grid_section(&mut pixmap, view, content.mode, layout);
             }
+        }
 
-            // Separator between the window and the mode row (pixel-aligned:
-            // fractional positions trip tiny-skia's AA hairline path)
-            let sep_y = layout.separator_y.round();
+        // Separator between the text and the panel (pixel-aligned:
+        // fractional positions trip tiny-skia's AA hairline path)
+        if let Some(sep_y) = layout.separator_y {
             fill_rect(
                 &mut pixmap,
                 PADDING,
-                sep_y,
+                sep_y.round(),
                 self.width as f32 - PADDING,
                 1.0,
                 rgba(BORDER_COLOR),
             );
         }
 
-        self.render_status_section(&mut pixmap, content, layout);
+        self.render_panel(&mut pixmap, content, layout);
 
         let dest = &mut self.pool_data[offset..offset + buffer_size];
         copy_pixmap_to_shm(&pixmap, dest);
@@ -364,8 +335,8 @@ impl UnifiedPopup {
         layout: &Layout,
     ) {
         let geo = CellGeometry {
-            left: PADDING,
-            top: layout.window_y,
+            left: TEXT_X,
+            top: layout.text_y,
             cell_width: self.mono_renderer.measure_text(" "),
             line_height: self.renderer.line_height(),
             right_edge: layout.width as f32 - PADDING,
@@ -487,69 +458,56 @@ impl UnifiedPopup {
         }
     }
 
-    /// Render the mode/REC icons and the column right of them: header,
-    /// message and candidates
-    fn render_status_section(
-        &mut self,
-        pixmap: &mut Pixmap,
-        content: &PopupContent,
-        layout: &Layout,
-    ) {
+    /// Render the mode strip along the text
+    fn render_mode(&self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
+        fill_rect(
+            pixmap,
+            MODE_STRIP_X,
+            layout.text_y.round(),
+            MODE_STRIP_X + MODE_STRIP_WIDTH,
+            layout.text_height.round(),
+            rgba(mode_color(content.mode)),
+        );
+    }
+
+    /// Recording indicator: a blinking red circle and the register
+    fn render_recording(&mut self, pixmap: &mut Pixmap, content: &PopupContent, y: f32) {
         let line_height = self.renderer.line_height();
-        let mode_y = layout.row_y(0, line_height);
-        let y_baseline = mode_y + line_height * 0.75;
-
-        let (mode_text, mode_color) = mode_label(content.mode);
-        let mode_x = PADDING;
-        self.mono_renderer
-            .draw_text(pixmap, mode_text, mode_x, y_baseline, rgba(mode_color));
-
-        if !content.recording.is_empty() {
-            let rec_x = mode_x + self.mono_renderer.measure_text(mode_text) + MODE_GAP;
-
-            // Red filled circle (hidden during blink-off phase)
-            if content.rec_blink_on {
-                draw_filled_circle(
-                    pixmap,
-                    rec_x + REC_CIRCLE_RADIUS,
-                    mode_y + line_height * 0.5,
-                    REC_CIRCLE_RADIUS,
-                    rgba(MODE_RECORDING_COLOR),
-                );
-            }
-
-            let rec_label = format_recording_label(&content.recording);
-            let text_x = rec_x + REC_CIRCLE_RADIUS * 2.0 + REC_CIRCLE_TEXT_GAP;
-            self.mono_renderer.draw_text(
+        if content.rec_blink_on {
+            draw_filled_circle(
                 pixmap,
-                &rec_label,
-                text_x,
-                y_baseline,
+                PADDING + REC_CIRCLE_RADIUS,
+                y + line_height * 0.5,
+                REC_CIRCLE_RADIUS,
                 rgba(MODE_RECORDING_COLOR),
             );
         }
-
-        // Separator between the icons and the column, along the column
-        let column_height = (layout.rows.total as f32 * line_height).round();
-        fill_rect(
+        let label = format_recording_label(&content.recording);
+        self.mono_renderer.draw_text(
             pixmap,
-            layout.separator_x,
-            layout.status_y.round(),
-            layout.separator_x + ICON_SEPARATOR_WIDTH,
-            column_height,
-            rgba(BORDER_COLOR),
+            &label,
+            PADDING + REC_CIRCLE_RADIUS * 2.0 + REC_CIRCLE_TEXT_GAP,
+            y + line_height * 0.75,
+            rgba(MODE_RECORDING_COLOR),
         );
+    }
 
+    /// Render the panel: recording, header, message and candidates
+    fn render_panel(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
+        let line_height = self.renderer.line_height();
+        if let Some(row) = layout.rows.recording {
+            self.render_recording(pixmap, content, layout.row_y(row, line_height));
+        }
         if let (Some(row), Some(header)) = (layout.rows.header, &content.header) {
             let y = layout.row_y(row, line_height);
             match header {
                 Header::Cmdline { text, cursor_byte } => {
-                    self.render_cmdline(pixmap, text, *cursor_byte, layout.column_x, y)
+                    self.render_cmdline(pixmap, text, *cursor_byte, PADDING, y)
                 }
                 Header::ShowCmd(text) => self.mono_renderer.draw_text(
                     pixmap,
                     text,
-                    layout.column_x,
+                    PADDING,
                     y + line_height * 0.75,
                     rgba(HEADER_TEXT_COLOR),
                 ),
@@ -559,7 +517,7 @@ impl UnifiedPopup {
         if let (Some(row), Some(message)) = (layout.rows.message, &content.message) {
             let y_text = layout.row_y(row, line_height) + line_height * 0.75;
             self.renderer
-                .draw_text(pixmap, message, layout.column_x, y_text, rgba(TEXT_COLOR));
+                .draw_text(pixmap, message, PADDING, y_text, rgba(TEXT_COLOR));
         }
 
         if layout.rows.visible_candidates > 0 {
@@ -593,8 +551,8 @@ impl UnifiedPopup {
         fill_rect(pixmap, cursor_x, y, cursor_x + 2.0, line_height, color);
     }
 
-    /// Candidates with the selection and a scrollbar (upwards from the mode
-    /// row when mirrored)
+    /// Candidates with the selection and a scrollbar (upwards from the text
+    /// when mirrored)
     fn render_candidates(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
         let line_height = self.renderer.line_height();
         let visible_count = layout.rows.visible_candidates;
@@ -620,20 +578,12 @@ impl UnifiedPopup {
                 } else {
                     self.width as f32
                 };
-                let left = layout.separator_x + ICON_SEPARATOR_WIDTH;
+                let left = PADDING / 2.0;
                 fill_rect(pixmap, left, y_base, right, line_height, rgba(SELECTED_BG));
             }
 
-            let number = format!("{}.", actual_idx + 1);
             self.renderer
-                .draw_text(pixmap, &number, layout.column_x, y_text, rgba(NUMBER_COLOR));
-            self.renderer.draw_text(
-                pixmap,
-                candidate,
-                layout.column_x + NUMBER_WIDTH,
-                y_text,
-                rgba(TEXT_COLOR),
-            );
+                .draw_text(pixmap, candidate, PADDING, y_text, rgba(TEXT_COLOR));
         }
 
         if layout.has_scrollbar {

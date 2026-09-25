@@ -290,13 +290,6 @@ impl State {
         );
     }
 
-    /// The popup keeps a height its content no longer needs (for a while)
-    pub(crate) fn popup_holds_height(&self) -> bool {
-        self.popup
-            .as_ref()
-            .is_some_and(|popup| popup.is_holding_height())
-    }
-
     pub(crate) fn hide_popup(&mut self) {
         if let Some(ref mut popup) = self.popup {
             popup.hide();

@@ -38,10 +38,10 @@
 │  Neovim Backend (neovim/)│  │  UI Layer                        │
 │                          │  │                                  │
 │  mod.rs   Neovim: glue,  │  │  UnifiedPopup                    │
-│           request ids,   │  │    window grid + floats + cursor │
-│           startup        │  │    mode + column: cmdline or     │
-│  keys.rs  KeyProcessor   │  │    showcmd, message, candidates  │
-│           (no I/O)       │  │    + scrollbar                   │
+│           request ids,   │  │    mode + window grid + floats + │
+│           startup        │  │    cursor; panel when needed:    │
+│  keys.rs  KeyProcessor   │  │    cmdline or showcmd, message,  │
+│           (no I/O)       │  │    candidates + scrollbar        │
 │  redraw.rs  redraw →     │  │                                  │
 │           FromNeovim     │  │  TextRenderer (fontdue + cache)  │
 │  rpc.rs   msgpack-rpc    │  │  Layout (layout.rs)              │
@@ -246,12 +246,11 @@ whenever the mode is the command line.
 ### Popup-Only Display
 
 - The app gets no preedit content; text appears in the app only on commit. An empty preedit is still sent whenever the IME is enabled, because applications such as Firefox only report the cursor rectangle in response to a preedit update, and the compositor otherwise places the popup at the previously focused field
-- UnifiedPopup renders Neovim's window grid — the normal window that last had the cursor, with floats such as nvim-cmp menus overlaid; a float opened with focus keeps the window as the text and gets the cursor — then the mode with a column beside it: a header row (command line, else `showcmd`), a message row, and the candidates; the first present one shares the mode's row
+- UnifiedPopup renders Neovim's window grid — the normal window that last had the cursor, with floats such as nvim-cmp menus overlaid; a float opened with focus keeps the window as the text and gets the cursor — with a thin strip in the mode's color along its left edge (insert blends into the border; the text never moves when the mode changes). Below it, a panel shown only when it has something: the recording indicator (`● @q`), a header row (command line, else `showcmd`), a message row, and the candidates (unnumbered: they are picked with Neovim's keys, not digits)
 - While the command line is shown, only its own completion (`popupmenu_show` grid −1) is listed: a buffer's menu can't be used from a prompt such as `confirm()`, whose question and prompt must stay visible
 - A candidate is highlighted only when Neovim reports one selected (none with `'completeopt'` noselect)
 - A message stays while the command line is shown (it may be a prompt's question) and for 2 seconds after, or 2 seconds otherwise
-- Near the bottom of the screen the compositor places the popup above the cursor (`text_input_rectangle` y ≥ 0; y = −height below it). The layout is then mirrored — window at the bottom next to the cursor, the mode row above it, candidates upwards — so the text doesn't move when the height changes. Only the sign of y is used: the event may describe the previous size
-- The popup grows at once but shrinks only after 1 second without needing the height (the extra space away from the cursor), so candidates coming and going while typing don't resize it each time
+- Near the bottom of the screen the compositor places the popup above the cursor (`text_input_rectangle` y ≥ 0; y = −height below it). The layout is then mirrored — the text at the bottom next to the cursor, the panel above it growing upwards — so the text doesn't move when the height changes. Only the sign of y is used: the event may describe the previous size
 
 ### Wayland-Dependent vs Independent
 
@@ -285,5 +284,5 @@ paths, and the buffer keeps `buftype=nofile` so `:q` never hits E37.
 The protocol allows several `zwp_input_popup_surface_v2` surfaces, but the
 compositor places each one near the text cursor on its own, so a second
 surface (e.g. for candidates) cannot be positioned relative to the first. The
-window grid, mode row and candidates share one popup laid out by
+mode strip, window grid and panel share one popup laid out by
 `layout.rs`.

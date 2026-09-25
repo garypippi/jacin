@@ -225,8 +225,7 @@ fn main() -> anyhow::Result<()> {
         // On-demand timer for the REC blink and transient message expiry
         let needs_blink =
             state.config.behavior.recording_blink && !state.model.view.recording.is_empty();
-        let needs_timer =
-            needs_blink || state.model.view.has_transient_message() || state.popup_holds_height();
+        let needs_timer = needs_blink || state.model.view.has_transient_message();
         if needs_timer && state.animation_timer_token.is_none() {
             match handle.insert_source(
                 Timer::from_duration(std::time::Duration::from_millis(100)),
@@ -244,17 +243,9 @@ fn main() -> anyhow::Result<()> {
                     // Expire transient message
                     changed |= state.model.view.expire_transient_message();
 
-                    // Shrink the popup to its content
-                    changed |= state
-                        .popup
-                        .as_ref()
-                        .is_some_and(|popup| popup.hold_expired(now));
-
                     let needs_blink = state.config.behavior.recording_blink
                         && !state.model.view.recording.is_empty();
-                    let keep_running = needs_blink
-                        || state.model.view.has_transient_message()
-                        || state.popup_holds_height();
+                    let keep_running = needs_blink || state.model.view.has_transient_message();
                     if !keep_running {
                         state.update_popup();
                         state.animation_timer_token = None;
