@@ -4,6 +4,7 @@ use crate::neovim::Mode;
 use crate::state::WindowView;
 
 use super::text_render::TextRenderer;
+use super::theme::Theme;
 
 /// RGBA color as (r, g, b, a) tuple — converted to Color at use via `rgba()`.
 pub(crate) type Rgba = (u8, u8, u8, u8);
@@ -11,15 +12,6 @@ pub(crate) type Rgba = (u8, u8, u8, u8);
 pub(crate) fn rgba(c: Rgba) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.0, c.1, c.2, c.3)
 }
-
-// Colors
-pub(crate) const BG_COLOR: Rgba = (40, 44, 52, 240);
-pub(crate) const TEXT_COLOR: Rgba = (220, 223, 228, 255);
-pub(crate) const BORDER_COLOR: Rgba = (80, 84, 92, 255);
-pub(crate) const SELECTED_BG: Rgba = (61, 89, 161, 255);
-pub(crate) const CURSOR_BG: Rgba = (97, 175, 239, 255);
-pub(crate) const SCROLLBAR_BG: Rgba = (60, 64, 72, 255);
-pub(crate) const SCROLLBAR_THUMB: Rgba = (100, 104, 112, 255);
 
 pub(crate) const PADDING: f32 = 8.0;
 pub(crate) const MAX_VISIBLE_CANDIDATES: usize = 9;
@@ -36,16 +28,12 @@ pub(crate) const MODE_STRIP_X: f32 = 3.0;
 pub(crate) const MODE_STRIP_WIDTH: f32 = 3.0;
 /// Left edge of the text, right of the mode strip
 pub(crate) const TEXT_X: f32 = MODE_STRIP_X + MODE_STRIP_WIDTH + 6.0;
-/// Command line / showcmd text
-pub(crate) const HEADER_TEXT_COLOR: Rgba = (166, 173, 186, 255);
-
-// Mode strip colors: insert blends into the border, the other modes stand out
-pub(crate) const MODE_INSERT_COLOR: Rgba = BORDER_COLOR;
+// Mode strip colors: insert blends into the border, the other modes stand
+// out (fixed: no builtin highlight group means "Normal mode")
 pub(crate) const MODE_NORMAL_COLOR: Rgba = (97, 175, 239, 255); // Blue
 pub(crate) const MODE_VISUAL_COLOR: Rgba = (198, 120, 221, 255); // Purple
 pub(crate) const MODE_OP_COLOR: Rgba = (229, 192, 123, 255); // Yellow
 pub(crate) const MODE_CMD_COLOR: Rgba = (224, 108, 117, 255); // Red
-pub(crate) const MODE_RECORDING_COLOR: Rgba = (224, 108, 117, 255); // Red
 
 /// Content to display in the unified popup
 #[derive(Default, Clone)]
@@ -64,6 +52,7 @@ pub struct PopupContent {
     pub rec_blink_on: bool,
     /// Rows of Neovim's window grid (None until Neovim drew a window)
     pub window_view: Option<WindowView>,
+    pub theme: Theme,
 }
 
 /// Header row of the panel
@@ -125,9 +114,9 @@ impl PanelRows {
 }
 
 /// Color of the mode strip
-pub(crate) fn mode_color(mode: Mode) -> Rgba {
+pub(crate) fn mode_color(mode: Mode, border: Rgba) -> Rgba {
     match mode {
-        Mode::Insert | Mode::Replace => MODE_INSERT_COLOR,
+        Mode::Insert | Mode::Replace => border,
         Mode::Normal | Mode::Other => MODE_NORMAL_COLOR,
         Mode::OperatorPending => MODE_OP_COLOR,
         Mode::Visual => MODE_VISUAL_COLOR,
@@ -441,15 +430,16 @@ mod tests {
 
     #[test]
     fn insert_blends_in_and_other_modes_stand_out() {
-        assert_eq!(mode_color(Mode::Insert), BORDER_COLOR);
-        assert_eq!(mode_color(Mode::Replace), BORDER_COLOR);
+        let border = Theme::default().border;
+        assert_eq!(mode_color(Mode::Insert, border), border);
+        assert_eq!(mode_color(Mode::Replace, border), border);
         for mode in [
             Mode::Normal,
             Mode::OperatorPending,
             Mode::Visual,
             Mode::CmdLine,
         ] {
-            assert_ne!(mode_color(mode), BORDER_COLOR);
+            assert_ne!(mode_color(mode, border), border);
         }
     }
 }

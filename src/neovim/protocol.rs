@@ -107,10 +107,16 @@ pub enum GridEvent {
         id: u64,
         attr: HlAttr,
     },
+    /// None: not set (-1)
     DefaultColors {
-        fg: u32,
-        bg: u32,
-        sp: u32,
+        fg: Option<u32>,
+        bg: Option<u32>,
+        sp: Option<u32>,
+    },
+    /// Highlight id of a builtin UI group (`Pmenu`, `MsgArea`, ...)
+    HlGroupSet {
+        name: String,
+        id: u64,
     },
     /// Normal window placed at (row, col) on the global grid
     WinPos {

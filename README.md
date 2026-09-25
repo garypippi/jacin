@@ -88,9 +88,12 @@ recording_blink = true    # Blink the REC indicator while recording a macro
 family = "Noto Sans CJK JP"   # Proportional font (candidates/messages). Default: fontconfig auto
 mono_family = "JetBrains Mono" # Monospace font (Neovim window, command line, mode). Default: "monospace"
 size = 16.0                    # Font size in pixels
+
+[appearance]
+opacity = 1.0             # Opacity of the popup background, 0.0 (transparent) to 1.0
 ```
 
-All fields are optional; omitted ones use the defaults noted in the comments (`keybinds` and `behavior` values above are the defaults).
+All fields are optional; omitted ones use the defaults noted in the comments (`keybinds`, `behavior` and `appearance` values above are the defaults).
 
 ### Neovim configuration for jacin
 
@@ -108,11 +111,21 @@ end
 
 The statusline, tabline, intro screen and `~` filler lines are never shown, so they need no configuration.
 
+The popup takes its colors from your colorscheme (see below), so you can also give jacin its own colors:
+
+```lua
+if vim.g.jacin then
+  vim.cmd.colorscheme("habamax")
+  vim.api.nvim_set_hl(0, "PmenuSel", { fg = "#ffffff", bg = "#3d59a1" })
+end
+```
+
 ### What the popup shows
 
 - Neovim's window is drawn from its UI events (`ext_multigrid`), with your colorscheme and floating windows such as the nvim-cmp menu. Neovim's UI is resized to fit the popup, so long lines wrap there. The application receives no preedit; text is only inserted on commit.
 - The command line, messages and the native popup menu are shown in a panel below the text. The native popup menu (`ext_popupmenu`) works with skkeleton henkan and any plugin that calls `complete()`, including ddc.vim with `ddc-ui-native`.
 - A strip on the left edge shows the mode (plain in insert mode, colored otherwise).
+- Colors follow your colorscheme: `Normal` for the background and text, `FloatBorder` (or `NonText`) for the border, `MsgArea` for the command line and messages, `Pmenu`/`PmenuSel`/`PmenuSbar`/`PmenuThumb` for candidates, `Cursor` for the block cursor and `ErrorMsg` for the recording indicator. The mode strip colors are fixed.
 
 > **Note:** jacin sets `buftype=nofile` on its buffer, so ddc.vim needs `specialBufferCompletion` enabled in your ddc config.
 

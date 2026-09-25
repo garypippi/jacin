@@ -10,12 +10,12 @@ use super::Grid;
 use super::grid::Cell;
 use crate::neovim::{GridEvent, HlAttr};
 
-/// Default colors from `default_colors_set` (0xRRGGBB)
+/// Default colors from `default_colors_set` (0xRRGGBB, None: not set)
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct DefaultColors {
-    pub fg: u32,
-    pub bg: u32,
-    pub sp: u32,
+    pub fg: Option<u32>,
+    pub bg: Option<u32>,
+    pub sp: Option<u32>,
 }
 
 /// Visible cursor: the grid it is on ("current grid") and its position
@@ -137,12 +137,19 @@ pub struct Screen {
     window_cursors: HashMap<u64, (u64, Cursor)>,
     cursor_seq: u64,
     hl_attrs: HashMap<u64, HlAttr>,
+    /// Builtin UI highlight groups by name → highlight id
+    hl_groups: HashMap<String, u64>,
     pub default_colors: DefaultColors,
 }
 
 impl Screen {
     pub fn grid(&self, id: u64) -> Option<&Grid> {
         self.grids.get(&id)
+    }
+
+    /// Attributes of a builtin UI highlight group (`hl_group_set`)
+    pub fn hl_group(&self, name: &str) -> Option<&HlAttr> {
+        self.hl_attrs.get(self.hl_groups.get(name)?)
     }
 
     pub fn window(&self, grid: u64) -> Option<&Window> {
@@ -340,6 +347,9 @@ impl Screen {
             }
             GridEvent::DefaultColors { fg, bg, sp } => {
                 self.default_colors = DefaultColors { fg, bg, sp };
+            }
+            GridEvent::HlGroupSet { name, id } => {
+                self.hl_groups.insert(name, id);
             }
             GridEvent::WinPos { grid, row, col, .. } => {
                 let win = self.windows.entry(grid).or_default();

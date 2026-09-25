@@ -15,13 +15,13 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
 
 pub use super::layout::PopupContent;
 use super::layout::{
-    BG_COLOR, BORDER_COLOR, CURSOR_BG, HEADER_TEXT_COLOR, Header, Layout, MAX_GRID_ROWS,
-    MAX_POPUP_HEIGHT, MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES, MODE_RECORDING_COLOR,
-    MODE_STRIP_WIDTH, MODE_STRIP_X, PADDING, REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP, SCROLLBAR_BG,
-    SCROLLBAR_THUMB, SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, SELECTED_BG, TEXT_COLOR, TEXT_X,
-    calculate_layout, format_recording_label, mode_color, rgba, scrollbar_thumb_geometry,
+    Header, Layout, MAX_GRID_ROWS, MAX_POPUP_HEIGHT, MAX_POPUP_WIDTH, MAX_VISIBLE_CANDIDATES,
+    MODE_STRIP_WIDTH, MODE_STRIP_X, PADDING, REC_CIRCLE_RADIUS, REC_CIRCLE_TEXT_GAP,
+    SCROLLBAR_WIDTH, SECTION_SEPARATOR_HEIGHT, TEXT_X, calculate_layout, format_recording_label,
+    mode_color, rgba, scrollbar_thumb_geometry,
 };
 use super::text_render::{TextRenderer, copy_pixmap_to_shm, create_shm_pool, draw_border};
+use super::theme::Theme;
 use crate::State;
 use crate::neovim::Mode;
 use crate::state::{StyledCell, WindowView};
@@ -249,14 +249,15 @@ impl UnifiedPopup {
             return;
         };
 
-        pixmap.fill(rgba(BG_COLOR));
+        let theme = &content.theme;
+        pixmap.fill(rgba(theme.bg));
 
-        draw_border(&mut pixmap, self.width, self.height, rgba(BORDER_COLOR));
+        draw_border(&mut pixmap, self.width, self.height, rgba(theme.border));
 
         if layout.has_text {
             self.render_mode(&mut pixmap, content, layout);
             if let Some(ref view) = content.window_view {
-                self.render_grid_section(&mut pixmap, view, content.mode, layout);
+                self.render_grid_section(&mut pixmap, view, content.mode, theme, layout);
             }
         }
 
@@ -269,7 +270,7 @@ impl UnifiedPopup {
                 sep_y.round(),
                 self.width as f32 - PADDING,
                 1.0,
-                rgba(BORDER_COLOR),
+                rgba(theme.border),
             );
         }
 
@@ -332,6 +333,7 @@ impl UnifiedPopup {
         pixmap: &mut Pixmap,
         view: &WindowView,
         mode: Mode,
+        theme: &Theme,
         layout: &Layout,
     ) {
         let geo = CellGeometry {
@@ -340,6 +342,7 @@ impl UnifiedPopup {
             cell_width: self.mono_renderer.measure_text(" "),
             line_height: self.renderer.line_height(),
             right_edge: layout.width as f32 - PADDING,
+            theme: *theme,
         };
         let block_cursor =
             view.cursor_visible && !matches!(mode, Mode::Insert | Mode::Replace | Mode::CmdLine);
@@ -396,12 +399,14 @@ impl UnifiedPopup {
             return;
         }
         let (y_top, height) = (geo.y(cursor_row), geo.line_height.round());
-        if block {
-            let x1 = geo.x(cursor_col + 1).min(geo.right_edge);
-            fill_rect(pixmap, x0, y_top, x1, height, rgba(CURSOR_BG));
+        let theme = &geo.theme;
+        let color = rgba(theme.cursor.map_or(theme.fg, |cursor| cursor.bg));
+        let x1 = if block {
+            geo.x(cursor_col + 1).min(geo.right_edge)
         } else {
-            fill_rect(pixmap, x0, y_top, x0 + 2.0, height, rgba(TEXT_COLOR));
-        }
+            x0 + 2.0
+        };
+        fill_rect(pixmap, x0, y_top, x1, height, color);
     }
 
     /// Draw one row of grid cells starting at screen column `first_col`.
@@ -423,7 +428,7 @@ impl UnifiedPopup {
         let colors: Vec<(Color, Option<Color>)> = cells[..visible]
             .iter()
             .enumerate()
-            .map(|(i, cell)| cell_colors(cell, style_of(first_col + i, cell)))
+            .map(|(i, cell)| cell_colors(cell, style_of(first_col + i, cell), &geo.theme))
             .collect();
         let y_top = geo.y(row);
 
@@ -466,7 +471,7 @@ impl UnifiedPopup {
             layout.text_y.round(),
             MODE_STRIP_X + MODE_STRIP_WIDTH,
             layout.text_height.round(),
-            rgba(mode_color(content.mode)),
+            rgba(mode_color(content.mode, content.theme.border)),
         );
     }
 
@@ -479,7 +484,7 @@ impl UnifiedPopup {
                 PADDING + REC_CIRCLE_RADIUS,
                 y + line_height * 0.5,
                 REC_CIRCLE_RADIUS,
-                rgba(MODE_RECORDING_COLOR),
+                rgba(content.theme.recording),
             );
         }
         let label = format_recording_label(&content.recording);
@@ -488,13 +493,14 @@ impl UnifiedPopup {
             &label,
             PADDING + REC_CIRCLE_RADIUS * 2.0 + REC_CIRCLE_TEXT_GAP,
             y + line_height * 0.75,
-            rgba(MODE_RECORDING_COLOR),
+            rgba(content.theme.recording),
         );
     }
 
     /// Render the panel: recording, header, message and candidates
     fn render_panel(&mut self, pixmap: &mut Pixmap, content: &PopupContent, layout: &Layout) {
         let line_height = self.renderer.line_height();
+        let msg = rgba(content.theme.msg);
         if let Some(row) = layout.rows.recording {
             self.render_recording(pixmap, content, layout.row_y(row, line_height));
         }
@@ -502,22 +508,19 @@ impl UnifiedPopup {
             let y = layout.row_y(row, line_height);
             match header {
                 Header::Cmdline { text, cursor_byte } => {
-                    self.render_cmdline(pixmap, text, *cursor_byte, PADDING, y)
+                    self.render_cmdline(pixmap, text, *cursor_byte, PADDING, y, msg)
                 }
-                Header::ShowCmd(text) => self.mono_renderer.draw_text(
-                    pixmap,
-                    text,
-                    PADDING,
-                    y + line_height * 0.75,
-                    rgba(HEADER_TEXT_COLOR),
-                ),
+                Header::ShowCmd(text) => {
+                    self.mono_renderer
+                        .draw_text(pixmap, text, PADDING, y + line_height * 0.75, msg)
+                }
             }
         }
 
         if let (Some(row), Some(message)) = (layout.rows.message, &content.message) {
             let y_text = layout.row_y(row, line_height) + line_height * 0.75;
             self.renderer
-                .draw_text(pixmap, message, PADDING, y_text, rgba(TEXT_COLOR));
+                .draw_text(pixmap, message, PADDING, y_text, msg);
         }
 
         if layout.rows.visible_candidates > 0 {
@@ -533,9 +536,9 @@ impl UnifiedPopup {
         cursor_byte: usize,
         x: f32,
         y: f32,
+        color: Color,
     ) {
         let line_height = self.renderer.line_height();
-        let color = rgba(HEADER_TEXT_COLOR);
         let mut cursor_x = None;
         let mut char_x = x;
         for (byte, c) in text.char_indices() {
@@ -560,6 +563,7 @@ impl UnifiedPopup {
         let last_y = layout.row_y(layout.rows.candidates + visible_count - 1, line_height);
         let candidates_y = first_y.min(last_y);
         let scrollbar_x = self.width as f32 - SCROLLBAR_WIDTH - 2.0;
+        let theme = &content.theme;
 
         for (visible_idx, candidate) in content
             .candidates
@@ -572,18 +576,21 @@ impl UnifiedPopup {
             let y_base = layout.row_y(layout.rows.candidates + visible_idx, line_height);
             let y_text = y_base + line_height * 0.75;
 
-            if content.selected == Some(actual_idx) {
-                let right = if layout.has_scrollbar {
-                    scrollbar_x - 2.0
-                } else {
-                    self.width as f32
-                };
-                let left = PADDING / 2.0;
-                fill_rect(pixmap, left, y_base, right, line_height, rgba(SELECTED_BG));
-            }
+            let colors = if content.selected == Some(actual_idx) {
+                theme.pmenu_sel
+            } else {
+                theme.pmenu
+            };
+            let right = if layout.has_scrollbar {
+                scrollbar_x - 2.0
+            } else {
+                self.width as f32
+            };
+            let left = PADDING / 2.0;
+            fill_rect(pixmap, left, y_base, right, line_height, rgba(colors.bg));
 
             self.renderer
-                .draw_text(pixmap, candidate, PADDING, y_text, rgba(TEXT_COLOR));
+                .draw_text(pixmap, candidate, PADDING, y_text, rgba(colors.fg));
         }
 
         if layout.has_scrollbar {
@@ -594,7 +601,7 @@ impl UnifiedPopup {
                 candidates_y,
                 scrollbar_x + SCROLLBAR_WIDTH,
                 scrollbar_height,
-                rgba(SCROLLBAR_BG),
+                rgba(theme.scrollbar),
             );
             let thumb = scrollbar_thumb_geometry(
                 visible_count,
@@ -615,7 +622,7 @@ impl UnifiedPopup {
                 thumb_y,
                 scrollbar_x + SCROLLBAR_WIDTH,
                 thumb.height,
-                rgba(SCROLLBAR_THUMB),
+                rgba(theme.thumb),
             );
         }
     }
@@ -670,7 +677,7 @@ fn rgb_color(rgb: u32) -> Color {
     Color::from_rgba8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
 }
 
-/// Pixel geometry of the grid area in the popup
+/// Pixel geometry and colors of the grid area in the popup
 struct CellGeometry {
     left: f32,
     top: f32,
@@ -678,6 +685,7 @@ struct CellGeometry {
     line_height: f32,
     /// Cells must end at or before this x
     right_edge: f32,
+    theme: Theme,
 }
 
 impl CellGeometry {
@@ -694,17 +702,23 @@ impl CellGeometry {
 }
 
 /// Foreground and optional background of a cell over the popup theme
-fn cell_colors(cell: &StyledCell, style: CellStyle) -> (Color, Option<Color>) {
-    let theme_fg = rgba(TEXT_COLOR);
-    let theme_bg = rgba(BG_COLOR);
+fn cell_colors(cell: &StyledCell, style: CellStyle, theme: &Theme) -> (Color, Option<Color>) {
+    let theme_fg = rgba(theme.fg);
+    let theme_bg = rgba(theme.bg);
+    // Text in the background color stays opaque
+    let (r, g, b, _) = theme.bg;
+    let bg_as_fg = rgba((r, g, b, 255));
     let mut fg = cell.fg.map_or(theme_fg, rgb_color);
     let mut bg = cell.bg.map(rgb_color);
     if cell.reverse {
-        (fg, bg) = (bg.unwrap_or(theme_bg), Some(fg));
+        (fg, bg) = (bg.unwrap_or(bg_as_fg), Some(fg));
     }
     match style {
         CellStyle::Normal => (fg, bg),
-        CellStyle::Cursor => (Color::from_rgba8(40, 44, 52, 255), Some(rgba(CURSOR_BG))),
+        CellStyle::Cursor => match theme.cursor {
+            Some(cursor) => (rgba(cursor.fg), Some(rgba(cursor.bg))),
+            None => (bg.unwrap_or(bg_as_fg), Some(fg)),
+        },
         // Floats hide what is below them even where they have no highlight
         CellStyle::Opaque => (fg, Some(bg.unwrap_or(theme_bg))),
     }

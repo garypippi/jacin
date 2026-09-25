@@ -253,6 +253,7 @@ whenever the mode is the command line.
 - While the command line is shown, only its own completion (`popupmenu_show` grid −1) is listed: a buffer's menu can't be used from a prompt such as `confirm()`, whose question and prompt must stay visible
 - A candidate is highlighted only when Neovim reports one selected (none with `'completeopt'` noselect)
 - A message stays while the command line is shown (it may be a prompt's question) and for 2 seconds after, or 2 seconds otherwise
+- Colors come from Neovim, not from jacin's config: `default_colors_set` (Normal) for the background and unhighlighted text, and builtin groups from `hl_group_set` (`FloatBorder`/`NonText`, `MsgArea`, `Pmenu*`, `Cursor`, `ErrorMsg`) for the rest, resolved through `hl_attr_define`. A user sets jacin-only colors inside `if vim.g.jacin`. The mode strip keeps fixed colors (no builtin group names a mode), and the background opacity is a config value (a taste that depends on the desktop, not the colorscheme)
 - Near the bottom of the screen the compositor places the popup above the cursor (`text_input_rectangle` y ≥ 0; y = −height below it). The layout is then mirrored — the text at the bottom next to the cursor, the panel above it growing upwards — so the text doesn't move when the height changes. Only the sign of y is used: the event may describe the previous size
 
 ### Wayland-Dependent vs Independent

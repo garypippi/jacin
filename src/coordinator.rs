@@ -7,7 +7,7 @@ use calloop::{Interest, Mode as Trigger};
 use crate::State;
 use crate::model::Effect;
 use crate::neovim::{FromNeovim, Neovim, ReadStatus};
-use crate::ui::{Header, MAX_GRID_ROWS, PopupContent};
+use crate::ui::{Header, MAX_GRID_ROWS, PopupContent, Theme};
 
 impl State {
     /// Common cleanup shared by toggle-off and deactivate:
@@ -273,6 +273,7 @@ impl State {
             ime_enabled: self.model.ime.is_enabled(),
             recording: self.model.view.recording.clone(),
             rec_blink_on: self.animations.rec_blink.on,
+            theme: Theme::from_screen(&self.model.view.screen, self.config.appearance.opacity),
             window_view: {
                 let view = self.model.view.screen.window_view(MAX_GRID_ROWS);
                 match &view {

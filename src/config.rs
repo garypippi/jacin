@@ -7,6 +7,7 @@ pub struct Config {
     pub keybinds: Keybinds,
     pub behavior: Behavior,
     pub font: FontConfig,
+    pub appearance: Appearance,
     #[serde(skip)]
     pub clean: bool,
 }
@@ -23,6 +24,20 @@ pub struct FontConfig {
     pub mono_family: Option<String>,
     /// Font size in pixels. Default: 16.0.
     pub size: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    /// Opacity of the popup background, 0.0 (transparent) to 1.0.
+    /// Default: 1.0.
+    pub opacity: f32,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { opacity: 1.0 }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +134,19 @@ mod tests {
         assert!(config.font.family.is_none());
         assert!(config.font.mono_family.is_none());
         assert!(config.font.size.is_none());
+        assert_eq!(config.appearance.opacity, 1.0);
+    }
+
+    #[test]
+    fn appearance_opacity() {
+        let config: Config = toml::from_str(
+            r#"
+            [appearance]
+            opacity = 0.9
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.appearance.opacity, 0.9);
     }
 
     #[test]

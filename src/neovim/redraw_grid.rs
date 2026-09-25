@@ -54,9 +54,13 @@ pub fn parse_grid_event(name: &str, params: &Value) -> Option<GridEvent> {
             attr: parse_hl_attr(args.get(1)?),
         }),
         "default_colors_set" => Some(GridEvent::DefaultColors {
-            fg: rgb(args.first()?)?,
-            bg: rgb(args.get(1)?)?,
-            sp: rgb(args.get(2)?)?,
+            fg: rgb(args.first()?),
+            bg: rgb(args.get(1)?),
+            sp: rgb(args.get(2)?),
+        }),
+        "hl_group_set" => Some(GridEvent::HlGroupSet {
+            name: args.first()?.as_str()?.to_string(),
+            id: uint(1)?,
         }),
         // [grid, win, start_row, start_col, width, height]
         "win_pos" => Some(GridEvent::WinPos {
@@ -295,6 +299,37 @@ mod tests {
                 left: 0,
                 right: 80,
                 rows: -2
+            })
+        );
+    }
+
+    #[test]
+    fn hl_group_set_parses_name_and_id() {
+        let params = arr(vec![Value::from("Pmenu"), Value::from(35)]);
+        assert_eq!(
+            parse_grid_event("hl_group_set", &params),
+            Some(GridEvent::HlGroupSet {
+                name: "Pmenu".into(),
+                id: 35,
+            })
+        );
+    }
+
+    #[test]
+    fn default_colors_set_keeps_unset_colors() {
+        let params = arr(vec![
+            Value::from(0xffffff),
+            Value::from(-1),
+            Value::from(-1),
+            Value::from(0),
+            Value::from(0),
+        ]);
+        assert_eq!(
+            parse_grid_event("default_colors_set", &params),
+            Some(GridEvent::DefaultColors {
+                fg: Some(0xffffff),
+                bg: None,
+                sp: None,
             })
         );
     }
