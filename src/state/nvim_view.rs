@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::{BufferMirror, Screen};
 use crate::neovim::Mode;
+use crate::neovim::protocol::PendingState;
 
 /// How long a transient message stays visible before auto-clearing (counted
 /// from when the command line closes, if one is shown)
@@ -43,6 +44,8 @@ pub struct NvimView {
     pub cmdline: Option<Cmdline>,
     /// Pending command keys ('showcmd')
     pub showcmd: String,
+    /// What Neovim waits for after the last processed key
+    pub pending: PendingState,
     /// Message (e.g. command output, a prompt's question)
     pub transient_message: Option<String>,
     /// When the transient message was set
@@ -61,6 +64,7 @@ impl NvimView {
         self.clear_candidates();
         self.cmdline = None;
         self.showcmd.clear();
+        self.pending = PendingState::None;
         self.clear_transient_message();
     }
 
@@ -79,6 +83,16 @@ impl NvimView {
         self.candidates.clear();
         self.selected_candidate = None;
         self.candidates_for_cmdline = false;
+    }
+
+    /// Pending command keys to show: only while Neovim waits for more keys
+    /// (it also sends a complete command like `j`, cleared right after)
+    pub fn visible_showcmd(&self) -> &str {
+        if self.pending.is_pending() {
+            &self.showcmd
+        } else {
+            ""
+        }
     }
 
     /// Candidates to show: while the command line is shown, only its own

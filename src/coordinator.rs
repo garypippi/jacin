@@ -255,12 +255,12 @@ impl State {
         }
         let t = std::time::Instant::now();
         let view = &self.model.view;
-        let header = match (&view.cmdline, view.showcmd.is_empty()) {
+        let header = match (&view.cmdline, view.visible_showcmd().is_empty()) {
             (Some(cmdline), _) => Some(Header::Cmdline {
                 text: cmdline.text.clone(),
                 cursor_byte: cmdline.cursor_byte,
             }),
-            (None, false) => Some(Header::ShowCmd(view.showcmd.clone())),
+            (None, false) => Some(Header::ShowCmd(view.visible_showcmd().to_owned())),
             (None, true) => None,
         };
         let candidates = view.visible_candidates().to_vec();

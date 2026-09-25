@@ -9,9 +9,10 @@ use super::mode::Mode;
 /// Multi-key sequence in progress, reported with each processed key.
 ///
 /// These states are mutually exclusive — only one can be active at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingState {
     /// No pending operation
+    #[default]
     None,
     /// Neovim blocked in getchar (after q, f, t, r, m, etc.)
     Getchar,

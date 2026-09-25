@@ -44,9 +44,15 @@ impl Model {
         let enabled = self.ime.is_fully_enabled();
         match msg {
             FromNeovim::Ready => vec![],
-            FromNeovim::KeyProcessed { seq, .. } => {
+            FromNeovim::KeyProcessed { seq, pending } => {
                 self.sent_keys.acknowledge(seq);
-                vec![]
+                let shown = self.view.visible_showcmd().to_owned();
+                self.view.pending = pending;
+                if enabled && self.view.visible_showcmd() != shown {
+                    vec![Effect::Render]
+                } else {
+                    vec![]
+                }
             }
             FromNeovim::Commit(text) => {
                 self.view.clear_candidates();
@@ -120,11 +126,13 @@ impl Model {
                 vec![Effect::Render]
             }
             FromNeovim::ShowCmd(text) => {
-                if !enabled || self.view.showcmd == text {
-                    return vec![];
-                }
+                let shown = self.view.visible_showcmd().to_owned();
                 self.view.showcmd = text;
-                vec![Effect::Render]
+                if enabled && self.view.visible_showcmd() != shown {
+                    vec![Effect::Render]
+                } else {
+                    vec![]
+                }
             }
             FromNeovim::ModeChange(mode) => {
                 // Always applied: key processing reads it, also for keys
@@ -391,15 +399,30 @@ mod replay_tests {
     }
 
     #[test]
-    fn showcmd_is_followed() {
+    fn showcmd_is_shown_while_neovim_waits_for_keys() {
+        use crate::neovim::protocol::PendingState;
         let mut model = enabled_model();
+        let processed = |pending| FromNeovim::KeyProcessed { seq: 0, pending };
+
+        // A complete command (j): shown and cleared, never waited on
+        assert!(model.reduce(FromNeovim::ShowCmd("j".into())).is_empty());
+        assert!(model.reduce(FromNeovim::ShowCmd(String::new())).is_empty());
+        assert!(model.reduce(processed(PendingState::None)).is_empty());
+        assert_eq!(model.view.visible_showcmd(), "");
+
+        // An operator waits for its motion
+        assert!(model.reduce(FromNeovim::ShowCmd("2d".into())).is_empty());
         assert_eq!(
-            model.reduce(FromNeovim::ShowCmd("2d".into())),
+            model.reduce(processed(PendingState::Motion)),
             vec![Effect::Render]
         );
-        assert_eq!(model.view.showcmd, "2d");
+        assert_eq!(model.view.visible_showcmd(), "2d");
         // Unchanged: nothing to render
         assert!(model.reduce(FromNeovim::ShowCmd("2d".into())).is_empty());
+        assert_eq!(
+            model.reduce(FromNeovim::ShowCmd("2di".into())),
+            vec![Effect::Render]
+        );
     }
 
     #[test]
