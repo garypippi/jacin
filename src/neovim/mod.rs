@@ -97,9 +97,10 @@ impl Neovim {
             // Disable "-- More --" prompt — in embedded mode nobody can dismiss it,
             // so any long message (e.g. denops error) would block Neovim forever.
             "set nomore",
-            // Mark buffer as scratch with bufhidden=wipe to clean up when hidden.
-            // buftype=nofile prevents E37 "No write since last change" on :q.
-            "set buftype=nofile bufhidden=wipe",
+            // The main buffer: buftype=nofile prevents E37 "No write since
+            // last change" on :q; bufhidden=hide keeps it (and its handle)
+            // when another buffer takes its window (e.g. :e memo.md)
+            "setlocal buftype=nofile bufhidden=hide",
         ] {
             nvim.init_request("nvim_command", vec![command.into()], command);
         }
@@ -182,8 +183,8 @@ impl Neovim {
                 }
                 "nvim_buf_detach_event" => {
                     self.main_buffer = None;
-                    // The attached buffer was wiped (e.g. :enew with
-                    // bufhidden=wipe): follow the new current buffer
+                    // The attached buffer was wiped (e.g. :bwipe): follow
+                    // the new current buffer
                     log::debug!("[NVIM] Buffer detached, re-attaching to current buffer");
                     self.attach_buffer(false);
                 }

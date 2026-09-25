@@ -513,21 +513,27 @@ fn empty_buffer_passes_through_enter_bs_and_commit() {
     probe.shutdown();
 }
 
-/// The buffer mirror follows the current buffer after it is replaced
-/// (:enew wipes the old one → detach → re-attach).
+/// Another buffer in the main window (:enew, :e memo.md) only hides the
+/// main buffer: it stays attached, and a reset brings it back.
 #[test]
 #[ignore]
-fn buffer_mirror_follows_enew() {
+fn main_buffer_survives_another_buffer_in_its_window() {
     let mut probe = Probe::spawn(true);
 
     probe.keys(&["a", "<CR>", "b"]);
     probe.wait_buffer("a\nb");
 
     probe.keys(&["<Esc>", ":", "enew", "<CR>", "i", "x"]);
-    probe.wait_buffer("x");
+    probe.keys(&["<Esc>", ":", "echo 'synced'", "<CR>"]);
+    probe.wait("the echo", |m| {
+        m.view.transient_message.as_deref() == Some("synced")
+    });
+    assert_eq!(probe.model.view.buffer.text(), "a\nb");
 
-    // Toggle-off clears the buffer
+    // Toggle-off clears the main buffer; typing goes to it again
     probe.reset_and_wait(false);
+    probe.keys(&["i", "z"]);
+    probe.wait_buffer("z");
 
     probe.shutdown();
 }

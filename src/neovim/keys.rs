@@ -72,7 +72,7 @@ pub enum Call {
     /// `:fclose!`
     CloseFloats,
     /// `nvim_win_set_buf` back to the main buffer (before closing the
-    /// other windows: the main buffer is unloaded when its last window closes)
+    /// other windows, so the window left shows it)
     ShowMainBuffer,
     /// Close other tab pages and windows (jacin shows one window)
     CloseOtherWindows,

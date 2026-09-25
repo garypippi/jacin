@@ -162,8 +162,7 @@ having the cursor:
 2. `:fclose!`, `nvim_win_set_buf` to the main buffer, `:tabonly! | only!`,
    `nvim_buf_set_lines` on the main buffer, `:startinsert` — each answered
    before the next request. The main buffer is shown before the other
-   windows close: with `bufhidden=wipe` it would be wiped with its last
-   window. Other buffers are only hidden
+   windows close, so the window left shows it. Other buffers are only hidden
 3. `nvim_get_mode` to re-sync
 
 ### nvim_ui_attach Redraw Events
@@ -180,7 +179,7 @@ Neovim waits for one.
 
 ### Buffer Events
 
-`nvim_buf_attach` on the current buffer keeps `BufferMirror` in sync via `nvim_buf_lines_event`; on `nvim_buf_detach_event` (e.g. `:enew` wipes the buffer) jacin re-attaches to the current buffer. IME off commits the mirror without an RPC.
+`nvim_buf_attach` on the current buffer keeps `BufferMirror` in sync via `nvim_buf_lines_event`; the main buffer has `bufhidden=hide`, so another buffer in its window (`:e memo.md`, `:enew`) only hides it and it stays attached; on `nvim_buf_detach_event` (e.g. `:bwipe`) jacin re-attaches to the current buffer. IME off commits the mirror without an RPC.
 
 ### Process Lifetime
 
