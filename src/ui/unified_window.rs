@@ -373,41 +373,63 @@ impl UnifiedPopup {
         let block_cursor =
             view.cursor_visible && !matches!(mode, Mode::Insert | Mode::Replace | Mode::CmdLine);
         let (cursor_row, cursor_col) = view.cursor;
+        let on_cursor = |row: usize, col: usize, cell: &StyledCell| {
+            block_cursor
+                && row == cursor_row
+                && (col == cursor_col || (col == cursor_col + 1 && cell.text.is_empty()))
+        };
+        let text_cursor = !view.cursor_on_float;
 
         for (row, cells) in view.rows.iter().enumerate() {
-            let style_of = |col: usize, cell: &StyledCell| {
-                let on_cursor = block_cursor
-                    && row == cursor_row
-                    && (col == cursor_col || (col == cursor_col + 1 && cell.text.is_empty()));
-                if on_cursor {
+            self.draw_grid_row(pixmap, &geo, row, 0, cells, |col, cell| {
+                if text_cursor && on_cursor(row, col, cell) {
                     CellStyle::Cursor
                 } else {
                     CellStyle::Normal
                 }
-            };
-            self.draw_grid_row(pixmap, &geo, row, 0, cells, style_of);
+            });
         }
 
         // Cursor past the end of the row (or on an empty row)
         let row_len = view.rows.get(cursor_row).map_or(0, Vec::len);
-        let x0 = geo.x(cursor_col);
-        if view.cursor_visible && x0 < geo.right_edge {
-            let (y_top, height) = (geo.y(cursor_row), geo.line_height.round());
-            if !block_cursor {
-                fill_rect(pixmap, x0, y_top, x0 + 2.0, height, rgba(TEXT_COLOR));
-            } else if cursor_col >= row_len {
-                let x1 = geo.x(cursor_col + 1).min(geo.right_edge);
-                fill_rect(pixmap, x0, y_top, x1, height, rgba(CURSOR_BG));
-            }
+        if text_cursor && (!block_cursor || cursor_col >= row_len) {
+            self.draw_cursor(pixmap, &geo, view, block_cursor);
         }
 
         // Floating windows on top, lowest zindex first
         for float in &view.floats {
             for (r, cells) in float.rows.iter().enumerate() {
-                self.draw_grid_row(pixmap, &geo, float.row + r, float.col, cells, |_, _| {
-                    CellStyle::Opaque
+                let row = float.row + r;
+                self.draw_grid_row(pixmap, &geo, row, float.col, cells, |col, cell| {
+                    if !text_cursor && on_cursor(row, col, cell) {
+                        CellStyle::Cursor
+                    } else {
+                        CellStyle::Opaque
+                    }
                 });
             }
+        }
+
+        // A block cursor in a float is a cell style (float cells are not
+        // trimmed); a bar goes over the float
+        if !text_cursor && !block_cursor {
+            self.draw_cursor(pixmap, &geo, view, false);
+        }
+    }
+
+    /// Draw the cursor as a bar, or as a block on an empty cell
+    fn draw_cursor(&self, pixmap: &mut Pixmap, geo: &CellGeometry, view: &WindowView, block: bool) {
+        let (cursor_row, cursor_col) = view.cursor;
+        let x0 = geo.x(cursor_col);
+        if !view.cursor_visible || x0 >= geo.right_edge {
+            return;
+        }
+        let (y_top, height) = (geo.y(cursor_row), geo.line_height.round());
+        if block {
+            let x1 = geo.x(cursor_col + 1).min(geo.right_edge);
+            fill_rect(pixmap, x0, y_top, x1, height, rgba(CURSOR_BG));
+        } else {
+            fill_rect(pixmap, x0, y_top, x0 + 2.0, height, rgba(TEXT_COLOR));
         }
     }
 

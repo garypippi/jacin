@@ -81,11 +81,14 @@ impl StyledCell {
 pub struct WindowView {
     /// Screen rows (trailing plain blanks trimmed)
     pub rows: Vec<Vec<StyledCell>>,
-    /// Cursor (row within `rows`, screen column)
+    /// Cursor (row within `rows`, column within the window); in float
+    /// coordinates the same as `FloatView::row`/`col`
     pub cursor: (usize, usize),
-    /// False when the cursor has left the window grid (e.g. to the global
-    /// grid): the view is the last window shown, without a cursor
+    /// False when the cursor is on neither the window nor a shown float
+    /// (e.g. on the global grid): the view is the last window shown
     pub cursor_visible: bool,
+    /// The cursor is in a float (e.g. an input window opened with focus)
+    pub cursor_on_float: bool,
     /// Floating windows overlaid on the rows, lowest zindex first
     pub floats: Vec<FloatView>,
 }
@@ -129,9 +132,10 @@ pub struct Screen {
     /// Keyed by grid id (only grids that are windows)
     windows: HashMap<u64, Window>,
     pub cursor: Cursor,
-    /// Last cursor position on a window grid (the cursor may move to the
-    /// global grid, e.g. at startup)
-    window_cursor: Option<Cursor>,
+    /// Last cursor position on each window grid, with the order of arrival
+    /// (the cursor may move to the global grid or into a float)
+    window_cursors: HashMap<u64, (u64, Cursor)>,
+    cursor_seq: u64,
     hl_attrs: HashMap<u64, HlAttr>,
     pub default_colors: DefaultColors,
 }
@@ -145,16 +149,29 @@ impl Screen {
         self.windows.get(&grid)
     }
 
-    /// Screen rows of the window holding the cursor that show buffer text
-    /// (filler rows past the buffer end excluded), at most `max_rows`,
-    /// scrolled so that the cursor row is visible.
+    /// Last cursor position on a normal (non-float) window: the window
+    /// shown as the text, also while a float has the focus
+    fn text_cursor(&self) -> Option<Cursor> {
+        self.window_cursors
+            .iter()
+            .filter(|(grid, _)| {
+                !matches!(
+                    self.window(**grid).and_then(|w| w.placement),
+                    Some(Placement::Float { .. })
+                )
+            })
+            .max_by_key(|(_, (seq, _))| *seq)
+            .map(|(_, (_, cursor))| *cursor)
+    }
+
+    /// Screen rows of the text window that show buffer text (filler rows
+    /// past the buffer end excluded), at most `max_rows`, scrolled so that
+    /// its cursor row is visible.
     pub fn window_view(&self, max_rows: usize) -> Option<WindowView> {
         if max_rows == 0 {
             return None;
         }
-        // Off the window grid: keep showing the last window, no cursor
-        let cursor_visible = self.cursor.grid != 1;
-        let cursor = self.window_cursor?; // None: no window grid yet
+        let cursor = self.text_cursor()?; // None: no window grid yet
         let grid = self.grid(cursor.grid)?;
         let lines = self
             .window(cursor.grid)
@@ -184,21 +201,45 @@ impl Screen {
                 cells
             })
             .collect();
-        Some(WindowView {
+        let mut view = WindowView {
             rows,
             cursor: (cursor.row - first, cursor.col),
-            cursor_visible,
+            cursor_visible: self.cursor.grid == cursor.grid,
+            cursor_on_float: false,
             floats: self.float_views(cursor.grid, first),
-        })
+        };
+        if let Some(pos) = self.float_cursor(cursor.grid, first) {
+            view.cursor = pos;
+            view.cursor_visible = true;
+            view.cursor_on_float = true;
+        }
+        Some(view)
+    }
+
+    /// Screen (row, col) of the window grid's origin (0, 0 if unknown)
+    fn window_origin(&self, window_grid: u64) -> (usize, usize) {
+        match self.window(window_grid).and_then(|w| w.placement) {
+            Some(Placement::Normal { row, col }) => (row, col),
+            _ => (0, 0),
+        }
+    }
+
+    /// The cursor in view coordinates when it is in a shown float and not
+    /// above the view
+    fn float_cursor(&self, window_grid: u64, first: usize) -> Option<(usize, usize)> {
+        let win = self.window(self.cursor.grid).filter(|w| !w.hidden)?;
+        let Some(Placement::Float { row, col, .. }) = win.placement else {
+            return None;
+        };
+        let (win_row, win_col) = self.window_origin(window_grid);
+        let row = (row + self.cursor.row).checked_sub(win_row + first)?;
+        Some((row, (col + self.cursor.col).saturating_sub(win_col)))
     }
 
     /// Visible floating windows relative to the current window, whose
     /// view starts at window row `first`. Float rows above the view are cut.
     fn float_views(&self, window_grid: u64, first: usize) -> Vec<FloatView> {
-        let (win_row, win_col) = match self.window(window_grid).and_then(|w| w.placement) {
-            Some(Placement::Normal { row, col }) => (row, col),
-            _ => (0, 0),
-        };
+        let (win_row, win_col) = self.window_origin(window_grid);
         let origin_row = win_row + first;
         let mut floats: Vec<FloatView> = self
             .windows
@@ -261,11 +302,14 @@ impl Screen {
             GridEvent::Destroy { grid } => {
                 self.grids.remove(&grid);
                 self.windows.remove(&grid);
+                self.window_cursors.remove(&grid);
             }
             GridEvent::CursorGoto { grid, row, col } => {
                 self.cursor = Cursor { grid, row, col };
                 if grid != 1 {
-                    self.window_cursor = Some(self.cursor);
+                    self.cursor_seq += 1;
+                    self.window_cursors
+                        .insert(grid, (self.cursor_seq, self.cursor));
                 }
             }
             GridEvent::Line {
@@ -325,6 +369,7 @@ impl Screen {
             }
             GridEvent::WinClose { grid } => {
                 self.windows.remove(&grid);
+                self.window_cursors.remove(&grid);
             }
             GridEvent::WinViewport {
                 grid,
@@ -587,6 +632,68 @@ mod tests {
         let view = screen.window_view(2).unwrap();
         assert_eq!(view.floats.len(), 1);
         assert_eq!(view.floats[0].row, 2); // window row 3 - first row 1
+    }
+
+    /// Text window at screen (0, 0) with the cursor at (0, 2), and a
+    /// focused float (grid 4) at screen (1, 1) holding the cursor
+    fn focused_float() -> Screen {
+        let mut screen = window(&[("ab", false)], 1, (0, 2));
+        screen.apply(GridEvent::WinPos {
+            grid: 2,
+            row: 0,
+            col: 0,
+            width: 6,
+            height: 4,
+        });
+        add_float(&mut screen, 4, 1, 1, "xyz", 50);
+        screen.apply(GridEvent::CursorGoto {
+            grid: 4,
+            row: 0,
+            col: 1,
+        });
+        screen
+    }
+
+    #[test]
+    fn focused_float_keeps_text_window() {
+        let view = focused_float().window_view(8).unwrap();
+        assert_eq!(texts(&view), ["ab"]);
+        // The float is overlaid once, at its screen position
+        assert_eq!(view.floats.len(), 1);
+        assert_eq!((view.floats[0].row, view.floats[0].col), (1, 1));
+        // The cursor is drawn in the float
+        assert!(view.cursor_visible && view.cursor_on_float);
+        assert_eq!(view.cursor, (1, 2));
+    }
+
+    #[test]
+    fn cursor_returns_to_text_window_after_float_closes() {
+        let mut screen = focused_float();
+        screen.apply(GridEvent::WinClose { grid: 4 });
+        screen.apply(GridEvent::Destroy { grid: 4 });
+        screen.apply(GridEvent::CursorGoto {
+            grid: 2,
+            row: 0,
+            col: 1,
+        });
+        let view = screen.window_view(8).unwrap();
+        assert!(view.floats.is_empty());
+        assert!(view.cursor_visible && !view.cursor_on_float);
+        assert_eq!(view.cursor, (0, 1));
+    }
+
+    #[test]
+    fn cursor_on_global_grid_is_hidden() {
+        let mut screen = window(&[("ab", false)], 1, (0, 2));
+        screen.apply(GridEvent::CursorGoto {
+            grid: 1,
+            row: 4,
+            col: 0,
+        });
+        let view = screen.window_view(8).unwrap();
+        assert_eq!(texts(&view), ["ab"]);
+        assert!(!view.cursor_visible);
+        assert_eq!(view.cursor, (0, 2));
     }
 
     #[test]

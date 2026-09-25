@@ -418,6 +418,45 @@ fn resized_ui_wraps_long_line_in_window_view() {
     probe.shutdown();
 }
 
+/// A float opened with focus (e.g. a dictionary registration window) is
+/// overlaid on the text window, with the cursor drawn in it.
+#[test]
+#[ignore]
+fn focused_float_is_overlaid_with_cursor() {
+    let mut probe = Probe::spawn_with(true, Some((20, 9)));
+
+    probe.keys(&["a", "b", "<Esc>", ":"]);
+    probe.keys(&[
+        "call nvim_open_win(nvim_create_buf(0, 1), 1, {'relative': 'cursor', \
+         'row': 1, 'col': 0, 'width': 8, 'height': 1, 'border': 'single'})",
+        "<CR>",
+        "i",
+        "x",
+        "y",
+    ]);
+    probe.wait("float with cursor", |m| {
+        m.view.screen.window_view(8).is_some_and(|view| {
+            let text: Vec<String> = view
+                .rows
+                .iter()
+                .map(|r| r.iter().map(|c| c.text.as_str()).collect())
+                .collect();
+            let [float] = view.floats.as_slice() else {
+                return false;
+            };
+            let float_text: String = float.rows[1].iter().map(|c| c.text.as_str()).collect();
+            // Border row, then the text row; the cursor after "xy"
+            text == ["ab"]
+                && float.row == 1
+                && float_text.contains("xy")
+                && view.cursor_on_float
+                && view.cursor == (2, float.col + 3)
+        })
+    });
+
+    probe.shutdown();
+}
+
 /// Neovim is started with `g:jacin = 1` so user config can detect jacin.
 #[test]
 #[ignore]

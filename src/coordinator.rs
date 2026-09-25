@@ -269,10 +269,11 @@ impl State {
                 let view = self.model.view.screen.window_view(MAX_GRID_ROWS);
                 match &view {
                     Some(v) => log::debug!(
-                        "[POPUP] window grid: {} rows, cursor={:?} (visible={})",
+                        "[POPUP] window grid: {} rows, cursor={:?} (visible={}, float={})",
                         v.rows.len(),
                         v.cursor,
-                        v.cursor_visible
+                        v.cursor_visible,
+                        v.cursor_on_float
                     ),
                     None => log::debug!("[POPUP] no window grid yet"),
                 }

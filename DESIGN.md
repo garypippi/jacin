@@ -246,7 +246,7 @@ whenever the mode is the command line.
 ### Popup-Only Display
 
 - The app gets no preedit content; text appears in the app only on commit. An empty preedit is still sent whenever the IME is enabled, because applications such as Firefox only report the cursor rectangle in response to a preedit update, and the compositor otherwise places the popup at the previously focused field
-- UnifiedPopup renders Neovim's window grid (with floats such as nvim-cmp menus), then the mode with a column beside it: a header row (command line, else `showcmd`), a message row, and the candidates; the first present one shares the mode's row
+- UnifiedPopup renders Neovim's window grid — the normal window that last had the cursor, with floats such as nvim-cmp menus overlaid; a float opened with focus keeps the window as the text and gets the cursor — then the mode with a column beside it: a header row (command line, else `showcmd`), a message row, and the candidates; the first present one shares the mode's row
 - While the command line is shown, only its own completion (`popupmenu_show` grid −1) is listed: a buffer's menu can't be used from a prompt such as `confirm()`, whose question and prompt must stay visible
 - A candidate is highlighted only when Neovim reports one selected (none with `'completeopt'` noselect)
 - A message stays while the command line is shown (it may be a prompt's question) and for 2 seconds after, or 2 seconds otherwise
