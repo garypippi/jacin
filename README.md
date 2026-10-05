@@ -1,7 +1,7 @@
 # jacin
 
->[!warning]
-> **Experimental:** jacin is an early-stage project and may have bugs, rough edges, or compatibility issues. Its behavior and configuration may change.
+> [!NOTE]
+> jacin is still under development. Configuration and behavior may change between versions.
 
 An input method for Wayland that lets you type into any application using Neovim.
 
