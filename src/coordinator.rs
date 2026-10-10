@@ -243,13 +243,15 @@ impl State {
         }
     }
 
-    /// Clear Neovim's buffer, dropping keys not processed yet (they were
-    /// typed for the text being thrown away). With `stash` (the text was not
+    /// Clear Neovim's buffer, ending the input session: keys not processed
+    /// yet were typed for the text being thrown away, and one still waiting
+    /// for Neovim must not commit or pass through to the next text field
+    /// (or commit again after IME off). With `stash` (the text was not
     /// committed, e.g. focus moved away), it goes to the stash register
     /// (`stash_register` in the config), if one is set.
     pub(crate) fn clear_nvim_buffer(&mut self, stash: bool) {
         if let Some(nvim) = self.nvim.as_mut() {
-            for seq in nvim.discard_queued_keys() {
+            for seq in nvim.end_session() {
                 self.model.sent_keys.remove(seq);
             }
         }

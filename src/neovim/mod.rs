@@ -238,9 +238,10 @@ impl Neovim {
         self.run(cmds)
     }
 
-    /// Drop queued keys that haven't started; returns their seqs
-    pub fn discard_queued_keys(&mut self) -> Vec<u64> {
-        self.keys.discard_queued()
+    /// End the input session: keys typed in it have no effect anymore.
+    /// Returns the seqs of dropped keys that haven't started.
+    pub fn end_session(&mut self) -> Vec<u64> {
+        self.keys.end_session()
     }
 
     /// A key is being processed or queued

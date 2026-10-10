@@ -139,11 +139,24 @@ enum Wait {
     ResetDone,
 }
 
+impl Wait {
+    /// The key has not reached Neovim yet, or jacin acts on it itself with
+    /// the reply (commit, passthrough)
+    fn holds_key(self) -> bool {
+        matches!(
+            self,
+            Wait::BeforeLines(_) | Wait::Lines(_) | Wait::RegisterCheck(_)
+        )
+    }
+}
+
 #[derive(Debug)]
 struct Current {
     /// (seq, key) of a user key; None for `Item::Reset`
     key: Option<(u64, String)>,
     wait: Wait,
+    /// The key was typed in an input session that has ended
+    ended: bool,
 }
 
 pub struct KeyProcessor {
@@ -194,9 +207,15 @@ impl KeyProcessor {
         out
     }
 
-    /// Drop queued items that haven't started. Returns the seqs of dropped
-    /// keys (the one in progress completes normally).
-    pub fn discard_queued(&mut self) -> Vec<u64> {
+    /// End the input session (focus change, IME off): keys typed in it have
+    /// no effect anymore. Queued items are dropped; returns the seqs of
+    /// dropped keys. The key in progress finishes its exchange with Neovim,
+    /// but if it still holds its effect (see `Wait::holds_key`) it is
+    /// dropped too, leaving the text to the reset that follows.
+    pub fn end_session(&mut self) -> Vec<u64> {
+        if let Some(current) = &mut self.current {
+            current.ended = true;
+        }
         self.queue
             .drain(..)
             .filter_map(|item| match item {
@@ -338,11 +357,16 @@ impl KeyProcessor {
     }
 
     fn resume(&mut self, current: Current, reply: Reply, mode: Mode, out: &mut Vec<Cmd>) {
-        let Current { key, wait } = current;
+        let Current { key, wait, ended } = current;
         let Some((seq, key)) = key else {
             self.resume_reset(wait, reply, out);
             return;
         };
+        if ended && wait.holds_key() {
+            log::debug!("[KEYS] #{seq} {key:?}: session ended, dropped");
+            self.finish(seq, mode, out);
+            return;
+        }
 
         let blocking = match reply {
             Reply::Mode { blocking, .. } => blocking,
@@ -547,7 +571,11 @@ impl KeyProcessor {
 
     fn request(&mut self, key: Option<(u64, String)>, wait: Wait, req: Req, out: &mut Vec<Cmd>) {
         out.push(Cmd::Request(req));
-        self.current = Some(Current { key, wait });
+        self.current = Some(Current {
+            key,
+            wait,
+            ended: false,
+        });
     }
 
     fn finish(&mut self, seq: u64, mode: Mode, out: &mut Vec<Cmd>) {
@@ -1234,18 +1262,64 @@ mod tests {
     }
 
     #[test]
-    fn discard_drops_only_unstarted_items() {
+    fn end_session_drops_unstarted_items() {
         let mut h = Harness::new(Mode::Normal);
         h.key("x");
         h.key("y");
         reset(&mut h, true);
         h.key("z");
-        assert_eq!(h.kp.discard_queued(), vec![2, 3]);
+        assert_eq!(h.kp.end_session(), vec![2, 3]);
         assert_eq!(
             h.mode(Mode::Normal, false),
             vec![Cmd::SetMode(Mode::Normal), done(1, PendingState::None)]
         );
         assert!(!h.kp.is_busy());
+    }
+
+    #[test]
+    fn commit_key_of_an_ended_session_is_dropped() {
+        // Waiting for the lines: no commit, the reset gets the text
+        let mut h = Harness::new(Mode::Insert);
+        h.key(COMMIT);
+        h.mode(Mode::Insert, false);
+        assert!(h.kp.end_session().is_empty());
+        assert_eq!(h.reply(lines(&["foo"])), vec![done(1, PendingState::None)]);
+        assert!(!h.kp.is_busy());
+
+        // Waiting for the mode: the lines are not even read
+        let mut h = Harness::new(Mode::Insert);
+        h.key(COMMIT);
+        h.kp.end_session();
+        assert_eq!(
+            h.mode(Mode::Insert, false),
+            vec![Cmd::SetMode(Mode::Insert), done(1, PendingState::None)]
+        );
+    }
+
+    #[test]
+    fn line_keys_of_an_ended_session_neither_pass_through_nor_edit() {
+        for buffer in [&[""][..], &["foo"][..]] {
+            let mut h = Harness::new(Mode::Insert);
+            h.key("<CR>");
+            h.mode(Mode::Insert, false);
+            h.kp.end_session();
+            assert_eq!(h.reply(lines(buffer)), vec![done(1, PendingState::None)]);
+        }
+    }
+
+    #[test]
+    fn input_key_of_an_ended_session_completes() {
+        // Already in Neovim: its mode query still updates the state
+        let mut h = Harness::new(Mode::Normal);
+        h.key("d");
+        h.kp.end_session();
+        assert_eq!(
+            h.mode(Mode::OperatorPending, false),
+            vec![
+                Cmd::SetMode(Mode::OperatorPending),
+                done(1, PendingState::Motion)
+            ]
+        );
     }
 
     #[test]
