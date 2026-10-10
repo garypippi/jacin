@@ -45,6 +45,28 @@ pub struct WaylandState {
     pub sensitive: bool,
 }
 
+/// Longest commit_string text the protocol allows
+const MAX_COMMIT_BYTES: usize = 4000;
+
+/// Split `text` into pieces of at most `max` bytes on char boundaries
+fn utf8_chunks(text: &str, max: usize) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut rest = text;
+    while rest.len() > max {
+        let mut end = max;
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (chunk, tail) = rest.split_at(end);
+        chunks.push(chunk);
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        chunks.push(rest);
+    }
+    chunks
+}
+
 pub type ContentType = (WEnum<ContentHint>, WEnum<ContentPurpose>);
 
 /// A password or PIN field, or one the application marks as sensitive
@@ -154,9 +176,15 @@ impl WaylandState {
         log::debug!("[IM] Requested cursor rectangle (serial={})", self.serial);
     }
 
+    /// Commit text in pieces of at most `MAX_COMMIT_BYTES`: a longer
+    /// request does not fit in a Wayland message and breaks the connection.
+    /// Each piece gets its own commit, since a second commit_string before
+    /// the commit would replace the first.
     pub fn commit_string(&mut self, text: &str) {
-        self.input_method.commit_string(text.to_string());
-        self.input_method.commit(self.serial);
+        for chunk in utf8_chunks(text, MAX_COMMIT_BYTES) {
+            self.input_method.commit_string(chunk.to_string());
+            self.input_method.commit(self.serial);
+        }
     }
 
     /// Release a key the application saw pressed before the grab started
@@ -225,6 +253,29 @@ fn create_keymap_memfd(keymap_str: &str) -> Option<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_text_is_one_chunk() {
+        assert_eq!(utf8_chunks("あいう", 4000), vec!["あいう"]);
+        assert!(utf8_chunks("", 4000).is_empty());
+    }
+
+    #[test]
+    fn long_text_splits_on_char_boundaries() {
+        // 3-byte chars: 4000 is not a multiple of 3
+        let text = "あ".repeat(1500);
+        let chunks = utf8_chunks(&text, MAX_COMMIT_BYTES);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 3999);
+        assert!(chunks.iter().all(|c| c.len() <= MAX_COMMIT_BYTES));
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn exact_limit_is_one_chunk() {
+        let text = "a".repeat(MAX_COMMIT_BYTES);
+        assert_eq!(utf8_chunks(&text, MAX_COMMIT_BYTES), vec![text.as_str()]);
+    }
 
     fn content(hint: ContentHint, purpose: ContentPurpose) -> ContentType {
         (WEnum::Value(hint), WEnum::Value(purpose))
