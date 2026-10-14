@@ -71,10 +71,15 @@ pub(crate) fn keysym_to_vim(
         if let Some(name) = special_key_name(keysym) {
             return Some(format!("<C-{name}>"));
         }
-        if let Some(c) = keysym_to_letter(keysym) {
-            return Some(format!("<C-{c}>"));
-        }
-        return None;
+        // utf8 is already a control character (Ctrl+\ gives "\x1c"), so the
+        // character comes from the keysym. Neovim decides what <C-x> means
+        // (<C-\><C-n> leaves terminal mode; unmapped <C-1> inserts "1")
+        let c = char::from_u32(xkb::keysym_to_utf32(keysym)).filter(|c| !c.is_control())?;
+        return Some(if c == '<' {
+            "<C-lt>".into()
+        } else {
+            format!("<C-{c}>")
+        });
     }
 
     // No modifier: special keys get <> wrapper, printable chars returned as-is
@@ -316,9 +321,29 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_non_letter_non_special_returns_none() {
-        // Ctrl+digit: keysym_to_letter returns None, not special → None
-        assert_eq!(keysym_to_vim(true, false, Keysym::_1, "1"), None);
+    fn ctrl_symbols_and_digits() {
+        // Ctrl turns utf8 into a control character; the keysym gives the key
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::backslash, "\x1c"),
+            Some("<C-\\>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::bracketleft, "\x1b"),
+            Some("<C-[>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::_1, "1"),
+            Some("<C-1>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::less, "<"),
+            Some("<C-lt>".into())
+        );
+    }
+
+    #[test]
+    fn ctrl_modifier_only_returns_none() {
+        assert_eq!(keysym_to_vim(true, false, Keysym::Control_L, ""), None);
     }
 
     // ── keysym_to_vim: Alt modifier ──
