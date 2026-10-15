@@ -204,6 +204,10 @@ impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for State {
             zwp_input_method_v2::Event::Deactivate => {
                 log::info!("IME deactivated");
                 state.wayland.pending_deactivate = true;
+                // Activation state is double-buffered: the last of activate
+                // and deactivate before done is the one applied. An earlier
+                // deactivate stays pending so the old field is still cleaned up.
+                state.wayland.pending_activate = false;
             }
             zwp_input_method_v2::Event::ContentType { hint, purpose } => {
                 state.wayland.pending_content_type = Some((hint, purpose));
