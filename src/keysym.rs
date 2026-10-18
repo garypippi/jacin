@@ -3,33 +3,84 @@
 //! Pure functions for converting XKB keysyms and modifier state into Vim key notation.
 //! No I/O or mutable state — all functions are side-effect free.
 
+use std::borrow::Cow;
+
 use xkbcommon::xkb;
+use xkbcommon::xkb::Keysym;
+
+/// Keysyms with a Vim key name, other than F1-F35.
+///
+/// Vim names come from `:help key-notation` and Neovim's
+/// `src/nvim/keycodes.lua` (what `nvim_input` reads). Keysyms with no Vim
+/// name (Menu, media keys, ...) are left out. Keypad keys without NumLock get
+/// the `k` names; unmapped, Neovim treats them as the plain keys. Keypad keys
+/// with NumLock give digits as text, so they need no entry.
+const NAMED_KEYS: &[(Keysym, &str)] = &[
+    (Keysym::Return, "CR"),
+    // <kEnter> would act the same; <CR> keeps one key for Enter
+    (Keysym::KP_Enter, "CR"),
+    (Keysym::BackSpace, "BS"),
+    (Keysym::Tab, "Tab"),
+    // What Shift+Tab gives
+    (Keysym::ISO_Left_Tab, "Tab"),
+    (Keysym::Escape, "Esc"),
+    (Keysym::space, "Space"),
+    (Keysym::Delete, "Del"),
+    (Keysym::Insert, "Insert"),
+    (Keysym::Home, "Home"),
+    (Keysym::End, "End"),
+    (Keysym::Page_Up, "PageUp"),
+    (Keysym::Page_Down, "PageDown"),
+    (Keysym::Left, "Left"),
+    (Keysym::Right, "Right"),
+    (Keysym::Up, "Up"),
+    (Keysym::Down, "Down"),
+    (Keysym::Help, "Help"),
+    (Keysym::Undo, "Undo"),
+    (Keysym::Find, "Find"),
+    (Keysym::Select, "Select"),
+    (Keysym::KP_Home, "kHome"),
+    (Keysym::KP_End, "kEnd"),
+    (Keysym::KP_Page_Up, "kPageUp"),
+    (Keysym::KP_Page_Down, "kPageDown"),
+    (Keysym::KP_Insert, "kInsert"),
+    (Keysym::KP_Delete, "kDel"),
+    (Keysym::KP_Left, "kLeft"),
+    (Keysym::KP_Right, "kRight"),
+    (Keysym::KP_Up, "kUp"),
+    (Keysym::KP_Down, "kDown"),
+    (Keysym::KP_Begin, "kOrigin"),
+];
 
 /// Map keysym to its Vim special-key name (e.g. `Return` → `"CR"`).
 ///
 /// Only returns names for keys that need `<>` wrapping in Vim notation.
 /// Returns `None` for letters, digits, and other printable characters.
-fn special_key_name(keysym: xkb::Keysym) -> Option<&'static str> {
-    use xkbcommon::xkb::Keysym;
-
-    match keysym {
-        Keysym::Return | Keysym::KP_Enter => Some("CR"),
-        Keysym::BackSpace => Some("BS"),
-        Keysym::Tab => Some("Tab"),
-        Keysym::Escape => Some("Esc"),
-        Keysym::space => Some("Space"),
-        Keysym::Left => Some("Left"),
-        Keysym::Right => Some("Right"),
-        Keysym::Up => Some("Up"),
-        Keysym::Down => Some("Down"),
-        _ => None,
+fn special_key_name(keysym: Keysym) -> Option<Cow<'static, str>> {
+    // F1-F35 are consecutive keysyms
+    if (Keysym::F1.raw()..=Keysym::F35.raw()).contains(&keysym.raw()) {
+        let n = keysym.raw() - Keysym::F1.raw() + 1;
+        return Some(Cow::Owned(format!("F{n}")));
     }
+    NAMED_KEYS
+        .iter()
+        .find(|(sym, _)| *sym == keysym)
+        .map(|(_, name)| Cow::Borrowed(*name))
+}
+
+/// Every Vim key name `special_key_name` can return
+#[cfg(test)]
+pub(crate) fn special_key_names() -> Vec<String> {
+    let f_keys = (1..=35).map(|n| format!("F{n}"));
+    let named = NAMED_KEYS.iter().map(|(_, name)| name.to_string());
+    let mut names: Vec<String> = named.chain(f_keys).collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Map keysym to a lowercase letter (a-z), if applicable.
-fn keysym_to_letter(keysym: xkb::Keysym) -> Option<char> {
-    use xkbcommon::xkb::Keysym;
-
+fn keysym_to_letter(keysym: Keysym) -> Option<char> {
     if keysym.raw() >= Keysym::a.raw() && keysym.raw() <= Keysym::z.raw() {
         Some((keysym.raw() - Keysym::a.raw() + b'a' as u32) as u8 as char)
     } else {
@@ -45,12 +96,7 @@ pub(crate) fn is_printable(utf8: &str) -> bool {
 /// Convert an XKB keysym + modifiers to Vim notation.
 ///
 /// Returns `None` if the key has no Vim representation (e.g. bare modifier keys).
-pub(crate) fn keysym_to_vim(
-    ctrl: bool,
-    alt: bool,
-    keysym: xkb::Keysym,
-    utf8: &str,
-) -> Option<String> {
+pub(crate) fn keysym_to_vim(ctrl: bool, alt: bool, keysym: Keysym, utf8: &str) -> Option<String> {
     // Handle Alt combinations: <A-key>
     if alt {
         if let Some(name) = special_key_name(keysym) {
@@ -101,29 +147,72 @@ mod tests {
 
     // ── special_key_name ──
 
-    #[test]
-    fn special_key_name_return_variants() {
-        assert_eq!(special_key_name(Keysym::Return), Some("CR"));
-        assert_eq!(special_key_name(Keysym::KP_Enter), Some("CR"));
+    fn name(keysym: Keysym) -> Option<String> {
+        special_key_name(keysym).map(|n| n.into_owned())
     }
 
     #[test]
-    fn special_key_name_all_mapped() {
-        assert_eq!(special_key_name(Keysym::BackSpace), Some("BS"));
-        assert_eq!(special_key_name(Keysym::Tab), Some("Tab"));
-        assert_eq!(special_key_name(Keysym::Escape), Some("Esc"));
-        assert_eq!(special_key_name(Keysym::space), Some("Space"));
-        assert_eq!(special_key_name(Keysym::Left), Some("Left"));
-        assert_eq!(special_key_name(Keysym::Right), Some("Right"));
-        assert_eq!(special_key_name(Keysym::Up), Some("Up"));
-        assert_eq!(special_key_name(Keysym::Down), Some("Down"));
+    fn special_key_name_table() {
+        for (keysym, expected) in [
+            (Keysym::Return, "CR"),
+            (Keysym::KP_Enter, "CR"),
+            (Keysym::BackSpace, "BS"),
+            (Keysym::Tab, "Tab"),
+            (Keysym::ISO_Left_Tab, "Tab"),
+            (Keysym::Escape, "Esc"),
+            (Keysym::space, "Space"),
+            (Keysym::Delete, "Del"),
+            (Keysym::Insert, "Insert"),
+            (Keysym::Home, "Home"),
+            (Keysym::End, "End"),
+            (Keysym::Page_Up, "PageUp"),
+            (Keysym::Page_Down, "PageDown"),
+            (Keysym::Left, "Left"),
+            (Keysym::Right, "Right"),
+            (Keysym::Up, "Up"),
+            (Keysym::Down, "Down"),
+            (Keysym::KP_Home, "kHome"),
+            (Keysym::KP_Delete, "kDel"),
+            (Keysym::KP_Begin, "kOrigin"),
+        ] {
+            assert_eq!(name(keysym).as_deref(), Some(expected), "{keysym:?}");
+        }
+    }
+
+    #[test]
+    fn special_key_name_function_keys() {
+        assert_eq!(name(Keysym::F1).as_deref(), Some("F1"));
+        assert_eq!(name(Keysym::F12).as_deref(), Some("F12"));
+        assert_eq!(name(Keysym::F35).as_deref(), Some("F35"));
     }
 
     #[test]
     fn special_key_name_non_special_returns_none() {
-        assert_eq!(special_key_name(Keysym::a), None);
-        assert_eq!(special_key_name(Keysym::_1), None);
-        assert_eq!(special_key_name(Keysym::Shift_L), None);
+        assert_eq!(name(Keysym::a), None);
+        assert_eq!(name(Keysym::_1), None);
+        assert_eq!(name(Keysym::KP_1), None);
+        assert_eq!(name(Keysym::Shift_L), None);
+        assert_eq!(name(Keysym::Menu), None);
+    }
+
+    #[test]
+    fn named_keys_in_vim_notation() {
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::Delete, ""),
+            Some("<Del>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, false, Keysym::ISO_Left_Tab, ""),
+            Some("<Tab>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(true, false, Keysym::Home, ""),
+            Some("<C-Home>".into())
+        );
+        assert_eq!(
+            keysym_to_vim(false, true, Keysym::F5, ""),
+            Some("<A-F5>".into())
+        );
     }
 
     // ── keysym_to_letter ──

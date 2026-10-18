@@ -888,3 +888,38 @@ fn prompt_over_completion_menu_is_shown() {
 
     probe.shutdown();
 }
+
+/// Every Vim key name jacin sends is one Neovim knows: unknown names come
+/// back from keytrans() as `<lt>Name>`
+#[test]
+#[ignore]
+fn special_key_names_are_known_to_neovim() {
+    let mut probe = Probe::spawn(false);
+
+    let names = crate::keysym::special_key_names();
+    let list = names
+        .iter()
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // nr2char(60) is '<': a literal one would start a key in nvim_input
+    let command = format!(
+        "echo 'unknown:' .. join(filter([{list}], {{_, n -> \
+         keytrans(nvim_replace_termcodes(nr2char(60) .. n .. '>', 1, 1, 1)) \
+         !=# nr2char(60) .. n .. '>'}}), ',')"
+    );
+    let msgs = probe.keys(&[":", &command, "<CR>"]);
+    let is_result = |m: &FromNeovim| matches!(m, FromNeovim::CmdlineMessage { text, .. } if text.starts_with("unknown:"));
+    let result = msgs
+        .iter()
+        .find(|m| is_result(m))
+        .cloned()
+        .or_else(|| probe.recv_until(is_result, MSG_TIMEOUT));
+    let text = match result {
+        Some(FromNeovim::CmdlineMessage { text, .. }) => Some(text),
+        _ => None,
+    };
+    assert_eq!(text.as_deref(), Some("unknown:"));
+
+    probe.shutdown();
+}
