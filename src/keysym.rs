@@ -68,12 +68,10 @@ fn special_key_name(keysym: Keysym) -> Option<Cow<'static, str>> {
         .map(|(_, name)| Cow::Borrowed(*name))
 }
 
-/// Every Vim key name `special_key_name` can return
+/// Every Vim key name `special_key_name` can return, once each
 #[cfg(test)]
 pub(crate) fn special_key_names() -> Vec<String> {
-    let f_keys = (1..=35).map(|n| format!("F{n}"));
-    let named = NAMED_KEYS.iter().map(|(_, name)| name.to_string());
-    let mut names: Vec<String> = named.chain(f_keys).collect();
+    let mut names: Vec<String> = all_key_names().collect();
     names.sort();
     names.dedup();
     names
@@ -162,9 +160,107 @@ pub(crate) fn key_name(notation: &str) -> Option<&str> {
     Some(inner)
 }
 
+/// Write a key from the config the way `keysym_to_vim` writes it, so the two
+/// compare as strings: `<c-enter>` → `<C-CR>`, `<C-A-x>` → `<A-C-x>`.
+/// `None` if it is not one key jacin sends.
+pub(crate) fn normalize_key(notation: &str) -> Option<String> {
+    let Some(inner) = notation
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .filter(|inner| !inner.is_empty())
+    else {
+        let mut chars = notation.chars();
+        let c = chars.next()?;
+        return if chars.next().is_none() {
+            write_key(KeyMods::default(), Key::Char(c))
+        } else {
+            None
+        };
+    };
+    let mut mods = KeyMods::default();
+    let mut rest = inner;
+    // A modifier is a letter and '-' with a key after it (<C--> is Ctrl+-)
+    while let Some((m, key)) = rest
+        .split_once('-')
+        .filter(|(m, key)| m.len() == 1 && !key.is_empty())
+    {
+        match m.to_ascii_uppercase().as_str() {
+            "A" | "M" => mods.alt = true,
+            "C" => mods.ctrl = true,
+            "S" => mods.shift = true,
+            // jacin never sends Super (D-) or Meta (T-)
+            _ => return None,
+        }
+        rest = key;
+    }
+    write_key(mods, parse_key_name(rest)?)
+}
+
+enum Key {
+    Named(String),
+    Char(char),
+}
+
+/// A key name as in `:help key-notation`, any case
+fn parse_key_name(name: &str) -> Option<Key> {
+    let mut chars = name.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        return Some(Key::Char(c));
+    }
+    let alias = match name.to_ascii_lowercase().as_str() {
+        "enter" | "return" => Some(Key::Named("CR".into())),
+        "lt" => Some(Key::Char('<')),
+        "bslash" => Some(Key::Char('\\')),
+        "bar" => Some(Key::Char('|')),
+        _ => None,
+    };
+    alias.or_else(|| {
+        all_key_names()
+            .find(|known| known.eq_ignore_ascii_case(name))
+            .map(Key::Named)
+    })
+}
+
+/// Every Vim key name `special_key_name` can return
+fn all_key_names() -> impl Iterator<Item = String> {
+    let named = NAMED_KEYS.iter().map(|(_, name)| name.to_string());
+    named.chain((1..=35).map(|n| format!("F{n}")))
+}
+
+/// A key written like `keysym_to_vim` would
+fn write_key(mods: KeyMods, key: Key) -> Option<String> {
+    let c = match key {
+        Key::Named(name) => return Some(format!("<{}{name}>", mods.prefix(true))),
+        Key::Char(' ') => return write_key(mods, Key::Named("Space".into())),
+        Key::Char(c) if c.is_control() => return None,
+        Key::Char(c) => c,
+    };
+    // Shift goes into the character, Ctrl ignores case
+    let c = if mods.ctrl {
+        c.to_ascii_lowercase()
+    } else if mods.shift {
+        c.to_ascii_uppercase()
+    } else {
+        c
+    };
+    if !mods.ctrl && !mods.alt {
+        return Some(if c == '<' {
+            "<lt>".into()
+        } else {
+            c.to_string()
+        });
+    }
+    let c = if c == '<' {
+        "lt".to_string()
+    } else {
+        c.to_string()
+    };
+    Some(format!("<{}{c}>", mods.prefix(false)))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{KeyMods, is_printable, key_name, keysym_to_vim, special_key_name};
+    use super::{KeyMods, is_printable, key_name, keysym_to_vim, normalize_key, special_key_name};
     use xkbcommon::xkb::Keysym;
 
     // ── special_key_name ──
@@ -385,5 +481,61 @@ mod tests {
         assert_eq!(key_name("<C-lt>"), Some("lt"));
         assert_eq!(key_name("a"), None);
         assert_eq!(key_name("<lt>"), Some("lt"));
+    }
+
+    // ── normalize_key ──
+
+    #[test]
+    fn normalize_key_writes_keys_like_keysym_to_vim() {
+        for (config, expected) in [
+            ("<C-CR>", Some("<C-CR>")),
+            ("<c-cr>", Some("<C-CR>")),
+            ("<C-Enter>", Some("<C-CR>")),
+            ("<c-return>", Some("<C-CR>")),
+            ("<A-;>", Some("<A-;>")),
+            ("<M-;>", Some("<A-;>")),
+            ("<C-A-x>", Some("<A-C-x>")),
+            ("<S-C-a-tab>", Some("<A-C-S-Tab>")),
+            ("<C-S-r>", Some("<C-r>")),
+            ("<C-R>", Some("<C-r>")),
+            ("<A-S-a>", Some("<A-A>")),
+            ("<S-a>", Some("A")),
+            ("<C-->", Some("<C-->")),
+            ("<C-lt>", Some("<C-lt>")),
+            ("<C-<>", Some("<C-lt>")),
+            ("<C-Bslash>", Some("<C-\\>")),
+            ("<A-bar>", Some("<A-|>")),
+            ("<f12>", Some("<F12>")),
+            ("<khome>", Some("<kHome>")),
+            ("<C-Space>", Some("<C-Space>")),
+            ("<lt>", Some("<lt>")),
+            (";", Some(";")),
+            (" ", Some("<Space>")),
+            ("", None),
+            ("<>", None),
+            ("<C-Nope>", None),
+            ("<D-a>", None),
+            ("<Menu>", None),
+            ("ab", None),
+        ] {
+            assert_eq!(normalize_key(config).as_deref(), expected, "{config:?}");
+        }
+    }
+
+    /// What `normalize_key` writes is what `keysym_to_vim` sends for the key
+    #[test]
+    fn normalize_key_matches_keysym_to_vim() {
+        for (mods, keysym, utf8) in [
+            (CTRL, Keysym::Return, "\r"),
+            (ALT, Keysym::semicolon, ";"),
+            (CTRL_ALT, Keysym::x, "\x18"),
+            (ALL, Keysym::ISO_Left_Tab, "\t"),
+            (CTRL_SHIFT, Keysym::R, "\x12"),
+            (ALT_SHIFT, Keysym::A, "A"),
+            (CTRL, Keysym::less, "<"),
+        ] {
+            let sent = keysym_to_vim(mods, keysym, utf8).unwrap();
+            assert_eq!(normalize_key(&sent).as_deref(), Some(sent.as_str()));
+        }
     }
 }

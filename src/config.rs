@@ -97,6 +97,25 @@ impl Default for Keybinds {
     }
 }
 
+impl Keybinds {
+    /// Write the keys the way jacin sends them (`<c-enter>` → `<C-CR>`), so
+    /// they match keys as strings. A key jacin can't send falls back to the
+    /// default.
+    fn normalize(&mut self) {
+        match crate::keysym::normalize_key(&self.commit) {
+            Some(key) => self.commit = key,
+            None => {
+                let default = Self::default().commit;
+                log::warn!(
+                    "[CONFIG] keybinds.commit {:?} is not a key jacin can send; using {default}",
+                    self.commit
+                );
+                self.commit = default;
+            }
+        }
+    }
+}
+
 impl Config {
     pub fn load() -> Self {
         let Some(path) = Self::config_path() else {
@@ -116,7 +135,8 @@ impl Config {
         match toml::from_str(&contents) {
             Ok(config) => {
                 log::info!("[CONFIG] Loaded from {}", path.display());
-                let config: Self = config;
+                let mut config: Self = config;
+                config.keybinds.normalize();
                 if config.focus.size().is_none()
                     && (config.focus.columns.is_some() || config.focus.lines.is_some())
                 {
@@ -223,6 +243,21 @@ mod tests {
         assert!(config.behavior.startinsert);
         assert!(config.behavior.recording_blink);
         assert!(config.font.family.is_none());
+    }
+
+    #[test]
+    fn keybinds_are_normalized() {
+        let mut keybinds = Keybinds {
+            commit: "<c-enter>".into(),
+        };
+        keybinds.normalize();
+        assert_eq!(keybinds.commit, "<C-CR>");
+
+        let mut keybinds = Keybinds {
+            commit: "<C-Nope>".into(),
+        };
+        keybinds.normalize();
+        assert_eq!(keybinds.commit, "<C-CR>");
     }
 
     #[test]
