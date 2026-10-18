@@ -28,7 +28,7 @@ src/
   main.rs                    # Entry point, State struct, event loop setup
   dispatch.rs                # Wayland Dispatch impls, memmap_keymap
   input.rs                   # Key processing, handle_key, send_to_nvim
-  keysym.rs                  # keysym_to_vim (pure conversion function)
+  keysym.rs                  # Keys → Vim notation (keysym_to_vim, normalize_key for config; pure)
   model.rs                   # Model (ImeState + NvimView + SentKeys), reduce(FromNeovim) -> Vec<Effect>
   coordinator.rs             # apply_effects, IME toggle, popup coordination
   config.rs                  # Config file loading (TOML), keybind defaults

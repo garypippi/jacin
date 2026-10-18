@@ -9,8 +9,8 @@ use std::collections::VecDeque;
 
 use super::Modifiers;
 
-/// A key as it was pressed, kept to show it and to pass it through to the
-/// application once Neovim has processed it
+/// A key as it was pressed, kept to pass it through to the application once
+/// Neovim has processed it
 #[derive(Debug, Clone, PartialEq)]
 pub struct SentKey {
     /// Raw evdev keycode
@@ -18,8 +18,6 @@ pub struct SentKey {
     /// Modifiers at the time of the press (they may have changed by the time
     /// Neovim has processed the key)
     pub mods: Modifiers,
-    /// Key in Vim notation, as sent
-    pub vim_key: String,
 }
 
 #[derive(Default)]
@@ -72,7 +70,6 @@ mod tests {
         SentKey {
             keycode,
             mods: Modifiers::default(),
-            vim_key: "a".into(),
         }
     }
 

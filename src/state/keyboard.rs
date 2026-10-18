@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 use xkbcommon::xkb;
 
-use crate::keysym::KeyMods;
+use crate::keysym::{KeyMods, is_modifier};
 
 /// Raw modifier state from the keyboard grab (for virtual keyboard passthrough)
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -196,7 +196,7 @@ impl KeyboardState {
     pub fn is_modifier(&self, key: u32) -> bool {
         self.xkb_state.as_ref().is_some_and(|state| {
             let keycode = xkb::Keycode::new(key + 8);
-            is_modifier_keysym(state.key_get_one_sym(keycode).raw())
+            is_modifier(state.key_get_one_sym(keycode))
         })
     }
 
@@ -209,35 +209,8 @@ impl KeyboardState {
     }
 }
 
-/// Modifier keysyms: Shift_L..Hyper_R, the ISO level/group shifts and
-/// locks, Mode_switch
-fn is_modifier_keysym(raw: u32) -> bool {
-    matches!(raw, 0xffe1..=0xffee | 0xfe01..=0xfe13 | 0xff7e)
-}
-
 impl Default for KeyboardState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn modifier_keysyms() {
-        for sym in [
-            xkb::Keysym::Alt_L,
-            xkb::Keysym::Control_R,
-            xkb::Keysym::Super_L,
-            xkb::Keysym::Shift_L,
-            xkb::Keysym::ISO_Level3_Shift,
-        ] {
-            assert!(is_modifier_keysym(sym.raw()), "{sym:?}");
-        }
-        for sym in [xkb::Keysym::Return, xkb::Keysym::q, xkb::Keysym::Escape] {
-            assert!(!is_modifier_keysym(sym.raw()), "{sym:?}");
-        }
     }
 }

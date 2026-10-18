@@ -77,6 +77,12 @@ pub(crate) fn special_key_names() -> Vec<String> {
     names
 }
 
+/// Modifier keysyms: Shift_L..Hyper_R, the ISO level/group shifts and
+/// locks, Mode_switch
+pub(crate) fn is_modifier(keysym: Keysym) -> bool {
+    matches!(keysym.raw(), 0xffe1..=0xffee | 0xfe01..=0xfe13 | 0xff7e)
+}
+
 /// Modifiers held with a key
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct KeyMods {
@@ -260,7 +266,10 @@ fn write_key(mods: KeyMods, key: Key) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyMods, is_printable, key_name, keysym_to_vim, normalize_key, special_key_name};
+    use super::{
+        KeyMods, is_modifier, is_printable, key_name, keysym_to_vim, normalize_key,
+        special_key_name,
+    };
     use xkbcommon::xkb::Keysym;
 
     // ── special_key_name ──
@@ -311,6 +320,22 @@ mod tests {
         assert_eq!(name(Keysym::KP_1), None);
         assert_eq!(name(Keysym::Shift_L), None);
         assert_eq!(name(Keysym::Menu), None);
+    }
+
+    #[test]
+    fn modifier_keysyms() {
+        for sym in [
+            Keysym::Alt_L,
+            Keysym::Control_R,
+            Keysym::Super_L,
+            Keysym::Shift_L,
+            Keysym::ISO_Level3_Shift,
+        ] {
+            assert!(is_modifier(sym), "{sym:?}");
+        }
+        for sym in [Keysym::Return, Keysym::q, Keysym::Escape] {
+            assert!(!is_modifier(sym), "{sym:?}");
+        }
     }
 
     // ── is_printable ──

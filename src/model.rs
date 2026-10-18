@@ -357,7 +357,6 @@ mod replay_tests {
                 depressed: if ctrl { 0x4 } else { 0 },
                 ..Default::default()
             },
-            vim_key: if ctrl { "<C-x>".into() } else { "x".into() },
         }
     }
 

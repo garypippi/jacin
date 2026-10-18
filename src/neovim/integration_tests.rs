@@ -177,7 +177,6 @@ impl Probe {
         let seq = self.model.sent_keys.push(SentKey {
             keycode: 0,
             mods: Modifiers::default(),
-            vim_key: key.to_string(),
         });
         let events = self.nvim.push_key(seq, key, self.model.view.mode);
         self.apply(events);

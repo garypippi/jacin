@@ -286,6 +286,18 @@ RPC. A file leaves IME input on disk, the others race with the key flow or
 depend on fragile heuristics. The commit key (and IME off) are the only commit
 paths, and the buffer keeps `buftype=nofile` so `:q` never hits E37.
 
+### Key notation: write the key down, Neovim decides
+
+`keysym.rs` writes each key in Vim notation with all its modifiers
+(`<S-Tab>`, `<A-C-x>`, `<kHome>`) and nothing else; what a key means is
+Neovim's (unmapped, `<S-Tab>` acts as `<Tab>`, `<kHome>` as `<Home>`). Key
+names come from `:help key-notation` / Neovim's `keycodes.lua`, and an
+integration test checks Neovim knows each one. Shift is written only on
+named keys (on other keys it is in the character); Ctrl ignores case, as in a
+terminal, so Ctrl+Shift+r is `<C-r>`. Super combinations are not sent:
+unmapped, Neovim would type `<D-x>` as text. The commit key from the config is
+written the same way, so keys compare as strings.
+
 ### One window
 
 jacin draws neither the tabline nor the statusline, and shows only the

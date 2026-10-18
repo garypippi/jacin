@@ -96,7 +96,7 @@ Example:
 
 ```toml
 [keybinds]
-commit = "<C-CR>"          # Commit the entire buffer to the application
+commit = "<C-CR>"          # Commit the entire buffer to the application (Vim key notation, e.g. "<A-;>")
 
 [behavior]
 startinsert = true         # true: start in insert mode; false: start in normal mode

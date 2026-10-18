@@ -75,11 +75,10 @@ impl State {
             log::warn!("[KEY] {vim_key:?} dropped: Neovim is not keeping up");
             return;
         }
-        // Kept with the key to show it and in case Neovim passes it through
+        // Kept in case Neovim passes the key through
         let seq = self.model.sent_keys.push(SentKey {
             keycode: key,
             mods: self.keyboard.mods,
-            vim_key: vim_key.clone(),
         });
         // Not waited for: KeyProcessed and the rest arrive as Neovim messages
         let events = nvim.push_key(seq, &vim_key, mode);
