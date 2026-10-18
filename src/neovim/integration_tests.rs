@@ -178,8 +178,6 @@ impl Probe {
             keycode: 0,
             mods: Modifiers::default(),
             vim_key: key.to_string(),
-            ctrl: false,
-            alt: false,
         });
         let events = self.nvim.push_key(seq, key, self.model.view.mode);
         self.apply(events);
@@ -920,6 +918,19 @@ fn special_key_names_are_known_to_neovim() {
         _ => None,
     };
     assert_eq!(text.as_deref(), Some("unknown:"));
+
+    probe.shutdown();
+}
+
+/// Keys written with all their modifiers act as the plain keys when
+/// unmapped: <S-Tab> as <Tab>, <kHome> as <Home>
+#[test]
+#[ignore]
+fn modified_keys_act_as_plain_keys_when_unmapped() {
+    let mut probe = Probe::spawn(true);
+
+    probe.keys(&["a", "<S-Tab>", "<kHome>", "b", "<S-Space>"]);
+    probe.wait_buffer("b a\t");
 
     probe.shutdown();
 }

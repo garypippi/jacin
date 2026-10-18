@@ -41,12 +41,7 @@ impl State {
             wl_keyboard::KeyState::Released => "released",
             _ => "unknown",
         };
-        log::debug!(
-            "[KEY] code={}, state={}, ctrl={}",
-            key,
-            state_str,
-            self.keyboard.ctrl_pressed
-        );
+        log::debug!("[KEY] code={key}, state={state_str}");
 
         if key_state != wl_keyboard::KeyState::Pressed {
             self.keyboard.handle_key_release(key);
@@ -64,19 +59,12 @@ impl State {
         };
         log::debug!("[KEY] keysym={:?}, utf8={:?}", keysym, utf8);
 
-        let vim_key = keysym_to_vim(
-            self.keyboard.ctrl_pressed,
-            self.keyboard.alt_pressed,
-            keysym,
-            &utf8,
-        );
-        log::debug!("[KEY] vim_key={:?}", vim_key);
+        let mods = self.keyboard.key_mods();
+        let vim_key = keysym_to_vim(mods, keysym, &utf8);
+        log::debug!("[KEY] vim_key={vim_key:?}, {mods:?}");
 
         let Some(vim_key) = vim_key else {
-            log::debug!(
-                "[SKIP] no printable char, ctrl={}",
-                self.keyboard.ctrl_pressed
-            );
+            log::debug!("[SKIP] no Vim key");
             return;
         };
         let mode = self.model.view.mode;
@@ -92,8 +80,6 @@ impl State {
             keycode: key,
             mods: self.keyboard.mods,
             vim_key: vim_key.clone(),
-            ctrl: self.keyboard.ctrl_pressed,
-            alt: self.keyboard.alt_pressed,
         });
         // Not waited for: KeyProcessed and the rest arrive as Neovim messages
         let events = nvim.push_key(seq, &vim_key, mode);
@@ -119,25 +105,12 @@ impl State {
         mods_locked: u32,
         group: u32,
     ) {
-        let old_ctrl = self.keyboard.ctrl_pressed;
-        let old_alt = self.keyboard.alt_pressed;
-
+        let old = self.keyboard.key_mods();
         self.keyboard
             .update_modifiers(mods_depressed, mods_latched, mods_locked, group);
-
-        if old_ctrl != self.keyboard.ctrl_pressed {
-            log::debug!(
-                "[MOD] ctrl changed: {} -> {}",
-                old_ctrl,
-                self.keyboard.ctrl_pressed
-            );
-        }
-        if old_alt != self.keyboard.alt_pressed {
-            log::debug!(
-                "[MOD] alt changed: {} -> {}",
-                old_alt,
-                self.keyboard.alt_pressed
-            );
+        let new = self.keyboard.key_mods();
+        if old != new {
+            log::debug!("[MOD] {old:?} -> {new:?}");
         }
     }
 }

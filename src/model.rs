@@ -358,8 +358,6 @@ mod replay_tests {
                 ..Default::default()
             },
             vim_key: if ctrl { "<C-x>".into() } else { "x".into() },
-            ctrl,
-            alt: false,
         }
     }
 

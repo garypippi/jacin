@@ -8,6 +8,8 @@ use std::hash::{Hash, Hasher};
 use std::time::Instant;
 use xkbcommon::xkb;
 
+use crate::keysym::KeyMods;
+
 /// Raw modifier state from the keyboard grab (for virtual keyboard passthrough)
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Modifiers {
@@ -22,8 +24,6 @@ pub struct KeyboardState {
     pub xkb_context: xkb::Context,
     /// Current XKB state (after keymap loaded)
     pub xkb_state: Option<xkb::State>,
-    pub ctrl_pressed: bool,
-    pub alt_pressed: bool,
     /// Keys that should be ignored (pressed before we were ready)
     pub ignored_keys: HashSet<u32>,
     /// Time when we became ready (for debouncing)
@@ -49,8 +49,6 @@ impl KeyboardState {
         Self {
             xkb_context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_state: None,
-            ctrl_pressed: false,
-            alt_pressed: false,
             ignored_keys: HashSet::new(),
             ready_time: None,
             pending_keymap: false,
@@ -97,12 +95,6 @@ impl KeyboardState {
         mods_locked: u32,
         group: u32,
     ) {
-        const CTRL_MASK: u32 = 0x4;
-        const ALT_MASK: u32 = 0x8;
-
-        self.ctrl_pressed = (mods_depressed & CTRL_MASK) != 0;
-        self.alt_pressed = (mods_depressed & ALT_MASK) != 0;
-
         self.mods = Modifiers {
             depressed: mods_depressed,
             latched: mods_latched,
@@ -153,6 +145,22 @@ impl KeyboardState {
         }
     }
 
+    /// Modifiers held (pressed or latched), looked up by name in the keymap
+    pub fn key_mods(&self) -> KeyMods {
+        let Some(state) = self.xkb_state.as_ref() else {
+            return KeyMods::default();
+        };
+        let held = |name: &str| {
+            state.mod_name_is_active(name, xkb::STATE_MODS_DEPRESSED | xkb::STATE_MODS_LATCHED)
+        };
+        KeyMods {
+            ctrl: held(xkb::MOD_NAME_CTRL),
+            alt: held(xkb::MOD_NAME_ALT),
+            shift: held(xkb::MOD_NAME_SHIFT),
+            logo: held(xkb::MOD_NAME_LOGO),
+        }
+    }
+
     /// Get keysym and UTF-8 for a key
     pub fn get_key_info(&self, key: u32) -> Option<(xkb::Keysym, String)> {
         let xkb_state = self.xkb_state.as_ref()?;
@@ -176,8 +184,6 @@ impl KeyboardState {
     /// Reset modifier and pressed-key state (call when releasing keyboard grab)
     pub fn reset_modifiers(&mut self) {
         self.pressed_keys.clear();
-        self.ctrl_pressed = false;
-        self.alt_pressed = false;
         self.mods = Modifiers::default();
     }
 

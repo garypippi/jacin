@@ -79,70 +79,92 @@ pub(crate) fn special_key_names() -> Vec<String> {
     names
 }
 
-/// Map keysym to a lowercase letter (a-z), if applicable.
-fn keysym_to_letter(keysym: Keysym) -> Option<char> {
-    if keysym.raw() >= Keysym::a.raw() && keysym.raw() <= Keysym::z.raw() {
-        Some((keysym.raw() - Keysym::a.raw() + b'a' as u32) as u8 as char)
-    } else {
-        None
+/// Modifiers held with a key
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct KeyMods {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    /// Super
+    pub logo: bool,
+}
+
+impl KeyMods {
+    /// Modifier prefix in the order keytrans() writes them (`<M-C-S-x>`),
+    /// with `A-` for Alt
+    fn prefix(self, with_shift: bool) -> String {
+        let mut prefix = String::new();
+        if self.alt {
+            prefix.push_str("A-");
+        }
+        if self.ctrl {
+            prefix.push_str("C-");
+        }
+        if with_shift && self.shift {
+            prefix.push_str("S-");
+        }
+        prefix
     }
 }
 
 /// Returns `true` if `utf8` contains at least one printable (non-control) character.
-pub(crate) fn is_printable(utf8: &str) -> bool {
+fn is_printable(utf8: &str) -> bool {
     !utf8.is_empty() && !utf8.chars().all(char::is_control)
 }
 
 /// Convert an XKB keysym + modifiers to Vim notation.
 ///
-/// Returns `None` if the key has no Vim representation (e.g. bare modifier keys).
-pub(crate) fn keysym_to_vim(ctrl: bool, alt: bool, keysym: Keysym, utf8: &str) -> Option<String> {
-    // Handle Alt combinations: <A-key>
-    if alt {
-        if let Some(name) = special_key_name(keysym) {
-            return Some(format!("<A-{name}>"));
-        }
-        if let Some(c) = keysym_to_letter(keysym) {
-            return Some(format!("<A-{c}>"));
-        }
-        if is_printable(utf8) {
-            let escaped = utf8.replace('<', "lt");
-            return Some(format!("<A-{escaped}>"));
-        }
+/// Only writes the key down; what it means is up to Neovim (unmapped
+/// `<S-Tab>` acts as `<Tab>`, `<kHome>` as `<Home>`). Returns `None` if the
+/// key has no Vim representation (e.g. bare modifier keys).
+pub(crate) fn keysym_to_vim(mods: KeyMods, keysym: Keysym, utf8: &str) -> Option<String> {
+    // Super combinations are the compositor's: unmapped, Neovim would type
+    // <D-x> into the buffer as text
+    if mods.logo {
         return None;
     }
-
-    // Handle Ctrl combinations: <C-key>
-    if ctrl {
-        if let Some(name) = special_key_name(keysym) {
-            return Some(format!("<C-{name}>"));
-        }
-        // utf8 is already a control character (Ctrl+\ gives "\x1c"), so the
-        // character comes from the keysym. Neovim decides what <C-x> means
-        // (<C-\><C-n> leaves terminal mode; unmapped <C-1> inserts "1")
-        let c = char::from_u32(xkb::keysym_to_utf32(keysym)).filter(|c| !c.is_control())?;
-        return Some(if c == '<' {
-            "<C-lt>".into()
-        } else {
-            format!("<C-{c}>")
-        });
-    }
-
-    // No modifier: special keys get <> wrapper, printable chars returned as-is
+    // Named keys carry every modifier: <S-Tab>, <C-S-Left>
     if let Some(name) = special_key_name(keysym) {
-        return Some(format!("<{name}>"));
+        return Some(format!("<{}{name}>", mods.prefix(true)));
     }
-    if is_printable(utf8) {
-        // Escape '<' as '<lt>' for nvim_input (bare '<' starts a key sequence)
-        Some(utf8.replace('<', "<lt>"))
-    } else {
-        None
+    if mods.ctrl || mods.alt {
+        // With Ctrl, utf8 is already a control character (Ctrl+\ gives
+        // "\x1c"), so the character comes from the keysym. Neovim decides
+        // what <C-x> means (<C-\><C-n> leaves terminal mode; unmapped <C-1>
+        // inserts "1")
+        let c = char::from_u32(xkb::keysym_to_utf32(keysym)).filter(|c| !c.is_control())?;
+        // Shift is already in the character (<A-A>, <C-!>). Ctrl ignores
+        // case, as in a terminal: Ctrl+Shift+r is <C-r>
+        let c = if mods.ctrl { c.to_ascii_lowercase() } else { c };
+        let c = if c == '<' {
+            "lt".to_string()
+        } else {
+            c.to_string()
+        };
+        return Some(format!("<{}{c}>", mods.prefix(false)));
     }
+    // Shift alone is in the text already. Escape '<' as '<lt>' for
+    // nvim_input (a bare '<' starts a key)
+    is_printable(utf8).then(|| utf8.replace('<', "<lt>"))
+}
+
+/// The key of a Vim notation without its modifiers: `"CR"` for `<C-S-CR>`.
+/// `None` for a plain character.
+pub(crate) fn key_name(notation: &str) -> Option<&str> {
+    let mut inner = notation.strip_prefix('<')?.strip_suffix('>')?;
+    while let Some(rest) = ["A-", "C-", "S-"]
+        .iter()
+        .find_map(|m| inner.strip_prefix(m))
+        .filter(|rest| !rest.is_empty())
+    {
+        inner = rest;
+    }
+    Some(inner)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_printable, keysym_to_letter, keysym_to_vim, special_key_name};
+    use super::{KeyMods, is_printable, key_name, keysym_to_vim, special_key_name};
     use xkbcommon::xkb::Keysym;
 
     // ── special_key_name ──
@@ -195,313 +217,173 @@ mod tests {
         assert_eq!(name(Keysym::Menu), None);
     }
 
-    #[test]
-    fn named_keys_in_vim_notation() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Delete, ""),
-            Some("<Del>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::ISO_Left_Tab, ""),
-            Some("<Tab>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::Home, ""),
-            Some("<C-Home>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, true, Keysym::F5, ""),
-            Some("<A-F5>".into())
-        );
-    }
-
-    // ── keysym_to_letter ──
-
-    #[test]
-    fn keysym_to_letter_lowercase_range() {
-        assert_eq!(keysym_to_letter(Keysym::a), Some('a'));
-        assert_eq!(keysym_to_letter(Keysym::m), Some('m'));
-        assert_eq!(keysym_to_letter(Keysym::z), Some('z'));
-    }
-
-    #[test]
-    fn keysym_to_letter_non_letter_returns_none() {
-        assert_eq!(keysym_to_letter(Keysym::A), None);
-        assert_eq!(keysym_to_letter(Keysym::_1), None);
-        assert_eq!(keysym_to_letter(Keysym::Return), None);
-        assert_eq!(keysym_to_letter(Keysym::space), None);
-    }
-
     // ── is_printable ──
 
     #[test]
-    fn is_printable_ascii() {
+    fn is_printable_text_and_control() {
         assert!(is_printable("a"));
-        assert!(is_printable("Z"));
-        assert!(is_printable("1"));
         assert!(is_printable("<"));
-    }
-
-    #[test]
-    fn is_printable_multibyte() {
         assert!(is_printable("あ"));
-        assert!(is_printable("漢"));
-    }
-
-    #[test]
-    fn is_printable_empty_and_control() {
         assert!(!is_printable(""));
         assert!(!is_printable("\x00"));
         assert!(!is_printable("\x1b"));
     }
 
-    // ── keysym_to_vim: no modifiers ──
+    // ── keysym_to_vim ──
 
-    #[test]
-    fn printable_ascii() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::a, "a"),
-            Some("a".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::z, "z"),
-            Some("z".into())
-        );
+    const NONE: KeyMods = KeyMods {
+        ctrl: false,
+        alt: false,
+        shift: false,
+        logo: false,
+    };
+    const CTRL: KeyMods = KeyMods { ctrl: true, ..NONE };
+    const ALT: KeyMods = KeyMods { alt: true, ..NONE };
+    const SHIFT: KeyMods = KeyMods {
+        shift: true,
+        ..NONE
+    };
+    const CTRL_ALT: KeyMods = KeyMods {
+        ctrl: true,
+        alt: true,
+        ..NONE
+    };
+    const CTRL_SHIFT: KeyMods = KeyMods {
+        ctrl: true,
+        shift: true,
+        ..NONE
+    };
+    const ALT_SHIFT: KeyMods = KeyMods {
+        alt: true,
+        shift: true,
+        ..NONE
+    };
+    const ALL: KeyMods = KeyMods {
+        ctrl: true,
+        alt: true,
+        shift: true,
+        logo: false,
+    };
+    const LOGO: KeyMods = KeyMods { logo: true, ..NONE };
+
+    fn check(cases: &[(KeyMods, Keysym, &str, Option<&str>)]) {
+        for &(mods, keysym, utf8, expected) in cases {
+            assert_eq!(
+                keysym_to_vim(mods, keysym, utf8).as_deref(),
+                expected,
+                "{mods:?} {keysym:?} {utf8:?}"
+            );
+        }
     }
 
     #[test]
-    fn uppercase_via_utf8() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::A, "A"),
-            Some("A".into())
-        );
+    fn plain_keys() {
+        check(&[
+            (NONE, Keysym::a, "a", Some("a")),
+            (NONE, Keysym::_9, "9", Some("9")),
+            (NONE, Keysym::KP_1, "1", Some("1")),
+            (NONE, Keysym::less, "<", Some("<lt>")),
+            (NONE, Keysym::kana_A, "ア", Some("ア")),
+            (NONE, Keysym::Return, "\r", Some("<CR>")),
+            (NONE, Keysym::KP_Enter, "\r", Some("<CR>")),
+            (NONE, Keysym::space, " ", Some("<Space>")),
+            (NONE, Keysym::Delete, "\x7f", Some("<Del>")),
+            (NONE, Keysym::KP_Home, "", Some("<kHome>")),
+            (NONE, Keysym::F5, "", Some("<F5>")),
+        ]);
     }
 
     #[test]
-    fn digit_keys() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::_0, "0"),
-            Some("0".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::_9, "9"),
-            Some("9".into())
-        );
+    fn shift() {
+        check(&[
+            // In the text already
+            (SHIFT, Keysym::A, "A", Some("A")),
+            (SHIFT, Keysym::exclam, "!", Some("!")),
+            (SHIFT, Keysym::greater, ">", Some(">")),
+            // Written for named keys
+            (SHIFT, Keysym::ISO_Left_Tab, "\t", Some("<S-Tab>")),
+            (SHIFT, Keysym::Return, "\r", Some("<S-CR>")),
+            (SHIFT, Keysym::Left, "", Some("<S-Left>")),
+            (SHIFT, Keysym::space, " ", Some("<S-Space>")),
+        ]);
     }
 
     #[test]
-    fn special_keys() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Return, ""),
-            Some("<CR>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::BackSpace, ""),
-            Some("<BS>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Escape, ""),
-            Some("<Esc>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Tab, ""),
-            Some("<Tab>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::space, ""),
-            Some("<Space>".into())
-        );
+    fn ctrl() {
+        check(&[
+            (CTRL, Keysym::a, "\x01", Some("<C-a>")),
+            (CTRL, Keysym::backslash, "\x1c", Some("<C-\\>")),
+            (CTRL, Keysym::bracketleft, "\x1b", Some("<C-[>")),
+            (CTRL, Keysym::_1, "1", Some("<C-1>")),
+            (CTRL, Keysym::less, "<", Some("<C-lt>")),
+            (CTRL, Keysym::Return, "\r", Some("<C-CR>")),
+            (CTRL, Keysym::Home, "", Some("<C-Home>")),
+            // Ctrl ignores case
+            (CTRL_SHIFT, Keysym::R, "\x12", Some("<C-r>")),
+            (CTRL_SHIFT, Keysym::exclam, "!", Some("<C-!>")),
+            (CTRL_SHIFT, Keysym::ISO_Left_Tab, "\t", Some("<C-S-Tab>")),
+            (CTRL_SHIFT, Keysym::Left, "", Some("<C-S-Left>")),
+        ]);
     }
 
     #[test]
-    fn kp_enter_maps_to_cr() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::KP_Enter, ""),
-            Some("<CR>".into())
-        );
+    fn alt() {
+        check(&[
+            (ALT, Keysym::a, "a", Some("<A-a>")),
+            (ALT, Keysym::_1, "1", Some("<A-1>")),
+            (ALT, Keysym::semicolon, ";", Some("<A-;>")),
+            (ALT, Keysym::less, "<", Some("<A-lt>")),
+            (ALT, Keysym::kana_A, "ア", Some("<A-ア>")),
+            (ALT, Keysym::Return, "\r", Some("<A-CR>")),
+            (ALT, Keysym::Escape, "\x1b", Some("<A-Esc>")),
+            (ALT, Keysym::F5, "", Some("<A-F5>")),
+            // Alt keeps case
+            (ALT_SHIFT, Keysym::A, "A", Some("<A-A>")),
+            (ALT_SHIFT, Keysym::ISO_Left_Tab, "\t", Some("<A-S-Tab>")),
+        ]);
     }
 
     #[test]
-    fn arrow_keys() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Left, ""),
-            Some("<Left>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Right, ""),
-            Some("<Right>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Up, ""),
-            Some("<Up>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::Down, ""),
-            Some("<Down>".into())
-        );
+    fn ctrl_and_alt_together() {
+        check(&[
+            (CTRL_ALT, Keysym::a, "\x01", Some("<A-C-a>")),
+            (CTRL_ALT, Keysym::backslash, "\x1c", Some("<A-C-\\>")),
+            (CTRL_ALT, Keysym::Return, "\r", Some("<A-C-CR>")),
+            (ALL, Keysym::ISO_Left_Tab, "\t", Some("<A-C-S-Tab>")),
+            (ALL, Keysym::A, "\x01", Some("<A-C-a>")),
+        ]);
     }
 
     #[test]
-    fn less_than_escaped() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::less, "<"),
-            Some("<lt>".into())
-        );
+    fn super_is_dropped() {
+        check(&[
+            (LOGO, Keysym::a, "a", None),
+            (LOGO, Keysym::Return, "\r", None),
+        ]);
     }
 
     #[test]
-    fn bare_modifier_returns_none() {
-        assert_eq!(keysym_to_vim(false, false, Keysym::Shift_L, ""), None);
-        assert_eq!(keysym_to_vim(false, false, Keysym::Shift_R, ""), None);
-        assert_eq!(keysym_to_vim(false, false, Keysym::Control_L, ""), None);
-        assert_eq!(keysym_to_vim(false, false, Keysym::Control_R, ""), None);
-        assert_eq!(keysym_to_vim(false, false, Keysym::Alt_L, ""), None);
-        assert_eq!(keysym_to_vim(false, false, Keysym::Super_L, ""), None);
+    fn no_vim_key() {
+        check(&[
+            (NONE, Keysym::Shift_L, "", None),
+            (NONE, Keysym::Control_L, "", None),
+            (CTRL, Keysym::Control_L, "", None),
+            (ALT, Keysym::Shift_L, "", None),
+            (NONE, Keysym::Menu, "", None),
+            (NONE, Keysym::XF86_AudioMute, "", None),
+        ]);
     }
 
-    #[test]
-    fn japanese_utf8() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::NoSymbol, "あ"),
-            Some("あ".into())
-        );
-    }
+    // ── key_name ──
 
     #[test]
-    fn kanji_utf8() {
-        assert_eq!(
-            keysym_to_vim(false, false, Keysym::NoSymbol, "漢"),
-            Some("漢".into())
-        );
-    }
-
-    // ── keysym_to_vim: Ctrl modifier ──
-
-    #[test]
-    fn ctrl_letter() {
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::a, "a"),
-            Some("<C-a>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::z, "z"),
-            Some("<C-z>".into())
-        );
-    }
-
-    #[test]
-    fn ctrl_special_keys() {
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::Return, ""),
-            Some("<C-CR>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::BackSpace, ""),
-            Some("<C-BS>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::Tab, ""),
-            Some("<C-Tab>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::space, ""),
-            Some("<C-Space>".into())
-        );
-    }
-
-    #[test]
-    fn ctrl_symbols_and_digits() {
-        // Ctrl turns utf8 into a control character; the keysym gives the key
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::backslash, "\x1c"),
-            Some("<C-\\>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::bracketleft, "\x1b"),
-            Some("<C-[>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::_1, "1"),
-            Some("<C-1>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(true, false, Keysym::less, "<"),
-            Some("<C-lt>".into())
-        );
-    }
-
-    #[test]
-    fn ctrl_modifier_only_returns_none() {
-        assert_eq!(keysym_to_vim(true, false, Keysym::Control_L, ""), None);
-    }
-
-    // ── keysym_to_vim: Alt modifier ──
-
-    #[test]
-    fn alt_letter() {
-        assert_eq!(
-            keysym_to_vim(false, true, Keysym::a, "a"),
-            Some("<A-a>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, true, Keysym::z, "z"),
-            Some("<A-z>".into())
-        );
-    }
-
-    #[test]
-    fn alt_special_keys() {
-        assert_eq!(
-            keysym_to_vim(false, true, Keysym::Return, ""),
-            Some("<A-CR>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, true, Keysym::Escape, ""),
-            Some("<A-Esc>".into())
-        );
-    }
-
-    #[test]
-    fn alt_printable_utf8() {
-        assert_eq!(
-            keysym_to_vim(false, true, Keysym::_1, "1"),
-            Some("<A-1>".into())
-        );
-        assert_eq!(
-            keysym_to_vim(false, true, Keysym::NoSymbol, "あ"),
-            Some("<A-あ>".into())
-        );
-    }
-
-    #[test]
-    fn alt_less_than_escaped() {
-        assert_eq!(
-            keysym_to_vim(false, true, Keysym::less, "<"),
-            Some("<A-lt>".into())
-        );
-    }
-
-    #[test]
-    fn alt_bare_modifier_returns_none() {
-        assert_eq!(keysym_to_vim(false, true, Keysym::Shift_L, ""), None);
-    }
-
-    // ── keysym_to_vim: Ctrl+Alt (Alt takes priority) ──
-
-    #[test]
-    fn ctrl_alt_letter_alt_wins() {
-        // When both ctrl and alt are true, alt branch is entered first
-        assert_eq!(
-            keysym_to_vim(true, true, Keysym::a, "a"),
-            Some("<A-a>".into())
-        );
-    }
-
-    #[test]
-    fn ctrl_alt_special_key_alt_wins() {
-        assert_eq!(
-            keysym_to_vim(true, true, Keysym::Return, ""),
-            Some("<A-CR>".into())
-        );
+    fn key_name_strips_modifiers() {
+        assert_eq!(key_name("<CR>"), Some("CR"));
+        assert_eq!(key_name("<C-CR>"), Some("CR"));
+        assert_eq!(key_name("<A-C-S-CR>"), Some("CR"));
+        assert_eq!(key_name("<C-->"), Some("-"));
+        assert_eq!(key_name("<C-lt>"), Some("lt"));
+        assert_eq!(key_name("a"), None);
+        assert_eq!(key_name("<lt>"), Some("lt"));
     }
 }

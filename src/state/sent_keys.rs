@@ -20,9 +20,6 @@ pub struct SentKey {
     pub mods: Modifiers,
     /// Key in Vim notation, as sent
     pub vim_key: String,
-    /// Ctrl / Alt held at the time of the press
-    pub ctrl: bool,
-    pub alt: bool,
 }
 
 #[derive(Default)]
@@ -76,8 +73,6 @@ mod tests {
             keycode,
             mods: Modifiers::default(),
             vim_key: "a".into(),
-            ctrl: false,
-            alt: false,
         }
     }
 

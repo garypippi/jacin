@@ -299,7 +299,7 @@ impl KeyProcessor {
             Some(LineKey::Commit)
         } else if key == "<BS>" {
             Some(LineKey::Backspace)
-        } else if matches!(key, "<CR>" | "<C-CR>" | "<A-CR>") {
+        } else if crate::keysym::key_name(key) == Some("CR") {
             Some(LineKey::Enter)
         } else {
             None
@@ -871,6 +871,8 @@ mod tests {
         for (key, buffer) in [
             ("<BS>", Buffer::Current),
             ("<CR>", Buffer::Current),
+            ("<S-CR>", Buffer::Current),
+            ("<A-C-CR>", Buffer::Current),
             (COMMIT, Buffer::Main),
         ] {
             let mut h = Harness::new(Mode::Insert);
@@ -895,7 +897,7 @@ mod tests {
 
     #[test]
     fn line_keys_edit_non_empty_buffer() {
-        for (key, sent) in [("<BS>", "<BS>"), ("<A-CR>", "<CR>")] {
+        for (key, sent) in [("<BS>", "<BS>"), ("<A-CR>", "<CR>"), ("<S-CR>", "<CR>")] {
             let mut h = Harness::new(Mode::Insert);
             h.key(key);
             h.mode(Mode::Insert, false);
